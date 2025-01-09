@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.49.7](https://github.com/postalsys/emailengine/compare/v2.49.6...v2.49.7) (2025-01-09)
+
+
+### Bug Fixes
+
+* **imap-auth:** Bumped ImapFlow dependency to fix issue with AUTHENTICATE LOGIN on some IMAP servers ([c1a5fba](https://github.com/postalsys/emailengine/commit/c1a5fbaedd7c1d3ade881ee48db8cc9e238a042b))
+
+## [2.49.6](https://github.com/postalsys/emailengine/compare/v2.49.5...v2.49.6) (2025-01-08)
+
+
+### Bug Fixes
+
+* **deps:** Bumped ImapFlow to handle invalid BODYSTRUCTURE from BlueMind ([1174a29](https://github.com/postalsys/emailengine/commit/1174a29aea60f5f2fc24c35eb565f0e2e1633e86))
+* **http-requests:** Use undici RetryAgent for HTTP request network errors and 429 rate limiting, removed custom 429 handler ([bafcd1c](https://github.com/postalsys/emailengine/commit/bafcd1c1551a2c00809b07d31e2ba67b1c9d19df))
+* **message-upload:** Fix message upload if uploading to a child folder of Inbox using MS Graph API ([2c14b5e](https://github.com/postalsys/emailengine/commit/2c14b5eb80ff1fe60e03504bd6550e06698210ee))
+* **ms-graph-api:** Upload message as a JSON structure instead of EML with MS Graph API in order to set meta info like flags ([c7fde6f](https://github.com/postalsys/emailengine/commit/c7fde6fedb127773cfbf4cff1937cad1a91148cd))
+* **ui:** Replaced 2024 with 2025 in static HTML pages ([99e805b](https://github.com/postalsys/emailengine/commit/99e805b5ce1e373b60bbaa2b9f0fa138f8f8d27b))
+
+## [2.49.5](https://github.com/postalsys/emailengine/compare/v2.49.4...v2.49.5) (2024-12-30)
+
+
+### Bug Fixes
+
+* **Auth-server:** Ensure correct oauth2 username and history ID for accounts added with auth server ([aa68c0d](https://github.com/postalsys/emailengine/commit/aa68c0d7519565d0ce7915a4397148199fc664d2))
+* **oauth-flow:** Fixed page title on the redirect page after OAuth2 code has been received ([b2c0c5a](https://github.com/postalsys/emailengine/commit/b2c0c5a28da3550eeb8754b5efec18254b6d8ff5))
+* **templates:** Allow setting brand name to replace 'EmailEngine' in the HTML title ([bf85c06](https://github.com/postalsys/emailengine/commit/bf85c06aaf92d2f3d54dbfde5771a2df3a71b9b9))
+
+## [2.49.4](https://github.com/postalsys/emailengine/compare/v2.49.3...v2.49.4) (2024-12-13)
+
+
+### Bug Fixes
+
+* **cors:** Removed custom OPTIONS preflight handler in favor of default Hapi CORS handler ([6427728](https://github.com/postalsys/emailengine/commit/6427728bcc56249bb4acb4adcc817bd9c2221f2f))
+* **oauth2:** Fixed field encryption for OAuth2 apps ([a0c3eaa](https://github.com/postalsys/emailengine/commit/a0c3eaacc117257e3b1303f161650c0b16ff051f))
+
 ## [2.49.3](https://github.com/postalsys/emailengine/compare/v2.49.2...v2.49.3) (2024-12-09)
 
 
