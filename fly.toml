@@ -20,7 +20,7 @@ primary_region = 'ams'
 [[vm]]
   memory = '2gb'
   cpu_kind = 'shared'
-  cpus = 1
+  cpus = 4
 
 [env]
   HOSTNAME = "0.0.0.0"
