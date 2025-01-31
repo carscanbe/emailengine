@@ -11,11 +11,19 @@ RUN printf "I'm building for TARGETPLATFORM=${TARGETPLATFORM}" \
     && printf "and  uname -m : " && uname -mm
 
 RUN apk add --no-cache dumb-init
+RUN apk add --no-cache curl
+RUN apk add --no-cache bash
 
 # Create a non-root user and group
 RUN addgroup -S emailenginegroup && adduser -S emailengineuser -G emailenginegroup
 
 WORKDIR /emailengine
+
+# Copy cron stuff
+COPY run_monitor.sh /run_monitor.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+RUN chmod +x /run_monitor.sh
 
 # Copy app folders
 COPY config config
@@ -49,4 +57,5 @@ ENV EENGINE_HOST=0.0.0.0
 ENV EENGINE_API_PROXY=true
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-CMD ["node", "/emailengine/server.js"]
+#CMD ["node", "/emailengine/server.js"]
+CMD ["bash", "/entrypoint.sh"]
