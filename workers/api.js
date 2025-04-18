@@ -163,7 +163,11 @@ const {
     outboxEntrySchema,
     googleProjectIdSchema,
     googleWorkspaceAccountsSchema,
-    messageReferenceSchema
+    googleTopicNameSchema,
+    googleSubscriptionNameSchema,
+    messageReferenceSchema,
+    idempotencyKeySchema,
+    headerTimeoutSchema
 } = require('../lib/schemas');
 
 const listMessageFolderPathDescription =
@@ -518,6 +522,24 @@ const init = async () => {
 
     handlebars.registerHelper('inc', (nr, inc) => Number(nr) + Number(inc));
 
+    handlebars.registerHelper('json', payload => {
+        let res;
+        try {
+            res = typeof payload === 'undefined' ? 'undefined' : JSON.stringify(payload, false, 2);
+        } catch (err) {
+            res = util.inspect(payload, false, 4, false);
+        }
+        return new handlebars.SafeString(res);
+    });
+
+    handlebars.registerHelper('lastVal', (value, separator) => {
+        separator = separator || '/';
+
+        let res = (value || '').toString().split(separator).pop();
+
+        return new handlebars.SafeString(res);
+    });
+
     handlebars.registerHelper('formatInteger', (intVal, locale) => {
         if (isNaN(intVal)) {
             // ignore non-numbers
@@ -555,13 +577,7 @@ const init = async () => {
                     convert: true
                 },
                 headers: Joi.object({
-                    'x-ee-timeout': Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(2 * 3600 * 1000)
-                        .optional()
-                        .description(`Override the \`EENGINE_TIMEOUT\` environment variable for a single API request (in milliseconds)`)
-                        .label('X-EE-Timeout')
+                    'x-ee-timeout': headerTimeoutSchema
                 }).unknown()
             }
         }
@@ -5252,7 +5268,10 @@ const init = async () => {
             });
 
             try {
-                return await accountObject.queueMessage(request.payload, { source: 'api' });
+                return await accountObject.queueMessage(request.payload, {
+                    source: 'api',
+                    idempotencyKey: request.headers['idempotency-key']
+                });
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -5297,6 +5316,11 @@ const init = async () => {
                 params: Joi.object({
                     account: accountIdSchema.required()
                 }),
+
+                headers: Joi.object({
+                    'x-ee-timeout': headerTimeoutSchema,
+                    'idempotency-key': idempotencyKeySchema
+                }).unknown(),
 
                 payload: Joi.object({
                     reference: messageReferenceSchema,
@@ -6851,6 +6875,8 @@ const init = async () => {
 
                                 googleProjectId: googleProjectIdSchema,
                                 googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                                googleTopicName: googleTopicNameSchema,
+                                googleSubscriptionName: googleSubscriptionNameSchema,
 
                                 serviceClientEmail: Joi.string()
                                     .email()
@@ -6980,6 +7006,8 @@ const init = async () => {
 
                     googleProjectId: googleProjectIdSchema,
                     googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                    googleTopicName: googleTopicNameSchema,
+                    googleSubscriptionName: googleSubscriptionNameSchema,
 
                     serviceClientEmail: Joi.string()
                         .email()
@@ -7155,6 +7183,8 @@ const init = async () => {
 
                     googleProjectId: googleProjectIdSchema,
                     googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                    googleTopicName: googleTopicNameSchema,
+                    googleSubscriptionName: googleSubscriptionNameSchema,
 
                     serviceClientEmail: Joi.string()
                         .email()

@@ -138,7 +138,7 @@
             <label for="serviceClientEmail">
                 Client Email
             </label>
-            <input type="text" class="form-control {{#if errors.serviceClientEmail}}is-invalid{{/if}}"
+            <input type="email" class="form-control {{#if errors.serviceClientEmail}}is-invalid{{/if}}"
                 id="serviceClientEmail" name="serviceClientEmail" value="{{values.serviceClientEmail}}"
                 placeholder="Enter the principal of the service, for example &quot;name@project-123.iam.gserviceaccount.com&quot;"
                 required />
@@ -153,7 +153,8 @@
                 Service client
             </label>
             <input type="text" class="form-control {{#if errors.serviceClient}}is-invalid{{/if}}" id="serviceClient"
-                name="serviceClient" value="{{values.serviceClient}}" placeholder="Enter service client ID&mldr;" />
+                name="serviceClient" value="{{values.serviceClient}}" placeholder="Enter service client ID&mldr;"
+                required />
             {{#if errors.serviceClient}}
             <span class="invalid-feedback">{{errors.serviceClient}}</span>
             {{/if}}
@@ -167,8 +168,8 @@
             <textarea class="form-control droptxt autoselect {{#if errors.serviceKey}}is-invalid{{/if}}" id="serviceKey"
                 name="serviceKey" rows="4" data-enable-grammarly="false" spellcheck="false" {{#if
                 hasServiceKey}}placeholder="Service key is set but not shown&mldr;" {{else}}
-                placeholder="Starts with &quot;-----BEGIN PRIVATE KEY-----&quot;&mldr;"
-                {{/if}}>{{values.serviceKey}}</textarea>
+                placeholder="Starts with &quot;-----BEGIN PRIVATE KEY-----&quot;&mldr;" {{/if}} {{#unless
+                hasServiceKey}}required{{/unless}}>{{values.serviceKey}}</textarea>
             {{#if errors.serviceKey}}
             <span class="invalid-feedback">{{errors.serviceKey}}</span>
             {{/if}}
@@ -356,8 +357,8 @@
             <tr>
                 <td>
                     <div class="form-check">
-                        <input class="form-check-input" type="radio" name="baseScopes" id="baseScopesImap" value="imap"
-                            {{#if baseScopesImap}}checked{{/if}}>
+                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
+                            id="baseScopesImap" value="imap" {{#if baseScopesImap}}checked{{/if}}>
                         <label class="form-check-label" for="baseScopesImap">
                             IMAP and SMTP
                         </label>
@@ -370,8 +371,8 @@
             <tr>
                 <td>
                     <div class="form-check">
-                        <input class="form-check-input" type="radio" name="baseScopes" id="baseScopesPubsub"
-                            value="pubsub" {{#if baseScopesPubsub}}checked{{/if}}>
+                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
+                            id="baseScopesPubsub" value="pubsub" {{#if baseScopesPubsub}}checked{{/if}}>
                         <label class="form-check-label" for="baseScopesPubsub">
                             Cloud Pub/Sub <span class="badge badge-dark">beta</span>
                         </label>
@@ -409,6 +410,67 @@
         </tbody>
 
     </table>
+
+    <div id="select-pubsub-app" class="card-footer {{#unless baseScopesPubsub}}d-none{{/unless}}">
+
+        {{#if actionCreate}}
+
+        <div class="form-group">
+            <label for="googleTopicName">
+                Google Pub/Sub Topic Name
+            </label>
+            <input type="text" class="form-control {{#if errors.googleTopicName}}is-invalid{{/if}}" id="googleTopicName"
+                name="googleTopicName" value="{{values.googleTopicName}}"
+                placeholder="Enter the Topic Name for the Google Pub/Sub subscription, for example &quot;ee-pub-12345&quot;" />
+            {{#if errors.googleTopicName}}
+            <span class="invalid-feedback">{{errors.googleTopicName}}</span>
+            {{/if}}
+            <small class="form-text text-muted">OAuth2 Pub/Sub Topic Name. Automatically generated if not set.</small>
+        </div>
+
+        <div class="form-group">
+            <label for="googleSubscriptionName">
+                Google Pub/Sub Subscription Name
+            </label>
+            <input type="text" class="form-control {{#if errors.googleSubscriptionName}}is-invalid{{/if}}"
+                id="googleSubscriptionName" name="googleSubscriptionName" value="{{values.googleSubscriptionName}}"
+                placeholder="Enter the Subscription Name for the Google Pub/Sub subscription, for example &quot;ee-sub-12345&quot;" />
+            {{#if errors.googleSubscriptionName}}
+            <span class="invalid-feedback">{{errors.googleSubscriptionName}}</span>
+            {{/if}}
+            <small class="form-text text-muted">OAuth2 Pub/Sub Subscription Name. Automatically generated if not
+                set.</small>
+        </div>
+
+        {{else}}
+
+        <dl class="row">
+
+            <dt class="col-sm-3">Pub/Sub Topic</dt>
+            <dd class="col-sm-9">
+                {{#if appData.pubSubTopic}}
+
+                <code>{{lastVal appData.pubSubTopic "/"}}</code>
+                {{else}}
+                Not initialized
+                {{/if}}
+            </dd>
+
+
+            <dt class="col-sm-3">Pub/Sub Subscription</dt>
+            <dd class="col-sm-9">
+                {{#if appData.pubSubSubscription}}
+                <code>{{lastVal appData.pubSubSubscription "/"}}</code>
+                {{else}}
+                Not initialized
+                {{/if}}
+            </dd>
+        </dl>
+
+
+        {{/if}}
+
+    </div>
 
 </div>
 {{/if}}
@@ -682,7 +744,9 @@
         <div class="card-body">
 
             <p>Here you can list OAuth2 scopes that EmailEngine should not use. This is mainly needed
-                when you want to disable some base scopes like <code>SMTP.Send</code> in Outlook.</p>
+                when you want to disable some default scopes like <code>"SMTP.Send"</code> in Outlook or
+                <code>"https://www.googleapis.com/auth/gmail.modify"</code> in Gmail.
+            </p>
 
             <div class="form-group">
                 <label for="skipScopes">List of disabled OAuth2 scopes</label>
@@ -709,6 +773,7 @@
 
         function checkScopesRadio() {
             let baseScopesAPIElm = document.getElementById('baseScopesAPI');
+            let baseScopesPubsubElm = document.getElementById('baseScopesPubsub');
             let selectPubsubAppElm = document.getElementById('select-pubsub-app');
 
             if (baseScopesAPIElm && selectPubsubAppElm) {
@@ -720,6 +785,15 @@
                     pubSubAppElm.disabled = true;
                 }
             }
+
+            if (baseScopesPubsubElm && selectPubsubAppElm) {
+                if (baseScopesPubsubElm.checked) {
+                    selectPubsubAppElm.classList.remove('d-none');
+                } else {
+                    selectPubsubAppElm.classList.add('d-none');
+                }
+            }
+
         }
 
         document.querySelectorAll('.base-scopes-radio').forEach(radioElm => {
@@ -805,6 +879,10 @@
         let authorityElms = document.querySelectorAll('.r-auth');
         let tenantElm = document.getElementById('tenant');
         let checkAuthorityState = () => {
+            if (!tenantElm) {
+                return
+            }
+
             let showtenant = false;
             for (let aElm of authorityElms) {
                 if (aElm.checked) {

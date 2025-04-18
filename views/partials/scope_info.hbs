@@ -1,5 +1,7 @@
 {{#if activeGmail}}
-<div>Your OAuth2 project <strong>must</strong> have the following scopes enabled:</div>
+<div>Your <a href="https://console.cloud.google.com/auth/scopes?project={{app.googleProjectId}}">OAuth2 project</a>
+    <strong>must</strong> have the following scopes enabled{{#if disabledScopes.Gmail_Modify}} and
+    also listed in the <em>Custom OAuth2 scopes</em> section{{/if}}:</div>
 <ul>
 
     {{#if baseScopesImap}}
@@ -7,7 +9,14 @@
     {{/if}}
 
     {{#if baseScopesApi}}
+
+    {{#unless disabledScopes.Gmail_Modify}}
     <li><code>"https://www.googleapis.com/auth/gmail.modify"</code></li>
+    {{else}}
+    <li><code>"https://www.googleapis.com/auth/gmail.readonly"</code></li>
+    <li><code>"https://www.googleapis.com/auth/gmail.labels"</code></li>
+    {{/unless}}
+
     {{/if}}
 
     {{#if baseScopesPubsub}}
@@ -15,6 +24,7 @@
     {{/if}}
 
 </ul>
+
 <div>Read about setting up the OAuth2 project in Google Cloud from
 
     {{#if baseScopesImap}}
