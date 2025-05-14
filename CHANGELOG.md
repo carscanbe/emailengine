@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.52.4](https://github.com/postalsys/emailengine/compare/v2.52.3...v2.52.4) (2025-05-13)
+
+
+### Bug Fixes
+
+* **encryption:** Cache keys in memory to avoid using scrypt every time a secret is accessed ([cbfcde5](https://github.com/postalsys/emailengine/commit/cbfcde507cbb920ac888e0c23f13437c0b4017f4))
+* **message/rfc822:** Fixed message/rfc822 attachment handling when sending emails ([af2bf30](https://github.com/postalsys/emailengine/commit/af2bf308a7634c01c065f06c75503597b6c42690))
+* **UI:** prevent trying to format a non-existing timestamp value ([d97bb92](https://github.com/postalsys/emailengine/commit/d97bb923de611c5bd45b0ef7df1ddbbec0b184b1))
+* **webhooks:** Include envelope property in messageSent for Gmail API and MS Graph API submissions ([6b1a3fa](https://github.com/postalsys/emailengine/commit/6b1a3fa98b6370af5ba006ee486d400737fd9845))
+
+## [2.52.3](https://github.com/postalsys/emailengine/compare/v2.52.2...v2.52.3) (2025-05-01)
+
+
+### Bug Fixes
+
+* **gmail-api:** Fixed special use label handling when updating messages ([9e06ed7](https://github.com/postalsys/emailengine/commit/9e06ed79c3c1e4db0995df64f84c587e02645a7e))
+
+## [2.52.2](https://github.com/postalsys/emailengine/compare/v2.52.1...v2.52.2) (2025-04-30)
+
+
+### Bug Fixes
+
+* Allow adding shared MS accounts directly via the /v1/accounts endpoint ([c77e61e](https://github.com/postalsys/emailengine/commit/c77e61ea16d67c84b1a7b1b0d49f60f577a73839))
+* Dutch translations ([#526](https://github.com/postalsys/emailengine/issues/526)) ([ebbd783](https://github.com/postalsys/emailengine/commit/ebbd783d5787f056b1d25a22f15932b18dd6deff))
+* **schema:** Updated settings schema descriptions. Added imapClient... setting keys to configure RFC2971 IMAP ID extension ([bc38322](https://github.com/postalsys/emailengine/commit/bc383225a522c4c7b1912f260f9a902a6e4be4b1))
+
+## [2.52.1](https://github.com/postalsys/emailengine/compare/v2.52.0...v2.52.1) (2025-04-18)
+
+
+### Bug Fixes
+
+* **messageBounce:** Check messages in the Junk folder as well for bounces ([0def3e3](https://github.com/postalsys/emailengine/commit/0def3e3635376118ea9379369f018b52f0f8d66e))
+* **workmail:** better detection of bounce emails with AWS WorkMail ([1a8e750](https://github.com/postalsys/emailengine/commit/1a8e7503447f1a6db4b67fa9771374274c9f2e3b))
+
 ## [2.52.0](https://github.com/postalsys/emailengine/compare/v2.51.3...v2.52.0) (2025-04-10)
 
 
