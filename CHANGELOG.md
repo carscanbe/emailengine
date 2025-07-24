@@ -1,5 +1,62 @@
 # Changelog
 
+## [2.53.3](https://github.com/postalsys/emailengine/compare/v2.53.2...v2.53.3) (2025-07-17)
+
+
+### Bug Fixes
+
+* **delegated-oauth:** Handle delegated MS Graph account properly if created using delegated=true ([4cece01](https://github.com/postalsys/emailengine/commit/4cece016eac3033aae14422a31444c93c8375423))
+* **MS-Graph:** Fixed IMAP and SMTP hosts for Government Cloud accounts ([e78a9cb](https://github.com/postalsys/emailengine/commit/e78a9cb6c480c740c2c3abb9b50a8c7c7f6e7ee7))
+* **no-active-handler:** Fixed response code 200 for No Active Handler response ([067a37b](https://github.com/postalsys/emailengine/commit/067a37b4326d4ab0f4d2ae188220a0716921c0f0))
+* **search:** Prefer WITHIN extension and YOUNGER/OLDER for SINCE/BEFORE searches ([34d5889](https://github.com/postalsys/emailengine/commit/34d5889b84812537ca592089f58abde5d4005223))
+
+## [2.53.2](https://github.com/postalsys/emailengine/compare/v2.53.1...v2.53.2) (2025-07-09)
+
+
+### Bug Fixes
+
+* **language:** Added language selection with ?locale=et query argument ([b911ec3](https://github.com/postalsys/emailengine/commit/b911ec31e93c75be281d7f79f18b9dcbab2ba1cb))
+* **no active handler:** Return 503 error, not 200 ([d1e0702](https://github.com/postalsys/emailengine/commit/d1e070292df2000005cca2f000094fc21e5d43df))
+* **smtp:** Improved Message-ID rewriting detection for AWS SES ([fbe7ff3](https://github.com/postalsys/emailengine/commit/fbe7ff3b99b4142cc263d15dcea47733f343a2ce))
+* Special envelope handling for LarkSuite accounts ([f448d39](https://github.com/postalsys/emailengine/commit/f448d39ecb958f926c05a28d7ad3ca110f16c17a))
+
+## [2.53.1](https://github.com/postalsys/emailengine/compare/v2.53.0...v2.53.1) (2025-07-04)
+
+
+### Bug Fixes
+
+* **multi-operations:** Added new search term 'emailIds', if set it will use the predefined email IDs instead of executing the search ([aac3aab](https://github.com/postalsys/emailengine/commit/aac3aab65e1eea3b51ea302b5634f3e2b1a30063))
+* removed dotenv debug log line ([9c5fc1b](https://github.com/postalsys/emailengine/commit/9c5fc1b4b3cb1c38c7604eec75f5427bf0f8482b))
+* **webhooks:** Include a HMAC signature in webhook headers ([7516188](https://github.com/postalsys/emailengine/commit/75161881c9100c2d5a2bec22790aa3311a2de87f))
+
+## [2.53.0](https://github.com/postalsys/emailengine/compare/v2.52.6...v2.53.0) (2025-06-30)
+
+
+### Features
+
+* Use persistent SMTP connections instead of logging separately for every email sent by the same account ([866e24f](https://github.com/postalsys/emailengine/commit/866e24fd06760ab92752629b259577fcf620b781))
+
+
+### Bug Fixes
+
+* Bumped deps to fix formwat=flowed parsing issue ([efffe4e](https://github.com/postalsys/emailengine/commit/efffe4e7be778667a1119343e71e86817e1dc71e))
+
+## [2.52.6](https://github.com/postalsys/emailengine/compare/v2.52.5...v2.52.6) (2025-06-23)
+
+
+### Bug Fixes
+
+* Reverted ICOn handling for windows app ([7abba87](https://github.com/postalsys/emailengine/commit/7abba87b749ed36ccd663dabfc26fa7a2d2b320d))
+* **submit:** Added configuration ENV option EENGINE_SUBMIT_DELAY / --submitDelay=duration argument to allow rate limiting message sending (this is global, not account specific) ([531caad](https://github.com/postalsys/emailengine/commit/531caadb00d8b7d8710668509845d9452c9c924d))
+* **translations:** Allow changing active language with ?lang=lang_code query argument ([1f2a0e6](https://github.com/postalsys/emailengine/commit/1f2a0e6070a9dfa5989e6055648fb1d0f4d8c095))
+
+## [2.52.5](https://github.com/postalsys/emailengine/compare/v2.52.4...v2.52.5) (2025-05-20)
+
+
+### Bug Fixes
+
+* **virtual-list:** Fixed authentication requirement for the public re-subscribe page ([956fdfa](https://github.com/postalsys/emailengine/commit/956fdfaaa0946004939e9774a42306b50b51d7aa))
+
 ## [2.52.4](https://github.com/postalsys/emailengine/compare/v2.52.3...v2.52.4) (2025-05-13)
 
 

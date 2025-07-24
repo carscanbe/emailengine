@@ -1,30 +1,51 @@
 'use strict';
 
+/**
+ * EmailEngine Main Server Module
+ *
+ * This is the main entry point for EmailEngine - a self-hosted email automation platform.
+ * It manages worker threads for IMAP connections, webhooks, email submission, and various
+ * proxy servers (SMTP, IMAP).
+ *
+ * @module server
+ * @requires dotenv
+ * @requires worker_threads
+ * @requires wild-config
+ * @see {@link https://emailengine.app}
+ */
+
+// Load environment variables if not already loaded
 if (!process.env.EE_ENV_LOADED) {
-    require('dotenv').config(); // eslint-disable-line global-require
+    require('dotenv').config({ quiet: true }); // eslint-disable-line global-require
     process.env.EE_ENV_LOADED = 'true';
 }
 
+// Attempt to change working directory to script location
 try {
     process.chdir(__dirname);
 } catch (err) {
-    // ignore
+    // ignore - may fail in some containerized environments
 }
 
+// Set process title for easier identification in process lists
 process.title = 'emailengine';
 
+// Ensure Node.js version supports structuredClone (Node 17+)
 try {
     structuredClone(true);
 } catch (err) {
-    console.error(`Please upgrade your Node.js version as the current version (${process.version}) is not supported.`);
+    console.error(`Node.js version ${process.version} is not supported. Please upgrade to Node.js 17 or later.`);
     process.exit(1);
 }
 
 const os = require('os');
+
+// Set UV thread pool size for better async I/O performance
+// Defaults to number of CPU cores (minimum 4)
 process.env.UV_THREADPOOL_SIZE =
     process.env.UV_THREADPOOL_SIZE && !isNaN(process.env.UV_THREADPOOL_SIZE) ? Number(process.env.UV_THREADPOOL_SIZE) : Math.max(os.cpus().length, 4);
 
-// cache before wild-config
+// Cache command line arguments before wild-config processes them
 const argv = process.argv.slice(2);
 
 const { Worker: WorkerThread, SHARE_ENV } = require('worker_threads');
@@ -32,6 +53,7 @@ const packageData = require('./package.json');
 const config = require('wild-config');
 const logger = require('./lib/logger');
 
+// Import utility functions
 const {
     readEnvValue,
     hasEnvValue,
@@ -49,6 +71,7 @@ const {
     retryAgent
 } = require('./lib/tools');
 
+// Import constants
 const {
     MAX_DAYS_STATS,
     MESSAGE_NEW_NOTIFY,
@@ -61,6 +84,7 @@ const {
     LIST_SUBSCRIBE_NOTIFY
 } = require('./lib/consts');
 
+// Import core modules
 const { webhooks: Webhooks } = require('./lib/webhooks');
 const {
     generateSummary,
@@ -75,6 +99,7 @@ const { fetch: fetchCmd } = require('undici');
 
 const v8 = require('node:v8');
 
+// Initialize Bugsnag error tracking if API key is provided
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
     Bugsnag.start({
@@ -98,6 +123,7 @@ if (readEnvValue('BUGSNAG_API_KEY')) {
     logger.notifyError = Bugsnag.notify.bind(Bugsnag);
 }
 
+// Import additional dependencies
 const pathlib = require('path');
 const { redis, queueConf } = require('./lib/db');
 const promClient = require('prom-client');
@@ -117,13 +143,15 @@ const getSecret = require('./lib/get-secret');
 
 const msgpack = require('msgpack5')();
 
+// Initialize default configuration values if not set
 config.service = config.service || {};
 
+// Default worker thread counts
 config.workers = config.workers || {
-    imap: 4,
-    webhooks: 1,
-    submit: 1,
-    imapProxy: 1
+    imap: 4, // IMAP connection handlers
+    webhooks: 1, // Webhook processors
+    submit: 1, // Email submission workers
+    imapProxy: 1 // IMAP proxy server
 };
 
 config.dbs = config.dbs || {
@@ -139,6 +167,7 @@ config.api = config.api || {
     host: '127.0.0.1'
 };
 
+// SMTP proxy server configuration
 config.smtp = config.smtp || {
     enabled: false,
     port: 2525,
@@ -147,6 +176,7 @@ config.smtp = config.smtp || {
     proxy: false
 };
 
+// IMAP proxy server configuration
 config['imap-proxy'] = config['imap-proxy'] || {
     enabled: false,
     port: 2993,
@@ -155,22 +185,29 @@ config['imap-proxy'] = config['imap-proxy'] || {
     proxy: false
 };
 
-const NOW = Date.now(); // time of start
+// Application start timestamp
+const NOW = Date.now();
 
+// Timeout configuration
 const DEFAULT_EENGINE_TIMEOUT = 10 * 1000;
 const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.service.commandTimeout) || DEFAULT_EENGINE_TIMEOUT;
-const DEFAULT_MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024;
-const SUBSCRIPTION_CHECK_TIMEOUT = 1 * 24 * 60 * 60 * 1000;
-const SUBSCRIPTION_RECHECK_TIMEOUT = 1 * 60 * 60 * 1000;
-const SUBSCRIPTION_ALLOW_DELAY = 28 * 24 * 60 * 60 * 1000;
 
+// Size limits
+const DEFAULT_MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
+
+// License check intervals
+const SUBSCRIPTION_CHECK_TIMEOUT = 1 * 24 * 60 * 60 * 1000; // 24 hours
+const SUBSCRIPTION_RECHECK_TIMEOUT = 1 * 60 * 60 * 1000; // 1 hour
+const SUBSCRIPTION_ALLOW_DELAY = 28 * 24 * 60 * 60 * 1000; // 28 days grace period
+
+// Delay between account connection setups (to avoid overwhelming the system)
 const CONNECTION_SETUP_DELAY = getDuration(readEnvValue('EENGINE_CONNECTION_SETUP_DELAY') || config.service.setupDelay) || 0;
 
+// Override configuration with environment variables
 config.api.maxSize = getByteSize(readEnvValue('EENGINE_MAX_SIZE') || config.api.maxSize) || DEFAULT_MAX_ATTACHMENT_SIZE;
 config.dbs.redis = readEnvValue('EENGINE_REDIS') || readEnvValue('REDIS_URL') || config.dbs.redis;
 
 config.workers.imap = getWorkerCount(readEnvValue('EENGINE_WORKERS') || config.workers.imap) || 4;
-
 config.workers.webhooks = Number(readEnvValue('EENGINE_WORKERS_WEBHOOKS')) || config.workers.webhooks || 1;
 config.workers.submit = Number(readEnvValue('EENGINE_WORKERS_SUBMIT')) || config.workers.submit || 1;
 
@@ -180,13 +217,14 @@ config.api.host = readEnvValue('EENGINE_HOST') || config.api.host;
 
 config.log.level = readEnvValue('EENGINE_LOG_LEVEL') || config.log.level;
 
-// legacy options, will be removed in the future
+// Legacy SMTP configuration options (will be removed in future versions)
 const SMTP_ENABLED = hasEnvValue('EENGINE_SMTP_ENABLED') ? getBoolean(readEnvValue('EENGINE_SMTP_ENABLED')) : getBoolean(config.smtp.enabled);
 const SMTP_SECRET = readEnvValue('EENGINE_SMTP_SECRET') || config.smtp.secret;
 const SMTP_PORT = (readEnvValue('EENGINE_SMTP_PORT') && Number(readEnvValue('EENGINE_SMTP_PORT'))) || Number(config.smtp.port) || 2525;
 const SMTP_HOST = readEnvValue('EENGINE_SMTP_HOST') || config.smtp.host || '127.0.0.1';
 const SMTP_PROXY = hasEnvValue('EENGINE_SMTP_PROXY') ? getBoolean(readEnvValue('EENGINE_SMTP_PROXY')) : getBoolean(config.smtp.proxy);
 
+// IMAP proxy configuration
 const IMAP_PROXY_ENABLED = hasEnvValue('EENGINE_IMAP_PROXY_ENABLED')
     ? getBoolean(readEnvValue('EENGINE_IMAP_PROXY_ENABLED'))
     : getBoolean(config['imap-proxy'].enabled);
@@ -198,13 +236,16 @@ const IMAP_PROXY_PROXY = hasEnvValue('EENGINE_IMAP_PROXY_PROXY')
     ? getBoolean(readEnvValue('EENGINE_IMAP_PROXY_PROXY'))
     : getBoolean(config['imap-proxy'].proxy);
 
+// Metrics collection interval - consider connections recent if started within 10 minutes
 const METRIC_RECENT = 10 * 60 * 1000; // 10min
 
+// API proxy configuration
 const HAS_API_PROXY_SET = hasEnvValue('EENGINE_API_PROXY') || typeof config.api.proxy !== 'undefined';
 const API_PROXY = hasEnvValue('EENGINE_API_PROXY') ? getBoolean(readEnvValue('EENGINE_API_PROXY')) : getBoolean(config.api.proxy);
 
+// Log startup information
 logger.info({
-    msg: 'Starting EmailEngine',
+    msg: 'EmailEngine starting up',
     version: packageData.version,
     node: process.versions.node,
     uvThreadpoolSize: Number(process.env.UV_THREADPOOL_SIZE),
@@ -213,23 +254,33 @@ logger.info({
     workersSubmission: config.workers.submit
 });
 
-const NO_ACTIVE_HANDLER_RESP = {
-    error: 'No active handler for requested account. Try again later.',
-    statusCode: 503,
-    code: 'WorkerNotAvailable'
-};
+// Standard response for when no active worker is available
+const NO_ACTIVE_HANDLER_RESP_ERR = new Error('No active handler for requested account. Try again later.');
+NO_ACTIVE_HANDLER_RESP_ERR.statusCode = 503;
+NO_ACTIVE_HANDLER_RESP_ERR.code = 'WorkerNotAvailable';
 
-// check for upgrades once in 8 hours
-const UPGRADE_CHECK_TIMEOUT = 1 * 24 * 3600 * 1000;
-const LICENSE_CHECK_TIMEOUT = 20 * 60 * 1000;
-const MAX_LICENSE_CHECK_DELAY = 30 * 24 * 60 * 60 * 1000;
+// Update check intervals
+const UPGRADE_CHECK_TIMEOUT = 1 * 24 * 3600 * 1000; // 24 hours
+const LICENSE_CHECK_TIMEOUT = 20 * 60 * 1000; // 20 minutes
+const MAX_LICENSE_CHECK_DELAY = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+/**
+ * License information object
+ * @typedef {Object} LicenseInfo
+ * @property {boolean} active - Whether license is active
+ * @property {Object|boolean} details - License details or false if no license
+ * @property {string} type - License type description
+ */
 const licenseInfo = {
     active: false,
     details: false,
     type: packageData.license
 };
 
+/**
+ * Human-readable thread type names for display
+ * @const {Object<string, string>}
+ */
 const THREAD_NAMES = {
     main: 'Main thread',
     imap: 'IMAP worker',
@@ -241,20 +292,27 @@ const THREAD_NAMES = {
     smtp: 'SMTP proxy server'
 };
 
+/**
+ * Configuration key-value mappings for different thread types
+ * @const {Object<string, {key: string, value: number}>}
+ */
 const THREAD_CONFIG_VALUES = {
     imap: { key: 'EENGINE_WORKERS', value: config.workers.imap },
     submit: { key: 'EENGINE_WORKERS_SUBMIT', value: config.workers.submit },
     webhooks: { key: 'EENGINE_WORKERS_WEBHOOKS', value: config.workers.webhooks }
 };
 
+// Queue event handlers for different job queues
 const queueEvents = {};
 
+// Unique run index for this server instance
 let runIndex;
 
+// Prepared configuration handling
 let preparedSettings = false;
 const preparedSettingsString = readEnvValue('EENGINE_SETTINGS') || config.settings;
 if (preparedSettingsString) {
-    // received a configuration block
+    // Parse and validate pre-configured settings
     try {
         const { error, value } = Joi.object(settingsSchema).validate(JSON.parse(preparedSettingsString), {
             abortEarly: false,
@@ -268,42 +326,49 @@ if (preparedSettingsString) {
 
         preparedSettings = value;
     } catch (err) {
-        logger.error({ msg: 'Received invalid settings string', input: preparedSettingsString, err });
+        logger.error({ msg: 'Invalid settings configuration provided', input: preparedSettingsString, err });
         logger.flush(() => process.exit(1));
     }
 }
 
+// Prepared token handling for pre-configured API tokens
 let preparedToken = false;
 const preparedTokenString = readEnvValue('EENGINE_PREPARED_TOKEN') || config.preparedToken;
 if (preparedTokenString) {
     try {
         preparedToken = msgpack.decode(Buffer.from(preparedTokenString, 'base64url'));
         if (!preparedToken || !/^[0-9a-f]{64}$/i.test(preparedToken.id)) {
-            throw new Error('Invalid token format');
+            throw new Error('Token format is invalid');
         }
     } catch (err) {
-        logger.error({ msg: 'Received invalid token string', input: preparedTokenString, err });
+        logger.error({ msg: 'Invalid API token provided', input: preparedTokenString, err });
         logger.flush(() => process.exit(1));
     }
 }
 
+// Prepared password handling for pre-configured admin passwords
 let preparedPassword = false;
 const preparedPasswordString = readEnvValue('EENGINE_PREPARED_PASSWORD') || config.preparedPassword;
 if (preparedPasswordString) {
     try {
         preparedPassword = Buffer.from(preparedPasswordString, 'base64url').toString();
         if (!preparedPassword || preparedPassword.indexOf('$pbkdf2') !== 0) {
-            throw new Error('Invalid password format');
+            throw new Error('Password format is invalid');
         }
     } catch (err) {
-        logger.error({ msg: 'Received invalid password string', input: preparedPasswordString, err });
+        logger.error({ msg: 'Invalid password hash provided', input: preparedPasswordString, err });
         logger.flush(() => process.exit(1));
     }
 }
 
+// Initialize Prometheus metrics collection
 const collectDefaultMetrics = promClient.collectDefaultMetrics;
 collectDefaultMetrics({});
 
+/**
+ * Prometheus metrics definitions for monitoring
+ * @const {Object}
+ */
 const metrics = {
     threadStarts: new promClient.Counter({
         name: 'thread_starts',
@@ -490,34 +555,51 @@ const metrics = {
     })
 };
 
-let callQueue = new Map();
-let mids = 0;
+// Inter-thread communication tracking
+let callQueue = new Map(); // Tracks pending cross-thread calls
+let mids = 0; // Message ID counter
 
-let isClosing = false;
-let assigning = false;
+// Application state flags
+let isClosing = false; // Is the application shutting down?
+let assigning = false; // Is account assignment in progress?
 
-let unassigned = false;
-let assigned = new Map();
-let workerAssigned = new WeakMap();
-let onlineWorkers = new WeakSet();
+// Account assignment tracking
+let unassigned = false; // Set of unassigned accounts
+let assigned = new Map(); // Map of account -> worker
+let workerAssigned = new WeakMap(); // Map of worker -> Set of accounts
+let onlineWorkers = new WeakSet(); // Set of workers that are online
 
-let imapInitialWorkersLoaded = false;
-let workers = new Map();
-let workersMeta = new WeakMap();
-let availableIMAPWorkers = new Set();
+// Worker management
+let imapInitialWorkersLoaded = false; // Have all initial IMAP workers started?
+let workers = new Map(); // Map of type -> Set of workers
+let workersMeta = new WeakMap(); // Worker metadata
+let availableIMAPWorkers = new Set(); // IMAP workers ready to accept accounts
 
+// Suspended worker types (when no license is active)
 let suspendedWorkerTypes = new Set();
 
+/**
+ * Send a message to a worker thread with safety checks
+ * @param {Worker} worker - The worker thread to send to
+ * @param {Object} payload - Message payload
+ * @param {boolean} ignoreOffline - Whether to ignore offline status
+ * @param {Array} transferList - Transferable objects
+ * @returns {boolean} Success status
+ * @throws {Error} If worker is offline and ignoreOffline is false
+ */
 const postMessage = (worker, payload, ignoreOffline, transferList) => {
+    // Check if worker is online
     if (!onlineWorkers.has(worker)) {
         if (ignoreOffline) {
             return false;
         }
-        throw new Error('Requested worker thread not available');
+        throw new Error('Worker thread is not available');
     }
 
+    // Send the message
     let result = worker.postMessage(payload, transferList);
 
+    // Update worker metadata
     let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
     workerMeta.called = workerMeta.called ? ++workerMeta.called : 1;
     workersMeta.set(worker, workerMeta);
@@ -525,12 +607,21 @@ const postMessage = (worker, payload, ignoreOffline, transferList) => {
     return result;
 };
 
+/**
+ * Update server state in Redis and notify API workers
+ * @param {string} type - Server type ('smtp' or 'imapProxy')
+ * @param {string} state - New state
+ * @param {Object} payload - Optional payload data
+ * @returns {Promise<void>}
+ */
 let updateServerState = async (type, state, payload) => {
+    // Store state in Redis
     await redis.hset(`${REDIS_PREFIX}${type}`, 'state', state);
     if (payload) {
         await redis.hset(`${REDIS_PREFIX}${type}`, 'payload', JSON.stringify(payload));
     }
 
+    // Notify all API workers about the state change
     if (workers.has('api')) {
         for (let worker of workers.get('api')) {
             let callPayload = {
@@ -543,20 +634,27 @@ let updateServerState = async (type, state, payload) => {
             try {
                 postMessage(worker, callPayload, true);
             } catch (err) {
-                logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
+                logger.error({ msg: 'Unable to notify worker about state change', worker: worker.threadId, callPayload, err });
             }
         }
     }
 };
 
+/**
+ * Get detailed information about all threads
+ * @returns {Promise<Array>} Array of thread information objects
+ */
 async function getThreadsInfo() {
+    // Start with main thread info
     let threadsInfo = [Object.assign({ type: 'main', isMain: true, threadId: 0, online: NOW }, threadStats.usage())];
 
+    // Collect info from all worker threads
     for (let [type, workerSet] of workers) {
         if (workerSet && workerSet.size) {
             for (let worker of workerSet) {
                 let resourceUsage;
                 try {
+                    // Request resource usage from worker
                     resourceUsage = await call(worker, { cmd: 'resource-usage' });
                 } catch (err) {
                     resourceUsage = {
@@ -569,10 +667,12 @@ async function getThreadsInfo() {
 
                 let threadData = Object.assign({ type, threadId: worker.threadId, resourceLimits: worker.resourceLimits }, resourceUsage);
 
+                // Add account count for IMAP workers
                 if (workerAssigned.has(worker)) {
                     threadData.accounts = workerAssigned.get(worker).size;
                 }
 
+                // Add worker metadata
                 let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
                 for (let key of Object.keys(workerMeta)) {
                     threadData[key] = workerMeta[key];
@@ -583,6 +683,7 @@ async function getThreadsInfo() {
         }
     }
 
+    // Add human-readable descriptions and configuration info
     threadsInfo.forEach(threadInfo => {
         threadInfo.description = THREAD_NAMES[threadInfo.type];
         if (THREAD_CONFIG_VALUES[threadInfo.type]) {
@@ -593,6 +694,13 @@ async function getThreadsInfo() {
     return threadsInfo;
 }
 
+/**
+ * Send a webhook notification
+ * @param {string} account - Account ID
+ * @param {string} event - Event type
+ * @param {Object} data - Event data
+ * @returns {Promise<void>}
+ */
 async function sendWebhook(account, event, data) {
     let serviceUrl = (await settings.get('serviceUrl')) || null;
 
@@ -613,15 +721,23 @@ async function sendWebhook(account, event, data) {
     await Webhooks.pushToQueue(event, await Webhooks.formatPayload(event, payload));
 }
 
+/**
+ * Spawn a new worker thread of the specified type
+ * @param {string} type - Worker type (imap, api, webhooks, submit, documents, smtp, imapProxy)
+ * @returns {Promise<number|void>} Thread ID if successful
+ */
 let spawnWorker = async type => {
+    // Don't spawn workers during shutdown
     if (isClosing) {
         return;
     }
 
+    // Initialize worker set if needed
     if (!workers.has(type)) {
         workers.set(type, new Set());
     }
 
+    // Check if worker type is suspended (no license)
     if (suspendedWorkerTypes.has(type)) {
         if (['smtp', 'imapProxy'].includes(type)) {
             await updateServerState(type, 'suspended', {});
@@ -629,6 +745,7 @@ let spawnWorker = async type => {
         return;
     }
 
+    // Check if server type is enabled
     if (['smtp', 'imapProxy'].includes(type)) {
         let serverEnabled = await settings.get(`${type}ServerEnabled`);
         if (!serverEnabled) {
@@ -639,6 +756,7 @@ let spawnWorker = async type => {
         await updateServerState(type, 'spawning');
     }
 
+    // Create new worker thread
     let worker = new WorkerThread(pathlib.join(__dirname, 'workers', `${type.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}.js`), {
         argv,
         env: SHARE_ENV,
@@ -652,36 +770,45 @@ let spawnWorker = async type => {
         let isOnline = false;
         let threadId = worker.threadId;
 
+        // Handle worker coming online
         worker.on('online', () => {
             if (['smtp', 'imapProxy'].includes(type)) {
-                updateServerState(type, 'initializing').catch(err => logger.error({ msg: `Failed to update ${type} server state`, err }));
+                updateServerState(type, 'initializing').catch(err => logger.error({ msg: `Unable to update ${type} server state`, err }));
             }
             onlineWorkers.add(worker);
 
+            // Update worker metadata
             let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
             workerMeta.online = Date.now();
             workersMeta.set(worker, workerMeta);
 
+            // Non-IMAP/API workers are ready immediately
             if (type !== 'imap' && type !== 'api') {
-                // IMAP and API workers need to wait until ready to accept accounts
                 isOnline = true;
                 resolve(threadId);
             }
         });
 
+        /**
+         * Handle worker exit
+         * @param {number} exitCode - Process exit code
+         */
         let exitHandler = async exitCode => {
             onlineWorkers.delete(worker);
             metrics.threadStops.inc();
 
             workers.get(type).delete(worker);
 
+            // Update server state for proxy servers
             if (['smtp', 'imapProxy'].includes(type)) {
                 updateServerState(type, suspendedWorkerTypes.has(type) ? 'suspended' : 'exited');
             }
 
+            // Handle IMAP worker cleanup
             if (type === 'imap') {
                 availableIMAPWorkers.delete(worker);
 
+                // Reassign accounts from dead worker
                 if (workerAssigned.has(worker)) {
                     let accountList = workerAssigned.get(worker);
                     workerAssigned.delete(worker);
@@ -691,7 +818,7 @@ let spawnWorker = async type => {
                         unassigned.add(account);
                     }
 
-                    assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 1, err }));
+                    assignAccounts().catch(err => logger.error({ msg: 'Unable to reassign accounts', n: 1, err }));
                 }
             }
 
@@ -699,21 +826,22 @@ let spawnWorker = async type => {
                 return;
             }
 
-            // spawning a new worker trigger reassign
+            // Log worker exit
             if (suspendedWorkerTypes.has(type)) {
-                logger.info({ msg: 'Worker thread closed', exitCode, type });
+                logger.info({ msg: 'Worker thread terminated', exitCode, type });
             } else {
-                logger.error({ msg: 'Worker exited', exitCode, type });
+                logger.error({ msg: 'Worker unexpectedly exited', exitCode, type });
             }
 
-            // trigger new spawn
+            // Respawn worker after delay
             await new Promise(r => setTimeout(r, 1000));
             await spawnWorker(type);
         };
 
+        // Handle worker exit
         worker.on('exit', exitCode => {
             if (!isOnline) {
-                let error = new Error(`Failed to start ${type} worker thread on initialization`);
+                let error = new Error(`Unable to start ${type} worker thread`);
 
                 error.workerType = type;
                 error.exitCode = exitCode;
@@ -723,11 +851,13 @@ let spawnWorker = async type => {
             }
 
             exitHandler(exitCode).catch(err => {
-                logger.error({ msg: 'Failed to handle worker exit', exitCode, type, worker: worker.threadId, err });
+                logger.error({ msg: 'Error handling worker exit', exitCode, type, worker: worker.threadId, err });
             });
         });
 
+        // Handle messages from worker
         worker.on('message', message => {
+            // Update message count
             let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
             workerMeta.messages = workerMeta.messages ? ++workerMeta.messages : 1;
             workersMeta.set(worker, workerMeta);
@@ -736,6 +866,7 @@ let spawnWorker = async type => {
                 return;
             }
 
+            // Handle response to a call
             if (message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
                 let { resolve, reject, timer } = callQueue.get(message.mid);
                 clearTimeout(timer);
@@ -757,10 +888,12 @@ let spawnWorker = async type => {
                 }
             }
 
+            // Handle call from worker
             if (message.cmd === 'call' && message.mid) {
                 return onCommand(worker, message.message)
                     .then(response => {
                         let transferList;
+                        // Handle transferable objects
                         if (response && typeof response === 'object' && response._transfer === true) {
                             if (typeof response._response === 'object' && response._response && response._response.buffer) {
                                 transferList = [response._response.buffer];
@@ -777,11 +910,12 @@ let spawnWorker = async type => {
                         try {
                             postMessage(worker, callPayload, null, transferList);
                         } catch (err) {
+                            // Log buffer info instead of full buffer
                             if (Buffer.isBuffer(callPayload.response)) {
                                 callPayload.response = `Buffer <${callPayload.response.length}B>`;
                             }
 
-                            logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
+                            logger.error({ msg: 'Unable to send response to worker', worker: worker.threadId, callPayload, err });
                         }
                     })
                     .catch(err => {
@@ -797,11 +931,12 @@ let spawnWorker = async type => {
                         try {
                             postMessage(worker, callPayload);
                         } catch (err) {
-                            logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
+                            logger.error({ msg: 'Unable to send error response to worker', worker: worker.threadId, callPayload, err });
                         }
                     });
             }
 
+            // Handle metrics messages
             switch (message.cmd) {
                 case 'metrics': {
                     let statUpdateKey = false;
@@ -809,8 +944,8 @@ let spawnWorker = async type => {
 
                     let { account } = message.meta || {};
 
+                    // Determine which metrics to update
                     switch (message.key) {
-                        // gather for dashboard counter
                         case 'webhooks': {
                             let { status } = message.args[0] || {};
                             statUpdateKey = `${message.key}:${status}`;
@@ -827,6 +962,7 @@ let spawnWorker = async type => {
                                 accountUpdateKey = `${message.key}:${event}`;
                             }
 
+                            // Track specific events
                             switch (event) {
                                 case MESSAGE_NEW_NOTIFY:
                                 case MESSAGE_DELETED_NOTIFY:
@@ -853,21 +989,19 @@ let spawnWorker = async type => {
                         }
                     }
 
+                    // Update Redis counters for dashboard stats
                     if (statUpdateKey) {
-                        // increment counter in redis
-
                         let now = new Date();
 
-                        // we keep a separate hash value for each ISO day
+                        // Create daily bucket
                         let dateStr = `${now
                             .toISOString()
                             .substr(0, 10)
                             .replace(/[^0-9]+/g, '')}`;
 
-                        // hash key for bucket
+                        // Create minute bucket
                         let timeStr = `${now
                             .toISOString()
-                            // bucket includes 1 minute
                             .substr(0, 16)
                             .replace(/[^0-9]+/g, '')}`;
 
@@ -877,21 +1011,22 @@ let spawnWorker = async type => {
                             .multi()
                             .hincrby(hkey, timeStr, 1)
                             .sadd(`${REDIS_PREFIX}stats:keys`, statUpdateKey)
-                            // keep alive at most 2 days
-                            .expire(hkey, MAX_DAYS_STATS + 1 * 24 * 3600);
+                            .expire(hkey, MAX_DAYS_STATS + 1 * 24 * 3600); // Keep for configured days + 1
 
                         if (account && accountUpdateKey) {
-                            // increment account specific counter
+                            // Update account-specific counter
                             let accountKey = `${REDIS_PREFIX}iad:${account}`;
                             update = update.hincrby(accountKey, `stats:count:${accountUpdateKey}`, 1);
                         }
 
                         update.exec().catch(() => false);
                     } else if (account && accountUpdateKey) {
+                        // Update only account-specific counter
                         let accountKey = `${REDIS_PREFIX}iad:${account}`;
                         redis.hincrby(accountKey, `stats:count:${accountUpdateKey}`, 1).catch(() => false);
                     }
 
+                    // Update Prometheus metrics
                     if (message.key && metrics[message.key] && typeof metrics[message.key][message.method] === 'function') {
                         metrics[message.key][message.method](...message.args);
                     }
@@ -900,53 +1035,59 @@ let spawnWorker = async type => {
                 }
 
                 case 'settings':
+                    // Forward settings changes to all IMAP workers
                     availableIMAPWorkers.forEach(worker => {
                         try {
                             postMessage(worker, message);
                         } catch (err) {
-                            logger.error({ msg: 'Failed to post command to child', worker: worker.threadId, callPayload: message, err });
+                            logger.error({ msg: 'Unable to forward settings to worker', worker: worker.threadId, callPayload: message, err });
                         }
                     });
                     return;
 
                 case 'change':
+                    // Handle state changes
                     switch (message.type) {
                         case 'smtpServerState':
                         case 'imapProxyServerState': {
                             let type = message.type.replace(/ServerState$/, '');
                             updateServerState(type, message.key, message.payload).catch(err =>
-                                logger.error({ msg: `Failed to update ${type} server state`, err })
+                                logger.error({ msg: `Unable to update ${type} server state`, err })
                             );
                             break;
                         }
                         default:
-                            // forward all state changes to the API worker
+                            // Forward all other state changes to API workers
                             for (let worker of workers.get('api') || []) {
                                 try {
                                     postMessage(worker, message, true);
                                 } catch (err) {
-                                    logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload: message, err });
+                                    logger.error({ msg: 'Unable to forward state change to worker', worker: worker.threadId, callPayload: message, err });
                                 }
                             }
                     }
                     break;
             }
 
+            // Handle worker type specific messages
             switch (type) {
                 case 'imap':
                     if (message.cmd === 'ready') {
+                        // IMAP worker is ready to accept accounts
                         availableIMAPWorkers.add(worker);
                         isOnline = true;
                         resolve(worker.threadId);
 
                         if (imapInitialWorkersLoaded) {
-                            assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 2, err }));
+                            // Assign accounts if all workers are loaded
+                            assignAccounts().catch(err => logger.error({ msg: 'Unable to assign accounts', n: 2, err }));
                         }
                     }
                     break;
 
                 case 'api':
                     if (message.cmd === 'ready') {
+                        // API worker is ready
                         isOnline = true;
                         resolve(worker.threadId);
                     }
@@ -956,14 +1097,25 @@ let spawnWorker = async type => {
     });
 };
 
+/**
+ * Call a command on a worker thread and wait for response
+ * @param {Worker} worker - Target worker thread
+ * @param {Object} message - Message to send
+ * @param {Array} transferList - Optional transferable objects
+ * @returns {Promise<*>} Response from worker
+ * @throws {Error} Timeout or communication error
+ */
 async function call(worker, message, transferList) {
     return new Promise((resolve, reject) => {
+        // Generate unique message ID
         let mid = `${Date.now()}:${++mids}`;
 
+        // Calculate timeout
         let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
 
+        // Set timeout handler
         let timer = setTimeout(() => {
-            let err = new Error('Timeout waiting for command response [T1]');
+            let err = new Error('Request timed out');
             err.statusCode = 504;
             err.code = 'Timeout';
             err.ttl = ttl;
@@ -971,6 +1123,7 @@ async function call(worker, message, transferList) {
             reject(err);
         }, ttl);
 
+        // Store callback info
         callQueue.set(mid, { resolve, reject, timer });
 
         try {
@@ -985,6 +1138,7 @@ async function call(worker, message, transferList) {
                 transferList
             );
         } catch (err) {
+            // Clean up on error
             clearTimeout(timer);
             callQueue.delete(mid);
             return reject(err);
@@ -992,7 +1146,13 @@ async function call(worker, message, transferList) {
     });
 }
 
+/**
+ * Assign unassigned accounts to available IMAP workers
+ * Uses rendezvous hashing for consistent assignment
+ * @returns {Promise<boolean>} Success status
+ */
 async function assignAccounts() {
+    // Prevent concurrent assignment
     if (assigning) {
         return false;
     }
@@ -1000,32 +1160,34 @@ async function assignAccounts() {
     assigning = true;
     try {
         if (!unassigned) {
-            // first run
-            // list all available accounts and assign to worker threads
+            // First run - load all accounts from Redis
             let accounts = await redis.smembers(`${REDIS_PREFIX}ia:accounts`);
             unassigned = new Set(accounts);
         }
 
         if (!availableIMAPWorkers.size || !unassigned.size) {
-            // nothing to do here
+            // Nothing to do
             return;
         }
 
         logger.info({
-            msg: 'Assigning connections',
+            msg: 'Starting account assignment',
             unassigned: unassigned.size,
             workersAvailable: availableIMAPWorkers.size,
             setupDelay: CONNECTION_SETUP_DELAY
         });
 
+        // Assign each unassigned account
         for (let account of unassigned) {
             if (!availableIMAPWorkers.size) {
-                // out of workers
+                // No more workers available
                 break;
             }
 
+            // Use rendezvous hashing for consistent assignment
             let worker = selectRendezvousNode(account, Array.from(availableIMAPWorkers));
 
+            // Track assignment
             if (!workerAssigned.has(worker)) {
                 workerAssigned.set(worker, new Set());
             }
@@ -1034,12 +1196,14 @@ async function assignAccounts() {
             assigned.set(account, worker);
             unassigned.delete(account);
 
+            // Notify worker of assignment
             await call(worker, {
                 cmd: 'assign',
                 account,
                 runIndex
             });
 
+            // Add delay between assignments to avoid overwhelming the system
             if (CONNECTION_SETUP_DELAY) {
                 await new Promise(r => setTimeout(r, CONNECTION_SETUP_DELAY));
             }
@@ -1049,8 +1213,16 @@ async function assignAccounts() {
     }
 }
 
+// License checking state
 let licenseCheckTimer = false;
 let checkingLicense = false;
+
+/**
+ * Check and validate license status
+ * @param {Object} opts - Options
+ * @param {number} opts.subscriptionCheckTimeout - Timeout for subscription check
+ * @returns {Promise<void>}
+ */
 let licenseCheckHandler = async opts => {
     if (checkingLicense) {
         return;
@@ -1064,6 +1236,7 @@ let licenseCheckHandler = async opts => {
         let now = Date.now();
         subscriptionCheckTimeout = subscriptionCheckTimeout || SUBSCRIPTION_CHECK_TIMEOUT;
 
+        // Check if we need to validate the license
         let kv = await redis.hget(`${REDIS_PREFIX}settings`, 'kv');
         let checkKv = true;
         if (kv && typeof kv === 'string' && cv(packageData.version, Buffer.from(kv, 'hex').toString(), '<=')) {
@@ -1080,10 +1253,12 @@ let licenseCheckHandler = async opts => {
             checkKv = true;
         }
 
+        // Clean up for lifetime licenses
         if (licenseInfo.details.lt) {
             await redis.hdel(`${REDIS_PREFIX}settings`, 'subexp');
         }
 
+        // Validate subscription license
         if (
             checkKv &&
             licenseInfo.active &&
@@ -1092,6 +1267,7 @@ let licenseCheckHandler = async opts => {
             (await redis.hUpdateBigger(`${REDIS_PREFIX}settings`, 'subcheck', now - subscriptionCheckTimeout, now))
         ) {
             try {
+                // Call license validation API
                 let res = await fetchCmd(`https://postalsys.com/licenses/validate`, {
                     method: 'post',
                     headers: {
@@ -1111,20 +1287,23 @@ let licenseCheckHandler = async opts => {
 
                 if (!res.ok) {
                     if (data.invalidate) {
+                        // License validation failed - start grace period
                         let res = await redis.hUpdateBigger(`${REDIS_PREFIX}settings`, 'subexp', now, now + SUBSCRIPTION_ALLOW_DELAY);
                         if (res === 2) {
-                            // grace period over
-                            logger.info({ msg: 'License not valid', license: licenseInfo.details, data });
+                            // Grace period expired
+                            logger.info({ msg: 'License validation failed', license: licenseInfo.details, data });
                             await redis.multi().hdel(`${REDIS_PREFIX}settings`, 'license').hdel(`${REDIS_PREFIX}settings`, 'subexp').exec();
                             licenseInfo.active = false;
                             licenseInfo.details = false;
                             licenseInfo.type = packageData.license;
                         } else {
+                            // Still in grace period - check again soon
                             let nextCheck = now + SUBSCRIPTION_RECHECK_TIMEOUT;
                             await redis.hset(`${REDIS_PREFIX}settings`, 'ks', new Date(nextCheck).getTime().toString(16));
                         }
                     }
                 } else {
+                    // License validated successfully
                     await redis.hdel(`${REDIS_PREFIX}settings`, 'subexp');
                     await redis.hset(`${REDIS_PREFIX}settings`, 'kv', Buffer.from(packageData.version).toString('hex'));
                     if (data.validatedUntil) {
@@ -1134,22 +1313,23 @@ let licenseCheckHandler = async opts => {
                     }
                 }
             } catch (err) {
-                logger.error({ msg: 'Failed to validate license', err });
+                logger.error({ msg: 'License validation error', err });
             }
         }
 
+        // Check if license has expired
         if (licenseInfo.active && licenseInfo.details && licenseInfo.details.expires && new Date(licenseInfo.details.expires).getTime() < Date.now()) {
-            // clear expired license
-
-            logger.info({ msg: 'License expired', license: licenseInfo.details });
+            logger.info({ msg: 'License has expired', license: licenseInfo.details });
 
             licenseInfo.active = false;
             licenseInfo.details = false;
         }
 
+        // Handle no active license - suspend workers
         if (!licenseInfo.active && !suspendedWorkerTypes.size) {
-            logger.info({ msg: 'No active license, shutting down workers after 15 minutes of activity' });
+            logger.info({ msg: 'No active license. Workers will be suspended after 15 minutes of inactivity.' });
 
+            // Suspend all worker types except API
             for (let type of ['imap', 'submit', 'smtp', 'webhooks', 'imapProxy']) {
                 suspendedWorkerTypes.add(type);
                 if (workers.has(type)) {
@@ -1159,7 +1339,7 @@ let licenseCheckHandler = async opts => {
                 }
             }
         } else if (licenseInfo.active && suspendedWorkerTypes.size) {
-            // re-enable missing workers
+            // Re-enable workers after license activated
             for (let type of suspendedWorkerTypes) {
                 suspendedWorkerTypes.delete(type);
                 switch (type) {
@@ -1168,7 +1348,6 @@ let licenseCheckHandler = async opts => {
                         {
                             let serverEnabled = await settings.get(`${type}ServerEnabled`);
                             if (serverEnabled) {
-                                // single SMTP interface worker
                                 await spawnWorker(type);
                             }
                         }
@@ -1189,18 +1368,25 @@ let licenseCheckHandler = async opts => {
     }
 };
 
+/**
+ * Schedule next license check
+ */
 function checkActiveLicense() {
     clearTimeout(licenseCheckTimer);
     licenseCheckHandler().catch(err => {
-        logger.error('Failed to process license checker', err);
+        logger.error('License check error', err);
     });
 }
 
+/**
+ * Check for available EmailEngine updates
+ * @returns {Promise<void>}
+ */
 let processCheckUpgrade = async () => {
     try {
         let updateInfo = await checkForUpgrade();
         if (updateInfo.canUpgrade) {
-            logger.info({ msg: 'Found an upgrade for EmailEngine', updateInfo });
+            logger.info({ msg: 'EmailEngine update available', updateInfo });
 
             updateInfo.checked = Date.now();
             await redis.hset(`${REDIS_PREFIX}settings`, 'upgrade', JSON.stringify(updateInfo));
@@ -1208,15 +1394,21 @@ let processCheckUpgrade = async () => {
             await redis.hdel(`${REDIS_PREFIX}settings`, 'upgrade');
         }
     } catch (err) {
-        logger.error({ msg: 'Failed to check updates', err });
+        logger.error({ msg: 'Update check failed', err });
     }
 };
 
+// Upgrade checking state
 let upgradeCheckTimer = false;
+
+/**
+ * Periodic upgrade check handler
+ * @returns {Promise<void>}
+ */
 let upgradeCheckHandler = async () => {
     let upgradeInfoExists = await redis.hexists(`${REDIS_PREFIX}settings`, 'upgrade');
     if (!upgradeInfoExists) {
-        // nothing to do here
+        // No upgrade info stored
         return;
     }
     await processCheckUpgrade();
@@ -1224,28 +1416,35 @@ let upgradeCheckHandler = async () => {
     upgradeCheckTimer.unref();
 };
 
+/**
+ * Schedule next upgrade check
+ */
 function checkUpgrade() {
     clearTimeout(upgradeCheckTimer);
     upgradeCheckHandler().catch(err => {
-        logger.error('Failed to process upgrade check', err);
+        logger.error('Update check error', err);
     });
 }
 
-// measure Redis ping once in every 10 seconds
-
+// Redis ping monitoring
 let redisPingCounter = [];
 
+/**
+ * Calculate average Redis ping latency
+ * @returns {number|null} Average latency in nanoseconds
+ */
 function getRedisPing() {
     if (!redisPingCounter.length) {
         return null;
     }
 
+    // Get recent entries and sort
     let entries = []
         .concat(redisPingCounter)
         .slice(-34)
         .sort((a, b) => a - b);
 
-    // remove 2 highest and lowest if possible
+    // Remove outliers (2 highest and lowest)
     for (let i = 0; i < 2; i++) {
         if (entries.length > 4) {
             entries.shift();
@@ -1253,6 +1452,7 @@ function getRedisPing() {
         }
     }
 
+    // Calculate average
     let sum = 0;
     for (let entry of entries) {
         sum += entry;
@@ -1264,11 +1464,16 @@ function getRedisPing() {
 const REDIS_PING_TIMEOUT = 10 * 1000;
 let redisPingTimer = false;
 
+/**
+ * Measure current Redis ping latency
+ * @returns {Promise<number>} Latency in nanoseconds
+ */
 const getCurrentRedisPing = async () => {
     try {
-        // this request is not timed, it is to ensure that there is an open connection
+        // Warm up connection
         await redis.ping();
 
+        // Measure actual ping
         let startTime = process.hrtime.bigint();
         await redis.ping();
         let endTime = process.hrtime.bigint();
@@ -1277,44 +1482,62 @@ const getCurrentRedisPing = async () => {
 
         return duration;
     } catch (err) {
-        logger.error({ msg: 'Failed to run Redis ping', err });
+        logger.error({ msg: 'Redis ping measurement failed', err });
     }
     return 0;
 };
 
+/**
+ * Process and store Redis ping measurement
+ * @returns {Promise<number>} Current ping duration
+ */
 const processRedisPing = async () => {
     try {
         let duration = await getCurrentRedisPing();
         redisPingCounter.push(duration);
+        // Keep last 300 measurements
         if (redisPingCounter.length > 300) {
             redisPingCounter = redisPingCounter.slice(0, 150);
         }
         return duration;
     } catch (err) {
-        logger.error({ msg: 'Failed to run Redis ping', err });
+        logger.error({ msg: 'Redis ping processing failed', err });
     }
 };
 
+/**
+ * Periodic Redis ping handler
+ * @returns {Promise<void>}
+ */
 const redisPingHandler = async () => {
     await processRedisPing();
     redisPingTimer = setTimeout(checkRedisPing, REDIS_PING_TIMEOUT);
     redisPingTimer.unref();
 };
 
+/**
+ * Schedule next Redis ping check
+ */
 function checkRedisPing() {
     clearTimeout(redisPingTimer);
     redisPingHandler().catch(err => {
-        logger.error('Failed to process Redis Ping', err);
+        logger.error('Redis ping check error', err);
     });
 }
 
+/**
+ * Update Prometheus metrics for queues and Redis
+ * @returns {Promise<void>}
+ */
 async function updateQueueCounters() {
+    // Update EmailEngine configuration metrics
     metrics.emailengineConfig.set({ version: 'v' + packageData.version }, 1);
     metrics.emailengineConfig.set({ config: 'uvThreadpoolSize' }, Number(process.env.UV_THREADPOOL_SIZE));
     metrics.emailengineConfig.set({ config: 'workersImap' }, config.workers.imap);
     metrics.emailengineConfig.set({ config: 'workersWebhooks' }, config.workers.webhooks);
     metrics.emailengineConfig.set({ config: 'workersSubmission' }, config.workers.submit);
 
+    // Update thread metrics
     let threadsInfo = await getThreadsInfo();
 
     let now = Date.now();
@@ -1324,6 +1547,7 @@ async function updateQueueCounters() {
         let key = workerThreadInfo.type;
         let metricKey = `${key}_total`;
 
+        // Check if thread is recent (started within METRIC_RECENT)
         let recent = now - workerThreadInfo.online < METRIC_RECENT;
         if (recent) {
             metricKey = `${key}_recent`;
@@ -1336,11 +1560,13 @@ async function updateQueueCounters() {
         }
     }
 
+    // Set thread count metrics
     for (let [key, value] of threadCounts.entries()) {
         let [type, age] = key.split('_');
         metrics.threads.set({ type, recent: age === 'recent' ? 'yes' : 'no' }, value || 0);
     }
 
+    // Update queue metrics
     for (let queue of ['notify', 'submit', 'documents']) {
         const [resActive, resDelayed, resPaused, resWaiting] = await redis
             .multi()
@@ -1350,8 +1576,8 @@ async function updateQueueCounters() {
             .llen(`${REDIS_PREFIX}bull:${queue}:wait`)
             .exec();
         if (resActive[0] || resDelayed[0] || resPaused[0] || resWaiting[0]) {
-            // counting failed
-            logger.error({ msg: 'Failed to count queue length', queue, active: resActive, delayed: resDelayed, paused: resPaused, waiting: resWaiting });
+            // Counting failed
+            logger.error({ msg: 'Queue length count failed', queue, active: resActive, delayed: resDelayed, paused: resPaused, waiting: resWaiting });
             return false;
         }
 
@@ -1361,6 +1587,7 @@ async function updateQueueCounters() {
         metrics.queues.set({ queue: `${queue}`, state: `waiting` }, Number(resWaiting[1]) || 0);
     }
 
+    // Update Redis metrics
     try {
         let redisInfo = await getRedisStats(redis);
 
@@ -1390,12 +1617,13 @@ async function updateQueueCounters() {
 
         metrics.redisMemFragmentationRatio.set(Number(redisInfo.mem_fragmentation_ratio) || 0);
 
+        // Update per-database metrics
         Object.keys(redisInfo).forEach(key => {
             if (/^db\d+$/.test(key)) {
-                //redisKeyCount
                 metrics.redisKeyCount.set({ db: key }, Number(redisInfo[key].keys) || 0);
             }
 
+            // Update command stats
             if (key.indexOf('cmdstat_') === 0) {
                 let cmd = key.substr('cmdstat_'.length);
                 metrics.redisCommandRuns.set({ command: cmd }, Number(redisInfo[key].calls) || 0);
@@ -1413,17 +1641,25 @@ async function updateQueueCounters() {
         metrics.redisLastSaveTime.set(Number(redisInfo.rdb_last_save_time) || 0);
         metrics.redisOpsPerSec.set(Number(redisInfo.instantaneous_ops_per_sec) || 0);
     } catch (err) {
-        logger.error({ msg: 'Failed to update query counters', err });
+        logger.error({ msg: 'Metrics update failed', err });
     }
 }
 
+/**
+ * Handle commands from worker threads
+ * @param {Worker} worker - Source worker
+ * @param {Object} message - Command message
+ * @returns {Promise<*>} Command result
+ */
 async function onCommand(worker, message) {
     switch (message.cmd) {
         case 'metrics':
+            // Return Prometheus metrics
             await updateQueueCounters();
             return promClient.register.metrics();
 
         case 'structuredMetrics': {
+            // Return structured metrics for API
             let connections = {};
 
             for (let key of Object.keys(metrics.imapConnections.hashMap)) {
@@ -1437,10 +1673,12 @@ async function onCommand(worker, message) {
         }
 
         case 'imapWorkerCount': {
+            // Return number of available IMAP workers
             return { workers: availableIMAPWorkers.size };
         }
 
         case 'checkLicense':
+            // Force license check
             try {
                 await licenseCheckHandler({
                     subscriptionCheckTimeout: 60 * 1000
@@ -1451,21 +1689,23 @@ async function onCommand(worker, message) {
             return licenseInfo;
 
         case 'license':
+            // Return license info with suspension status
             if (!licenseInfo.active && suspendedWorkerTypes.size) {
                 return Object.assign({}, licenseInfo, { suspended: true });
             }
             return licenseInfo;
 
         case 'updateLicense': {
+            // Update license from API
             try {
                 const licenseFile = message.license;
 
                 let licenseData = await checkLicense(licenseFile);
                 if (!licenseData) {
-                    throw new Error('Failed to verify provided license');
+                    throw new Error('Invalid license provided');
                 }
 
-                logger.info({ msg: 'Loaded license', license: licenseData, source: 'API' });
+                logger.info({ msg: 'License updated', license: licenseData, source: 'API' });
 
                 await setLicense(licenseData, licenseFile);
 
@@ -1473,17 +1713,18 @@ async function onCommand(worker, message) {
                 licenseInfo.details = licenseData;
                 licenseInfo.type = 'EmailEngine License';
 
-                // re-enable workers
+                // Re-enable workers
                 checkActiveLicense();
 
                 return licenseInfo;
             } catch (err) {
-                logger.fatal({ msg: 'Failed to verify provided license', source: 'API', err });
+                logger.fatal({ msg: 'License update failed', source: 'API', err });
                 return false;
             }
         }
 
         case 'removeLicense': {
+            // Remove existing license
             try {
                 await redis.multi().hdel(`${REDIS_PREFIX}settings`, 'license').hdel(`${REDIS_PREFIX}settings`, 'subexp').exec();
 
@@ -1493,17 +1734,18 @@ async function onCommand(worker, message) {
 
                 return licenseInfo;
             } catch (err) {
-                logger.fatal({ msg: 'Failed to remove existing license', err });
+                logger.fatal({ msg: 'License removal failed', err });
                 return false;
             }
         }
 
         case 'kill-thread': {
+            // Terminate a specific thread
             for (let [, workerSet] of workers) {
                 if (workerSet && workerSet.size) {
                     for (let worker of workerSet) {
                         if (worker.threadId === message.thread) {
-                            logger.info({ msg: 'Requested thread kill', thread: message.thread });
+                            logger.info({ msg: 'Thread termination requested', thread: message.thread });
                             return await worker.terminate();
                         }
                     }
@@ -1514,8 +1756,10 @@ async function onCommand(worker, message) {
         }
 
         case 'snapshot-thread': {
+            // Get heap snapshot for debugging
             if (message.thread === 0) {
-                logger.info({ msg: 'Requested snapshot for a thread', thread: message.thread });
+                // Main thread
+                logger.info({ msg: 'Heap snapshot requested', thread: message.thread });
                 const stream = v8.getHeapSnapshot();
                 if (stream) {
                     return { _transfer: true, _response: await download(stream) };
@@ -1523,11 +1767,12 @@ async function onCommand(worker, message) {
                 return false;
             }
 
+            // Worker thread
             for (let [, workerSet] of workers) {
                 if (workerSet && workerSet.size) {
                     for (let worker of workerSet) {
                         if (worker.threadId === message.thread) {
-                            logger.info({ msg: 'Requested snapshot for a thread', thread: message.thread });
+                            logger.info({ msg: 'Heap snapshot requested', thread: message.thread });
 
                             const stream = await worker.getHeapSnapshot({ exposeInternals: true, exposeNumericValues: true });
                             if (stream) {
@@ -1542,7 +1787,7 @@ async function onCommand(worker, message) {
             return false;
         }
 
-        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
+        // OpenAI integration commands - run in main process to avoid memory overhead
         case 'generateSummary': {
             let requestOpts = {
                 verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
@@ -1551,7 +1796,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiModel = message.data.openAiModel || (await settings.get('openAiModel'));
@@ -1574,6 +1819,7 @@ async function onCommand(worker, message) {
                 requestOpts.topP = openAiTopP;
             }
 
+            // Set max tokens based on model
             switch (openAiModel) {
                 case 'gpt-4':
                     requestOpts.maxTokens = 6500;
@@ -1595,7 +1841,6 @@ async function onCommand(worker, message) {
             return await generateSummary(message.data.message, openAiAPIKey, requestOpts);
         }
 
-        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
         case 'generateEmbeddings': {
             let requestOpts = {
                 verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
@@ -1604,7 +1849,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
@@ -1619,6 +1864,7 @@ async function onCommand(worker, message) {
                 return false;
             }
 
+            // Clean internal properties
             for (let value of embeddings.embeddings) {
                 for (const key of Object.keys(value)) {
                     if (/^_/.test(key)) {
@@ -1638,7 +1884,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
@@ -1651,6 +1897,7 @@ async function onCommand(worker, message) {
                 requestOpts.gptModel = openAiModel;
             }
 
+            // Set max tokens based on model
             switch (openAiModel) {
                 case 'gpt-4':
                     requestOpts.maxTokens = 6500;
@@ -1671,6 +1918,7 @@ async function onCommand(worker, message) {
 
             let response = await embeddingsQuery(openAiAPIKey, requestOpts);
 
+            // Clean and format response
             if (response?.['Message-ID']) {
                 response.messageId = response?.['Message-ID'];
                 delete response?.['Message-ID'];
@@ -1687,6 +1935,7 @@ async function onCommand(worker, message) {
                 }
             }
 
+            // Clean internal properties
             for (const key of Object.keys(response)) {
                 if (/^_/.test(key)) {
                     delete response[key];
@@ -1704,7 +1953,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
@@ -1721,6 +1970,7 @@ async function onCommand(worker, message) {
 
             let response = await questionQuery(message.data.question, openAiAPIKey, requestOpts);
 
+            // Clean internal properties
             for (const key of Object.keys(response)) {
                 if (/^_/.test(key)) {
                     delete response[key];
@@ -1730,7 +1980,6 @@ async function onCommand(worker, message) {
             return response;
         }
 
-        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
         case 'generateChunkEmbeddings': {
             let requestOpts = {
                 verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
@@ -1739,7 +1988,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
@@ -1762,7 +2011,7 @@ async function onCommand(worker, message) {
             let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
 
             if (!openAiAPIKey) {
-                throw new Error(`OpenAI API key is not set`);
+                throw new Error(`OpenAI API key is not configured`);
             }
 
             let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
@@ -1790,42 +2039,43 @@ async function onCommand(worker, message) {
         }
 
         case 'unsubscribe':
-            sendWebhook(message.account, LIST_UNSUBSCRIBE_NOTIFY, message.payload).catch(err =>
-                logger.error({ msg: 'Failed to send an unsubscribe webhook', err })
-            );
+            // Handle list unsubscribe
+            sendWebhook(message.account, LIST_UNSUBSCRIBE_NOTIFY, message.payload).catch(err => logger.error({ msg: 'Unsubscribe webhook failed', err }));
             return;
 
         case 'subscribe':
-            sendWebhook(message.account, LIST_SUBSCRIBE_NOTIFY, message.payload).catch(err =>
-                logger.error({ msg: 'Failed to send an subscribe webhook', err })
-            );
+            // Handle list subscribe
+            sendWebhook(message.account, LIST_SUBSCRIBE_NOTIFY, message.payload).catch(err => logger.error({ msg: 'Subscribe webhook failed', err }));
             return;
 
         case 'new':
+            // Handle new account
             unassigned.add(message.account);
             assignAccounts()
                 .then(() => sendWebhook(message.account, ACCOUNT_ADDED_NOTIFY, { account: message.account }))
-                .catch(err => logger.error({ msg: 'Failed to assign accounts', n: 3, err }));
+                .catch(err => logger.error({ msg: 'Account assignment failed', n: 3, err }));
             return;
 
         case 'delete':
+            // Handle account deletion
             unassigned.delete(message.account); // if set
             if (assigned.has(message.account)) {
                 let assignedWorker = assigned.get(message.account);
                 if (workerAssigned.has(assignedWorker)) {
                     workerAssigned.get(assignedWorker).delete(message.account);
                     if (!workerAssigned.get(assignedWorker).size) {
-                        // last item in the worker accounts
+                        // Last account on this worker
                         workerAssigned.delete(assignedWorker);
                     }
                 }
 
+                // Notify worker to clean up
                 call(assignedWorker, message)
-                    .then(() => logger.debug('worker processed'))
-                    .catch(err => logger.error({ msg: 'Failed to clean an assigned worker', err }));
+                    .then(() => logger.debug('Account cleanup completed'))
+                    .catch(err => logger.error({ msg: 'Account cleanup failed', err }));
             }
             sendWebhook(message.account, ACCOUNT_DELETED_NOTIFY, { account: message.account }).catch(err =>
-                logger.error({ msg: 'Failed to send a deletion webhook', err })
+                logger.error({ msg: 'Account deletion webhook failed', err })
             );
             return;
 
@@ -1838,34 +2088,37 @@ async function onCommand(worker, message) {
         case 'pause':
         case 'resume':
         case 'reconnect':
+            // Forward to assigned worker
             if (assigned.has(message.account)) {
                 let assignedWorker = assigned.get(message.account);
                 call(assignedWorker, message)
-                    .then(() => logger.debug('worker processed'))
-                    .catch(err => logger.error({ msg: 'Failed to call sync from a worker', err }));
+                    .then(() => logger.debug('Worker command completed'))
+                    .catch(err => logger.error({ msg: 'Worker command failed', err }));
             }
             return;
 
         case 'smtpReload':
         case 'imapProxyReload':
             {
+                // Reload proxy server
                 let type = message.cmd.replace(/Reload$/, '');
                 let hasWorkers = workers.has(type) && workers.get(type).size;
-                // reload (or kill) SMTP submission worker
                 if (hasWorkers) {
+                    // Kill existing workers
                     for (let worker of workers.get(type).values()) {
                         worker.terminate();
                     }
                 } else {
+                    // Spawn new worker if enabled
                     let serverEnabled = await settings.get(`${type}ServerEnabled`);
                     if (serverEnabled) {
-                        // spawn a new worker
                         await spawnWorker(type);
                     }
                 }
             }
             break;
 
+        // IMAP operations - forward to assigned worker
         case 'listMessages':
         case 'getRawMessage':
         case 'getText':
@@ -1887,12 +2140,13 @@ async function onCommand(worker, message) {
         case 'getAttachment':
         case 'listSignatures': {
             if (!assigned.has(message.account)) {
-                return NO_ACTIVE_HANDLER_RESP;
+                throw NO_ACTIVE_HANDLER_RESP_ERR;
             }
 
             let assignedWorker = assigned.get(message.account);
 
             let transferList = [];
+            // Handle transferable objects
             if (['getRawMessage', 'getAttachment'].includes(message.cmd) && message.port) {
                 transferList.push(message.port);
             }
@@ -1905,6 +2159,7 @@ async function onCommand(worker, message) {
         }
 
         case 'subconnections': {
+            // Get submission connections
             if (!assigned.has(message.account)) {
                 return [];
             }
@@ -1914,7 +2169,7 @@ async function onCommand(worker, message) {
         }
 
         case 'googlePubSub': {
-            // notify all webhook workers about a new pubsub app
+            // Notify all webhook workers about PubSub app
             for (let worker of workers.get('webhooks')) {
                 await call(worker, message);
             }
@@ -1922,6 +2177,7 @@ async function onCommand(worker, message) {
         }
 
         case 'externalNotify': {
+            // External notification (e.g., Google Push)
             for (let account of message.accounts) {
                 if (!assigned.has(account)) {
                     continue;
@@ -1931,7 +2187,7 @@ async function onCommand(worker, message) {
                 try {
                     await call(assignedWorker, { cmd: 'externalNotify', account, historyId: message.historyId });
                 } catch (err) {
-                    logger.error({ msg: 'Failed to notify worker about account changes', cmd: 'externalNotify', account, historyId: message.historyId, err });
+                    logger.error({ msg: 'External notification failed', cmd: 'externalNotify', account, historyId: message.historyId, err });
                 }
             }
             return true;
@@ -1941,18 +2197,25 @@ async function onCommand(worker, message) {
     return 999;
 }
 
+// Metrics collection results
 let metricsResult = {};
+
+/**
+ * Collect IMAP connection metrics from all workers
+ * @returns {Promise<void>}
+ */
 async function collectMetrics() {
-    // reset all counters
+    // Reset counters
     Object.keys(metricsResult || {}).forEach(key => {
         metricsResult[key] = 0;
     });
 
+    // Collect from each IMAP worker
     if (workers.has('imap')) {
         let imapWorkers = workers.get('imap');
         for (let imapWorker of imapWorkers) {
             if (!availableIMAPWorkers.has(imapWorker)) {
-                // worker not available yet
+                // Worker not ready yet
                 continue;
             }
 
@@ -1965,18 +2228,24 @@ async function collectMetrics() {
                     metricsResult[status] += Number(workerStats[status]) || 0;
                 });
             } catch (err) {
-                logger.error({ msg: 'Failed to count connections', err });
+                logger.error({ msg: 'Connection count failed', err });
             }
         }
     }
 
+    // Add unassigned accounts to disconnected count
     metricsResult.disconnected = (Number(metricsResult.disconnected) || 0) + (unassigned ? unassigned.size : 0);
 
+    // Update Prometheus metrics
     Object.keys(metricsResult).forEach(status => {
         metrics.imapConnections.set({ status }, metricsResult[status]);
     });
 }
 
+/**
+ * Close all queue connections gracefully
+ * @param {Function} cb - Callback when complete
+ */
 const closeQueues = cb => {
     let proms = [];
     if (queueEvents.notify) {
@@ -2016,8 +2285,9 @@ const closeQueues = cb => {
     });
 };
 
+// Handle graceful shutdown
 process.on('SIGTERM', () => {
-    logger.info({ msg: 'Close signal received', signal: 'SIGTERM', isClosing });
+    logger.info({ msg: 'Shutdown signal received', signal: 'SIGTERM', isClosing });
     if (isClosing) {
         return;
     }
@@ -2028,7 +2298,7 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
-    logger.info({ msg: 'Close signal received', signal: 'SIGINT', isClosing });
+    logger.info({ msg: 'Shutdown signal received', signal: 'SIGINT', isClosing });
     if (isClosing) {
         return;
     }
@@ -2040,85 +2310,93 @@ process.on('SIGINT', () => {
 
 // START APPLICATION
 
+/**
+ * Main application startup
+ * @returns {Promise<void>}
+ */
 const startApplication = async () => {
+    // Generate unique run index
     runIndex = await redis.hincrby(`${REDIS_PREFIX}settings`, 'run', 1);
 
-    // process license
+    // Process license file if provided
     if (config.licensePath) {
         try {
             let stat = await fs.stat(config.licensePath);
             if (!stat.isFile()) {
-                throw new Error(`Provided license key is not a regular file`);
+                throw new Error(`License file is not accessible`);
             }
             const licenseFile = await fs.readFile(config.licensePath, 'utf-8');
             let licenseData = await checkLicense(licenseFile);
             if (!licenseData) {
-                throw new Error('Failed to verify provided license key');
+                throw new Error('Invalid license key');
             }
-            logger.info({ msg: 'Loaded license key', license: licenseData, source: config.licensePath });
+            logger.info({ msg: 'License loaded', license: licenseData, source: config.licensePath });
 
             await setLicense(licenseData, licenseFile);
         } catch (err) {
-            logger.fatal({ msg: 'Failed to verify provided license key file', source: config.licensePath, err });
+            logger.fatal({ msg: 'License verification failed', source: config.licensePath, err });
             return logger.flush(() => process.exit(13));
         }
     }
 
+    // Process prepared license
     const preparedLicenseString = readEnvValue('EENGINE_PREPARED_LICENSE') || config.preparedLicense;
     if (preparedLicenseString) {
         try {
             let imported = await settings.importLicense(preparedLicenseString, checkLicense);
             if (imported) {
-                logger.info({ msg: 'Imported license key', source: 'import' });
+                logger.info({ msg: 'License imported', source: 'import' });
             }
         } catch (err) {
-            logger.fatal({ msg: 'Failed to verify provided license key data', source: 'import', err });
+            logger.fatal({ msg: 'License import failed', source: 'import', err });
             return logger.flush(() => process.exit(13));
         }
     }
 
+    // Load license from database
     let licenseFile = await redis.hget(`${REDIS_PREFIX}settings`, 'license');
     if (licenseFile) {
         try {
             let licenseData = await checkLicense(licenseFile);
             if (!licenseData) {
-                throw new Error('Failed to verify provided license key');
+                throw new Error('Invalid license key');
             }
             licenseInfo.active = true;
             licenseInfo.details = licenseData;
             licenseInfo.type = 'EmailEngine License';
             if (!config.licensePath) {
-                logger.info({ msg: 'Loaded license', license: licenseData, source: 'db' });
+                logger.info({ msg: 'License loaded', license: licenseData, source: 'db' });
             }
         } catch (err) {
-            logger.fatal({ msg: 'Failed to verify stored license key', content: licenseFile, err });
+            logger.fatal({ msg: 'Stored license verification failed', content: licenseFile, err });
         }
     }
 
     if (!licenseInfo.active) {
-        logger.fatal({ msg: 'No active license key provided. Running in limited mode.' });
+        logger.fatal({ msg: 'No active license. Running in limited mode.' });
     }
 
-    // check for updates, run as a promise to not block other activities
+    // Check for updates
     processCheckUpgrade().catch(err => {
-        logger.error({ msg: 'Failed to process upgrade check', err });
+        logger.error({ msg: 'Update check failed', err });
     });
 
+    // Apply prepared settings
     if (preparedSettings) {
-        // set up configuration
-        logger.debug({ msg: 'Updating application settings', settings: preparedSettings });
+        logger.debug({ msg: 'Applying configuration', settings: preparedSettings });
 
         for (let key of Object.keys(preparedSettings)) {
             await settings.set(key, preparedSettings[key]);
         }
     }
 
-    // prepare some required configuration values
+    // Initialize required settings
     let existingServiceId = await settings.get('serviceId');
     if (existingServiceId === null) {
         await settings.set('serviceId', crypto.randomBytes(16).toString('hex'));
     }
 
+    // SMTP server settings
     let existingSmtpEnabled = await settings.get('smtpServerEnabled');
     if (existingSmtpEnabled === null) {
         await settings.set('smtpServerEnabled', !!SMTP_ENABLED);
@@ -2149,6 +2427,7 @@ const startApplication = async () => {
         await settings.set('smtpServerProxy', SMTP_PROXY);
     }
 
+    // IMAP proxy settings
     let existingImapProxyEnabled = await settings.get('imapProxyServerEnabled');
     if (existingImapProxyEnabled === null) {
         await settings.set('imapProxyServerEnabled', !!IMAP_PROXY_ENABLED);
@@ -2174,11 +2453,13 @@ const startApplication = async () => {
         await settings.set('imapProxyServerProxy', IMAP_PROXY_PROXY);
     }
 
+    // API proxy settings
     let existingEnableApiProxy = await settings.get('enableApiProxy');
     if (existingEnableApiProxy === null) {
         await settings.set('enableApiProxy', HAS_API_PROXY_SET ? API_PROXY : true);
     }
 
+    // Service settings
     let existingServiceSecret = await settings.get('serviceSecret');
     if (existingServiceSecret === null) {
         await settings.set('serviceSecret', crypto.randomBytes(16).toString('hex'));
@@ -2190,6 +2471,7 @@ const startApplication = async () => {
         await settings.set('queueKeep', QUEUE_KEEP);
     }
 
+    // Webhook settings
     let existingNotifyText = await settings.get('notifyText');
     if (existingNotifyText === null) {
         await settings.set('notifyText', true);
@@ -2197,27 +2479,30 @@ const startApplication = async () => {
 
     let existingNotifyTextSize = await settings.get('notifyTextSize');
     if (existingNotifyTextSize === null) {
-        await settings.set('notifyTextSize', 2 * 1024 * 1024); // set default max text size in webhooks to 2MB
+        await settings.set('notifyTextSize', 2 * 1024 * 1024); // 2MB default
     }
 
+    // Script settings
     let existingScriptEnv = await settings.get('scriptEnv');
     if (existingScriptEnv === null) {
         await settings.set('scriptEnv', {}); // empty object
     }
 
+    // Import prepared token
     if (preparedToken) {
         try {
             let imported = await tokens.setRawData(preparedToken);
             if (imported) {
-                logger.debug({ msg: 'Imported prepared token', token: preparedToken.id });
+                logger.debug({ msg: 'Token imported', token: preparedToken.id });
             } else {
-                logger.debug({ msg: 'Skipped prepared token', token: preparedToken.id });
+                logger.debug({ msg: 'Token already exists', token: preparedToken.id });
             }
         } catch (err) {
-            logger.error({ msg: 'Failed to import token', token: preparedToken.id });
+            logger.error({ msg: 'Token import failed', token: preparedToken.id });
         }
     }
 
+    // Import prepared password
     if (preparedPassword) {
         try {
             let authData = await settings.get('authData');
@@ -2228,16 +2513,16 @@ const startApplication = async () => {
             authData.passwordVersion = Date.now();
 
             await settings.set('authData', authData);
-            logger.debug({ msg: 'Imported hashed password', hash: preparedPassword });
+            logger.debug({ msg: 'Password imported', hash: preparedPassword });
         } catch (err) {
-            logger.error({ msg: 'Failed to import password', hash: preparedPassword });
+            logger.error({ msg: 'Password import failed', hash: preparedPassword });
         }
     }
 
-    // renew encryiption secret, if needed
+    // Renew encryption secret if needed
     await getSecret();
 
-    // ensure password for cookie based auth
+    // Ensure cookie password
     let cookiePassword = await settings.get('cookiePassword');
     if (!cookiePassword) {
         cookiePassword = crypto.randomBytes(32).toString('base64');
@@ -2246,13 +2531,13 @@ const startApplication = async () => {
 
     // -- START WORKER THREADS
 
-    // single worker for HTTP, start first for health checks
+    // Start API server first for health checks
     await spawnWorker('api');
 
-    // artificail delay to allow starting api workers in case there is a large number of accounts
+    // Small delay to allow API to start
     await new Promise(r => setTimeout(r, 100));
 
-    // multiple IMAP connection handlers
+    // Start IMAP workers
     let workerPromises = [];
     for (let i = 0; i < config.workers.imap; i++) {
         workerPromises.push(spawnWorker('imap'));
@@ -2260,42 +2545,47 @@ const startApplication = async () => {
     let threadIds = await Promise.all(workerPromises);
     logger.info({ msg: 'IMAP workers started', workers: config.workers.imap, threadIds });
 
+    // Assign accounts to workers
     try {
         await assignAccounts();
     } catch (err) {
-        logger.error({ msg: 'Failed to assign accounts', n: 4, err });
+        logger.error({ msg: 'Initial account assignment failed', n: 4, err });
     }
     imapInitialWorkersLoaded = true;
 
+    // Start webhook workers
     for (let i = 0; i < config.workers.webhooks; i++) {
         await spawnWorker('webhooks');
     }
 
+    // Start submission workers
     for (let i = 0; i < config.workers.submit; i++) {
         await spawnWorker('submit');
     }
 
-    // single worker to process events in order
+    // Start document processing worker
     await spawnWorker('documents');
 
+    // Start SMTP proxy if enabled
     if (await settings.get('smtpServerEnabled')) {
-        // single SMTP interface worker
         await spawnWorker('smtp');
     }
 
+    // Start IMAP proxy if enabled
     if (await settings.get('imapProxyServerEnabled')) {
-        // single IMAP proxy interface worker
         await spawnWorker('imapProxy');
     }
 };
 
+// Start the application
 startApplication()
     .then(() => {
-        // start collecting metrics
+        // Start periodic metric collection
         setInterval(() => {
-            collectMetrics().catch(err => logger.error({ msg: 'Failed to collect metrics', err }));
+            collectMetrics().catch(err => logger.error({ msg: 'Metrics collection failed', err }));
         }, 1000).unref();
 
+        // Schedule periodic checks
         licenseCheckTimer = setTimeout(checkActiveLicense, LICENSE_CHECK_TIMEOUT);
         licenseCheckTimer.unref();
 
@@ -2305,11 +2595,12 @@ startApplication()
         redisPingTimer = setTimeout(checkRedisPing, REDIS_PING_TIMEOUT);
         redisPingTimer.unref();
 
+        // Initialize queue event listeners
         queueEvents.notify = new QueueEvents('notify', Object.assign({}, queueConf));
         queueEvents.submit = new QueueEvents('submit', Object.assign({}, queueConf));
         queueEvents.documents = new QueueEvents('documents', Object.assign({}, queueConf));
     })
     .catch(err => {
-        logger.fatal({ msg: 'Failed to start application', err });
+        logger.fatal({ msg: 'Application startup failed', err });
         logger.flush(() => process.exit(1));
     });

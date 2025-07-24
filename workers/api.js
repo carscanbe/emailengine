@@ -8,7 +8,8 @@ const packageData = require('../package.json');
 const config = require('wild-config');
 const logger = require('../lib/logger');
 const Path = require('path');
-const { loadTranslations, gt, joiLocales } = require('../lib/translations');
+const Gettext = require('@postalsys/gettext');
+const { loadTranslations, gt, joiLocales, locales } = require('../lib/translations');
 const util = require('util');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 const featureFlags = require('../lib/feature-flags');
@@ -74,6 +75,7 @@ const Joi = require('joi');
 const hapiPino = require('hapi-pino');
 const Inert = require('@hapi/inert');
 const Vision = require('@hapi/vision');
+const Accept = require('@hapi/accept');
 const HapiSwagger = require('hapi-swagger');
 
 const pathlib = require('path');
@@ -186,6 +188,8 @@ const AccountTypeSchema = Joi.string()
     .description('Account type')
     .required();
 
+const SUPPORTED_LOCALES = locales.map(locale => locale.locale);
+
 const FLAG_SORT_ORDER = ['\\Inbox', '\\Flagged', '\\Sent', '\\Drafts', '\\All', '\\Archive', '\\Junk', '\\Trash'];
 
 const { GMAIL_SCOPES } = require('../lib/oauth/gmail');
@@ -293,6 +297,13 @@ class ResponseStream extends Transform {
         registeredPublishers.add(this);
         this.periodicKeepAliveTimer = false;
         this.updateTimer();
+
+        this._finalized = false;
+
+        // Ensure cleanup on all stream end scenarios
+        this.once('error', () => this.finalize());
+        this.once('close', () => this.finalize());
+        this.once('end', () => this.finalize());
     }
 
     updateTimer() {
@@ -321,6 +332,9 @@ class ResponseStream extends Transform {
     }
 
     finalize() {
+        if (this._finalized) return; // Prevent double cleanup
+        this._finalized = true;
+
         clearTimeout(this.periodicKeepAliveTimer);
         registeredPublishers.delete(this);
     }
@@ -447,6 +461,7 @@ parentPort.on('message', message => {
         let { resolve, reject, timer } = callQueue.get(message.mid);
         clearTimeout(timer);
         callQueue.delete(message.mid);
+
         if (message.error) {
             let err = new Error(message.error);
             if (message.code) {
@@ -458,6 +473,7 @@ parentPort.on('message', message => {
             if (message.info) {
                 err.info = message.info;
             }
+
             return reject(err);
         } else {
             return resolve(message.response);
@@ -496,7 +512,12 @@ const init = async () => {
 
     handlebars.registerHelper('_', (...args) => {
         let params = args.slice(1, args.length - 1);
-        let translated = gt.gettext(args[0]);
+
+        let locale = params.shift();
+
+        let localGt = locale ? gt.useLocale(locale) : gt;
+
+        let translated = localGt.gettext(args[0]);
         if (params.length) {
             translated = util.format(translated, ...params);
         }
@@ -574,7 +595,10 @@ const init = async () => {
             validate: {
                 options: {
                     messages: joiLocales,
-                    convert: true
+                    convert: true,
+                    errors: {
+                        language: 'en' // Default language
+                    }
                 },
                 headers: Joi.object({
                     'x-ee-timeout': headerTimeoutSchema
@@ -681,22 +705,97 @@ const init = async () => {
         return certificateData;
     });
 
-    server.ext('onPostAuth', async (request, h) => {
-        let defaultLocale = (await settings.get('locale')) || 'en';
+    server.ext('onPreAuth', async (request, h) => {
+        const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
+        // Skip if it's a static file route
+        if (tags.includes('static')) {
+            return h.continue;
+        }
+
+        const defaultLocale = (await settings.get('locale')) || 'en';
         if (defaultLocale && gt.locale !== defaultLocale) {
             gt.setLocale(defaultLocale);
         }
 
-        if (joiLocales[defaultLocale] && request.route.settings.validate.options) {
-            if (!request.route.settings.validate.options.errors) {
-                request.route.settings.validate.options.errors = {};
-            }
-            request.route.settings.validate.options.errors.language = defaultLocale;
+        let detectedLocale = defaultLocale;
+        let updateLocaleCookie;
+        // Priority order:
+        // 1. Query parameter (?locale=nl)
+        if (request.query.locale && SUPPORTED_LOCALES.includes(request.query.locale)) {
+            detectedLocale = request.query.locale;
+            updateLocaleCookie = detectedLocale;
         }
+        // 2. Custom header (X-EE-Locale: nl)
+        else if (request.headers['x-ee-locale'] && SUPPORTED_LOCALES.includes(request.headers['x-ee-locale'])) {
+            detectedLocale = request.headers['x-ee-locale'];
+            updateLocaleCookie = detectedLocale;
+        }
+        // 3. Use the locale store in cookie
+        else if (request.state && request.state.locale && request.state.locale.locale) {
+            detectedLocale = request.state && request.state.locale && request.state.locale.locale;
+        }
+        // 4. Accept-Language header negotiation
+        else if (request.headers['accept-language']) {
+            try {
+                detectedLocale = Accept.language(request.headers['accept-language'], SUPPORTED_LOCALES);
+            } catch (err) {
+                // Keep default locale on parse error
+                request.logger.debug({
+                    msg: 'Accept-Language parse error',
+                    err,
+                    header: request.headers['accept-language']
+                });
+            }
+        }
+        // 5. If still no match, keep the default
+
+        // Save selected locale in a cookie for UI requests
+        // Only use the value from query argument or custom header, not from Accept-Language header
+
+        if (
+            updateLocaleCookie &&
+            (!request.state || !request.state.locale || updateLocaleCookie !== request.state.locale.locale) &&
+            // skip API paths
+            !request.route.path.startsWith('/v1/') &&
+            !request.route.path.startsWith('/health')
+        ) {
+            // set locale cookie
+            h.state('locale', { locale: detectedLocale });
+        }
+
+        // Set the locale for the request
+        const reqLocale = detectedLocale && Gettext.getLanguageCode(detectedLocale);
+        if (reqLocale && gt.catalogs.hasOwnProperty(reqLocale)) {
+            request.app.gt = gt.useLocale(reqLocale);
+            request.app.locale = reqLocale;
+        } else {
+            request.app.locale = defaultLocale;
+            request.app.gt = gt;
+        }
+
+        // Make sure validation errors use selected locale
+        if (request.route.settings.validate && request.route.settings.validate.options) {
+            // Get user's locale
+            const locale = request.app.locale || 'en';
+
+            // Create new validation options for this request
+            const validationOptions = Object.assign({}, request.route.settings.validate.options, {
+                errors: {
+                    language: locale
+                }
+            });
+
+            // Apply to this request only
+            request.route.settings.validate.options = validationOptions;
+        }
+
         return h.continue;
     });
 
     server.ext('onRequest', async (request, h) => {
+        // set default, will be overriden once active language is resolved
+        request.app.gt = gt;
+
         // check if client IP is resolved from X-Forwarded-For or not
         let enableApiProxy = (await settings.get('enableApiProxy')) || false;
         if (enableApiProxy) {
@@ -724,7 +823,7 @@ const init = async () => {
         request.flash = async message => await flash(redis, request, message);
 
         if (ADMIN_ACCESS_ADDRESSES && ADMIN_ACCESS_ADDRESSES.length) {
-            if (/^\/admin\b/i.test(request.path) && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
+            if (request.route.path.startsWith('/admin') && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
                 logger.info({
                     msg: 'Blocked access from unlisted IP address',
                     remoteAddress: request.app.ip,
@@ -776,17 +875,50 @@ const init = async () => {
             title: 'EmailEngine API',
             version: packageData.version,
 
-            description: `<strong>Authentication Required:</strong> You must provide an Access Token to use this API. (Generate your Access Token <a href="/admin/tokens" target="_parent">here</a>).
+            description: `EmailEngine provides a RESTful API for managing email accounts, sending messages, and processing email data across multiple providers.
 
-<strong>Note on Request Handling:</strong> Requests made to the same account are processed sequentially and are not executed in parallel. If a previous request is still processing, subsequent requests may be queued. In the event of a prolonged request, queued requests may time out before being executed by EmailEngine.`
+<h3>Authentication</h3>
+All API requests require authentication using an Access Token. You can generate and manage your tokens from the <a href="/admin/tokens" target="_parent"><strong>Access Tokens</strong></a> page.
+
+Include your token in requests using one of these methods:
+- Query parameter: <code>?access_token=YOUR_TOKEN</code>
+- Authorization header: <code>Authorization: Bearer YOUR_TOKEN</code>
+
+<h3>Request Processing</h3>
+
+<strong>Sequential Processing:</strong> Requests to the same email account are processed sequentially to maintain data consistency. Multiple simultaneous requests will be queued.
+
+<strong>Timeouts:</strong> Long-running operations may cause queued requests to timeout. Configure appropriate timeout values using the <code>X-EE-Timeout</code> header (in milliseconds).
+
+<h3>Getting Started</h3>
+1. <a href="/admin/tokens" target="_parent">Generate an Access Token</a>
+2. <a href="/admin/accounts" target="_parent">Add an email account</a>
+3. Start making API requests using the endpoints below`,
+
+            contact: {
+                name: 'EmailEngine Support',
+                url: 'https://emailengine.app/support',
+                email: 'support@emailengine.app'
+            },
+
+            license: {
+                name: 'EmailEngine License',
+                url: 'https://emailengine.dev/LICENSE_EMAILENGINE.txt'
+            }
+        },
+
+        externalDocs: {
+            description: 'EmailEngine Documentation',
+            url: 'https://emailengine.app/'
         },
 
         securityDefinitions: {
             bearerAuth: {
                 type: 'apiKey',
-                //scheme: 'bearer',
                 name: 'access_token',
-                in: 'query'
+                in: 'query',
+                description:
+                    'Access token for API authentication. Can be provided as a query parameter (?access_token=TOKEN) or in the Authorization header (Bearer TOKEN).'
             }
         },
 
@@ -799,74 +931,101 @@ const init = async () => {
 
         tags: [
             {
-                name: 'Account'
+                name: 'Account',
+                description: 'Manage email accounts, including IMAP/SMTP configuration, OAuth2 authentication, and account health monitoring'
             },
             {
                 name: 'Mailbox',
-                description: 'Manage mailbox folders'
+                description: 'List, create, rename, and manage mailbox folders. Retrieve folder statistics and special-use designations'
             },
             {
-                name: 'Message'
+                name: 'Message',
+                description: 'Search, retrieve, update, and delete email messages. Manage flags, labels, and message content'
             },
             {
                 name: 'Submit',
+                description:
+                    'Send emails with attachments, reply to threads, forward messages, and upload to folders. Supports both immediate and scheduled sending',
                 externalDocs: {
-                    description: 'Documentation',
+                    description: 'Sending Emails Documentation',
                     url: 'https://emailengine.app/sending-emails'
                 }
             },
             {
                 name: 'Outbox',
-                description: 'Manage scheduled and pending emails in the sending queue'
+                description: 'Monitor and manage the email sending queue. View pending messages, retry failed deliveries, and track sending progress'
             },
             {
                 name: 'Delivery Test',
-                description: 'Test email deliverability, including SPF, DKIM, and DMARC alignment'
+                description: 'Test email deliverability and authentication. Verify SPF, DKIM signatures, DMARC alignment, and analyze potential delivery issues'
             },
             {
-                name: 'Access Tokens'
+                name: 'Access Tokens',
+                description: 'Create and manage API access tokens with customizable permissions, IP restrictions, and rate limits'
             },
             {
                 name: 'Settings',
-                description: 'Runtime configuration for EmailEngine'
+                description: 'Configure EmailEngine runtime settings including webhooks, tracking, AI features, and email processing options'
             },
             {
                 name: 'Templates',
-                description: 'Manage templates for sending emails',
+                description: 'Create and manage reusable email templates with variable substitution, HTML/text content, and attachments',
                 externalDocs: {
-                    description: 'Documentation',
+                    description: 'Email Templates Documentation',
                     url: 'https://emailengine.app/email-templates'
                 }
             },
             {
-                name: 'Logs'
+                name: 'Logs',
+                description: 'Access system and account-level logs for debugging, monitoring, and audit purposes'
             },
             {
-                name: 'Stats'
+                name: 'Stats',
+                description: 'Retrieve usage statistics, performance metrics, and account activity data',
+                externalDocs: {
+                    description: 'Monitoring and Analytics',
+                    url: 'https://emailengine.app/monitoring'
+                }
             },
             {
-                name: 'License'
+                name: 'License',
+                description: 'Manage EmailEngine licensing, view license status, and handle license-related operations'
             },
             {
-                name: 'Webhooks'
+                name: 'Webhooks',
+                description: 'Configure webhook endpoints, manage event subscriptions, and monitor webhook delivery status',
+                externalDocs: {
+                    description: 'Webhooks Guide',
+                    url: 'https://emailengine.app/webhooks'
+                }
             },
             {
                 name: 'OAuth2 Applications',
+                description: 'Configure OAuth2 applications for Gmail, Outlook, and other providers. Manage client credentials and authentication flows',
                 externalDocs: {
-                    description: 'Documentation',
+                    description: 'OAuth2 Configuration Guide',
                     url: 'https://emailengine.app/oauth2-configuration'
                 }
             },
             {
-                name: 'SMTP Gateway'
+                name: 'SMTP Gateway',
+                description: 'Configure and manage the built-in SMTP server for receiving emails and integrating with external systems'
             },
             {
-                name: 'Blocklists'
+                name: 'Blocklists',
+                description: 'Manage email address blocklists to prevent sending to specific recipients or domains'
             },
             {
-                name: 'Multi Message Actions'
+                name: 'Multi Message Actions',
+                description: 'Perform bulk operations on multiple messages simultaneously, such as marking as read, moving, or deleting'
             }
-        ]
+        ],
+
+        // Custom vendor extensions for additional metadata
+        'x-logo': {
+            url: 'https://emailengine.dev/static/logo.png',
+            altText: 'EmailEngine Logo'
+        }
     };
 
     await server.register(AuthBearer);
@@ -1055,6 +1214,13 @@ const init = async () => {
         // skip
     }
 
+    server.state('locale', {
+        ttl: null,
+        encoding: 'base64json',
+        clearInvalid: true,
+        path: '/'
+    });
+
     // Authentication for admin pages
     server.auth.strategy('session', 'cookie', {
         cookie: {
@@ -1182,7 +1348,8 @@ const init = async () => {
     ]);
 
     server.events.on('response', request => {
-        if (!/^\/v1\//.test(request.route.path)) {
+        const tags = request.route && request.route.settings && request.route.settings.tags;
+        if (!tags || !tags.includes('api')) {
             // only log API calls
             return;
         }
@@ -1217,7 +1384,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'static', 'favicon.ico'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1228,7 +1396,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'static', 'licenses.html'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1239,7 +1408,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'LICENSE_EMAILENGINE.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1250,7 +1420,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'LICENSE_EMAILENGINE.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1261,7 +1432,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'sbom.json'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1291,7 +1463,8 @@ const init = async () => {
             file: { path: pathlib.join(__dirname, '..', 'static', 'robots.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1304,7 +1477,8 @@ const init = async () => {
             }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1329,7 +1503,8 @@ const init = async () => {
         },
         options: {
             description: 'Health check',
-            auth: false
+            auth: false,
+            tags: ['static', 'health']
         }
     });
 
@@ -2110,6 +2285,7 @@ const init = async () => {
                 secret: await getSecret(),
                 timeout: request.headers['x-ee-timeout']
             });
+
             let result = await accountObject.create(accountData);
 
             if (accountMeta.n) {
@@ -2141,7 +2317,7 @@ const init = async () => {
             return h.view(
                 'redirect',
                 {
-                    pageTitleFull: gt.gettext('Email Account Setup'),
+                    pageTitleFull: request.app.gt.gettext('Email Account Setup'),
                     httpRedirectUrl
                 },
                 {
@@ -6321,7 +6497,7 @@ const init = async () => {
 
         async handler(request) {
             try {
-                let serverSettings = await autodetectImapSettings(request.query.email);
+                let serverSettings = await autodetectImapSettings(request.query.email, request.app.gt);
                 return serverSettings;
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
@@ -8761,7 +8937,9 @@ ${now}`,
                 notificationBaseUrl,
 
                 userLocale: locale,
-                userTimezone: timezone
+                userTimezone: timezone,
+
+                templateLocale: request.app.locale
             };
         }
     });
@@ -8789,8 +8967,8 @@ ${now}`,
         const ctx = {
             message:
                 error.output.statusCode === 404
-                    ? 'page not found'
-                    : (error.output && error.output.payload && error.output.payload.message) || 'something went wrong',
+                    ? request.app.gt.gettext('Requested page not found')
+                    : (error.output && error.output.payload && error.output.payload.message) || request.app.gt.gettext('Something went wrong'),
             details: error.output && error.output.payload && error.output.payload.details
         };
 
@@ -8819,7 +8997,10 @@ ${now}`,
             return res.code(request.errorInfo.statusCode || 500);
         }
 
-        if (/^\/v1\//.test(request.path) || /^\/health$|\/test$/.test(request.path)) {
+        const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
+        const isApiRoute = tags.includes('api') || tags.includes('test');
+
+        if (isApiRoute) {
             // API path
             return h.response(request.errorInfo).code(request.errorInfo.statusCode || 500);
         }
@@ -8901,8 +9082,8 @@ ${now}`,
     server.route({
         method: '*',
         path: '/{any*}',
-        async handler() {
-            throw Boom.notFound('Requested page not found'); // 404
+        async handler(request) {
+            throw Boom.notFound(request.app.gt.gettext('Requested page not found')); // 404
         }
     });
 
