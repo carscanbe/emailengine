@@ -525,6 +525,8 @@ const init = async () => {
         return new handlebars.SafeString(translated);
     });
 
+    handlebars.registerHelper('isodate', time => new Date(Number(time)).toISOString());
+
     handlebars.registerHelper('ngettext', (msgid, plural, count) => util.format(gt.ngettext(msgid, plural, count), count));
 
     handlebars.registerHelper('featureFlag', function (flag, options) {
@@ -823,7 +825,7 @@ const init = async () => {
         request.flash = async message => await flash(redis, request, message);
 
         if (ADMIN_ACCESS_ADDRESSES && ADMIN_ACCESS_ADDRESSES.length) {
-            if (request.route.path.startsWith('/admin') && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
+            if (request.path.startsWith('/admin') && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
                 logger.info({
                     msg: 'Blocked access from unlisted IP address',
                     remoteAddress: request.app.ip,
@@ -857,7 +859,10 @@ const init = async () => {
 
     const swaggerOptions = {
         swaggerUI: true,
+        jsonPath: '/swagger.json',
         swaggerUIPath: '/admin/swagger/resources/',
+
+        OAS: 'v3.0',
 
         expanded: 'list',
         sortEndpoints: 'method',
@@ -868,8 +873,6 @@ const init = async () => {
         templates: Path.join(__dirname, '..', 'views', 'swagger', 'ui'),
 
         grouping: 'tags',
-
-        //auth: 'api-token',
 
         info: {
             title: 'EmailEngine API',
@@ -914,11 +917,10 @@ Include your token in requests using one of these methods:
 
         securityDefinitions: {
             bearerAuth: {
-                type: 'apiKey',
-                name: 'access_token',
-                in: 'query',
-                description:
-                    'Access token for API authentication. Can be provided as a query parameter (?access_token=TOKEN) or in the Authorization header (Bearer TOKEN).'
+                type: 'http',
+                scheme: 'bearer',
+                bearerFormat: 'JWT',
+                description: 'Enter your access token'
             }
         },
 
@@ -1053,6 +1055,23 @@ Include your token in requests using one of these methods:
                     if (/^scope:/.test(tag)) {
                         scope = tag.substr('scope:'.length);
                     }
+                }
+            }
+
+            if (token.startsWith('sess_') && scope === 'api') {
+                // seems like a session token
+                let isValidSessionToken = await tokens.validateSessionToken(
+                    request.state && request.state.ee && request.state.ee.sid,
+                    token,
+                    request.params.account,
+                    900
+                );
+                if (isValidSessionToken) {
+                    return {
+                        isValid: true,
+                        credentials: {},
+                        artifacts: {}
+                    };
                 }
             }
 
@@ -1928,9 +1947,16 @@ Include your token in requests using one of these methods:
                                 time: Date.now()
                             };
                         } catch (err) {
+                            request.logger.error({
+                                msg: 'Subscription renewal failed',
+                                subscriptionId: outlookSubscription.id,
+                                account: request.query.account,
+                                requestUrl: `/subscriptions/${outlookSubscription.id}`,
+                                err
+                            });
                             outlookSubscription.state = {
                                 state: 'error',
-                                error: `Renewal failed: ${
+                                error: `Subscription renewal failed: ${
                                     (err.oauthRequest &&
                                         err.oauthRequest.response &&
                                         err.oauthRequest.response.error &&
@@ -3474,7 +3500,7 @@ Include your token in requests using one of these methods:
                         .example('connected')
                         .description('Filter accounts by state')
                         .label('AccountState'),
-                    query: Joi.string().example('user@example').description('Filter accounts by string match').label('AccountQuery')
+                    query: Joi.string().example('user@example.com').description('Filter accounts by string match').label('AccountQuery')
                 }).label('AccountsFilter')
             },
 

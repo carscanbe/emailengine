@@ -19,7 +19,7 @@
     <div class="card-body">
         <div>
             Currently showing tokens for <strong><a
-                    href="/admin/accounts/{{account.account}}">{{account.name}}</a></strong>. These tokens can not be
+                    href="/admin/accounts/{{account.account}}">{{account.name}}</a></strong>. These tokens cannot be
             used by other accounts.
         </div>
     </div>
@@ -66,8 +66,8 @@
 
                     <td class="p-2 text-right">
                         <button type="button" class="btn btn-danger btn-circle btn-sm delete-token-btn"
-                            data-token="{{id}}" data-toggle="tooltip" data-placement="top" title="Delete this token"><i
-                                class="fas fa-trash-alt"></i></button>
+                            data-token="{{id}}" data-token-description="{{description}}" data-toggle="tooltip"
+                            data-placement="top" title="Delete this token"><i class="fas fa-trash-alt"></i></button>
                     </td>
 
                 </tr>
@@ -111,7 +111,7 @@
         {{#if account}}
         <div>
             Currently showing tokens for <strong><a href="/admin/accounts/{{account.account}}">{{#if
-                    account.name}}{{account.name}}{{else}}{{account.email}}{{/if}}</a></strong>. These tokens can not
+                    account.name}}{{account.name}}{{else}}{{account.email}}{{/if}}</a></strong>. These tokens cannot
             be used by other accounts.
         </div>
         <hr>
@@ -119,9 +119,9 @@
 
         <p>
             {{#if firstPage}}
-            No access tokens have been provisioned. Generate a new token <a href="{{newLink}}">here</a>.
+            No access tokens have been created. Generate a new token <a href="{{newLink}}">here</a>.
             {{else}}
-            Nothing to show here.
+            No tokens found.
             {{/if}}
         </p>
     </div>
@@ -136,9 +136,9 @@
     </a>
     <div class="collapse" id="showHelp">
         <div class="card-body">
-            <p>You either have to use the <em>Authorization: Bearer</em> header (preferred) or the
+            <p>You must use either the <em>Authorization: Bearer</em> header (recommended) or the
                 <em>access_token</em> query parameter to make API requests. Avoid using the query parameter as it is
-                not redacted from the HTTP logs.
+                not redacted from HTTP logs.
             </p>
 
             <pre>$ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v1/stats?access_token=&lt;token&gt;"
@@ -177,7 +177,8 @@ $ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v
                 </button>
             </div>
             <div class="modal-body">
-                Are you sure you want to delete this token? This action can not be reversed.
+                Are you sure you want to delete <strong id="delete-token-description"></strong>? This action
+                can not be reversed.
             </div>
             <div class="modal-footer">
                 <form method="post" action="/admin/tokens/delete">
@@ -198,6 +199,7 @@ $ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v
             elm.addEventListener('click', e => {
                 e.preventDefault();
                 document.getElementById('token-delete').value = elm.dataset.token;
+                document.getElementById('delete-token-description').textContent = elm.dataset.tokenDescription;
                 $('#deleteToken').modal('show');
             });
         }

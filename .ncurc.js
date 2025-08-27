@@ -14,10 +14,15 @@ module.exports = {
         'eslint',
         'grunt-eslint',
 
+        'pino-pretty',
+
         // no support for Node 16
         'marked',
 
         // some kind of CVE in later versions. Only needed for license reference, so the actual version does not matter anyway
-        'startbootstrap-sb-admin-2'
+        'startbootstrap-sb-admin-2',
+
+        // Keep joi at version 17.x for hapi-swagger compatibility
+        'joi'
     ]
 };

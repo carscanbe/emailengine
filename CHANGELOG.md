@@ -1,5 +1,61 @@
 # Changelog
 
+## [2.54.5](https://github.com/postalsys/emailengine/compare/v2.54.4...v2.54.5) (2025-08-26)
+
+
+### Bug Fixes
+
+* Bumped ImapFlow to decrease load on CPU ([227894d](https://github.com/postalsys/emailengine/commit/227894dbbc68f6b7d5cf5322d1010678940107c1))
+* **env:** Added EENGINE_DISABLE_MESSAGE_BROWSER, fixed EENGINE_ADMIN_ACCESS_ADDRESSES regression bug ([4d922ff](https://github.com/postalsys/emailengine/commit/4d922ff9c7eb7ca6839657430adc3df7013a7204))
+* Fixed checking nil against a number ([eee7294](https://github.com/postalsys/emailengine/commit/eee7294d1e4cd328ba1cff8aeb704d86a6fd767f))
+
+## [2.54.4](https://github.com/postalsys/emailengine/compare/v2.54.3...v2.54.4) (2025-08-14)
+
+
+### Bug Fixes
+
+* **imap:** Fixed subconnection error handling ([5367c77](https://github.com/postalsys/emailengine/commit/5367c77f88690a3636049e0690d2f674e1528a30))
+* **install:** Fixed Redis password generation for the install script ([bf5853e](https://github.com/postalsys/emailengine/commit/bf5853e0c394a98d3bad079293dd5e73206d5183))
+
+## [2.54.3](https://github.com/postalsys/emailengine/compare/v2.54.2...v2.54.3) (2025-08-13)
+
+
+### Bug Fixes
+
+* Bumped ImapFlow module for improved IMAP handling stability ([5f7ce73](https://github.com/postalsys/emailengine/commit/5f7ce73eb270f3f92fdd17398842ad003c628612))
+
+## [2.54.2](https://github.com/postalsys/emailengine/compare/v2.54.1...v2.54.2) (2025-08-05)
+
+
+### Bug Fixes
+
+* dark mode support for message browser ([59d3c31](https://github.com/postalsys/emailengine/commit/59d3c31d58ea46d31b9908188b599c2169da87f7))
+* **delegated:** Fixed mailbox listing for delegated OAuth2 accounts ([9fc74fd](https://github.com/postalsys/emailengine/commit/9fc74fd41e00a92eb121a85efa134947497de608))
+* limit session token usage for the message browser ([41ead92](https://github.com/postalsys/emailengine/commit/41ead924917930f828f996b43c6a16a73c8c7bb9))
+* message browser uses theme based confirm instead of sync javascript confirm ([9409d2c](https://github.com/postalsys/emailengine/commit/9409d2c7e4a93fd9ab16876baf52294968511840))
+* **verify:** Slightly faster account data verification ([3e27d5e](https://github.com/postalsys/emailengine/commit/3e27d5e75f4a59e97aca7a3eff8a041c3d540935))
+
+## [2.54.1](https://github.com/postalsys/emailengine/compare/v2.54.0...v2.54.1) (2025-08-03)
+
+
+### Bug Fixes
+
+* **oauth2:** Fixed issues with OAuth2 periodic renewals (subscriptions etc) ([046bd55](https://github.com/postalsys/emailengine/commit/046bd5585f24d8184a4cca7484afbb3fda93fbf4))
+
+## [2.54.0](https://github.com/postalsys/emailengine/compare/v2.53.3...v2.54.0) (2025-08-01)
+
+
+### Features
+
+* **ui:** Added message browser to account view ([a1e27d8](https://github.com/postalsys/emailengine/commit/a1e27d8004631d62849ba7f08451eec0cc731cca))
+
+
+### Bug Fixes
+
+* move from OAS v2 to OAS v3 ([49e7018](https://github.com/postalsys/emailengine/commit/49e7018d8003397bce7383c7aac6b39c1ff1e3d0))
+* normalize OAuth2 subscription keys ([a400e73](https://github.com/postalsys/emailengine/commit/a400e7397d509ef6bba1a47d7dd8535b019862c4))
+* Show the token description on the delete token confirmation modal ([495af4f](https://github.com/postalsys/emailengine/commit/495af4fb860e705b983674a5e8d708a09ef9de20))
+
 ## [2.53.3](https://github.com/postalsys/emailengine/compare/v2.53.2...v2.53.3) (2025-07-17)
 
 
