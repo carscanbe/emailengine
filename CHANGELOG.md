@@ -1,5 +1,94 @@
 # Changelog
 
+## [2.56.0](https://github.com/postalsys/emailengine/compare/v2.55.8...v2.56.0) (2025-10-05)
+
+
+### Features
+
+* **api:** Add mailbox subscription management to modify endpoint ([4578c8a](https://github.com/postalsys/emailengine/commit/4578c8a89f56725ec02a3d9e2418c141acea4db1))
+
+## [2.55.8](https://github.com/postalsys/emailengine/compare/v2.55.7...v2.55.8) (2025-09-29)
+
+
+### Bug Fixes
+
+* Fixed build ([ac5d3b4](https://github.com/postalsys/emailengine/commit/ac5d3b4b700752e42acd0b7028bfdf622eac1f0a))
+
+## [2.55.7](https://github.com/postalsys/emailengine/compare/v2.55.6...v2.55.7) (2025-09-29)
+
+
+### Bug Fixes
+
+* Bumped email-text-tools to fix webSafe processing ([ae6f2f1](https://github.com/postalsys/emailengine/commit/ae6f2f149ab675faaa9de5490809400b5c24996d))
+
+## [2.55.6](https://github.com/postalsys/emailengine/compare/v2.55.5...v2.55.6) (2025-09-26)
+
+
+### Bug Fixes
+
+* race condition in runFullSync and add diagnostic logging ([#549](https://github.com/postalsys/emailengine/issues/549)) ([cdb3fe1](https://github.com/postalsys/emailengine/commit/cdb3fe18b2494cc02f1e50e98ffddf0003329dd2))
+
+## [2.55.5](https://github.com/postalsys/emailengine/compare/v2.55.4...v2.55.5) (2025-09-19)
+
+
+### Bug Fixes
+
+* **outlook:** Fix MS Graph webhook subscription expiration issues ([1153313](https://github.com/postalsys/emailengine/commit/1153313868fae506cee9c13805628fddf6101e17))
+
+## [2.55.4](https://github.com/postalsys/emailengine/compare/v2.55.3...v2.55.4) (2025-09-14)
+
+
+### Bug Fixes
+
+* Replace v8.getHeapStatistics with process.memoryUsage to prevent SEGV errors ([918dba7](https://github.com/postalsys/emailengine/commit/918dba7682a6e50f6aec8c91fe1e35a3f0eb2928))
+* Simplify memory display in internals page ([8dc284b](https://github.com/postalsys/emailengine/commit/8dc284b90360f747dd0c7d98115b5352544a028b))
+* Update internals page to handle new memory usage format ([cf0de82](https://github.com/postalsys/emailengine/commit/cf0de827b17b13e9234d347f5f6686de29bfb7d2))
+
+## [2.55.3](https://github.com/postalsys/emailengine/compare/v2.55.2...v2.55.3) (2025-09-11)
+
+
+### Bug Fixes
+
+* Remove CPU metrics collection to prevent potential native code issues ([350afc2](https://github.com/postalsys/emailengine/commit/350afc2a74e2935f74ad0b00110cd6e67eafc5b0))
+* **webhooks:** Show more informational messages when webhooks fail ([0712f0a](https://github.com/postalsys/emailengine/commit/0712f0a0d547b61ba95be34346523ee8fe32210f))
+
+## [2.55.2](https://github.com/postalsys/emailengine/compare/v2.55.1...v2.55.2) (2025-09-03)
+
+
+### Bug Fixes
+
+* **oauth:** Update Redis hash mapping when OAuth email changes ([82c1d89](https://github.com/postalsys/emailengine/commit/82c1d89dcf81edc198bcdf3dcc266506cb534da2))
+* **webhooks:** Explicitly set Content-Length to prevent undici mismatch errors ([40cb42d](https://github.com/postalsys/emailengine/commit/40cb42dfefdbc55eb2eca5c61c15565de5e85d8e))
+
+## [2.55.1](https://github.com/postalsys/emailengine/compare/v2.55.0...v2.55.1) (2025-08-29)
+
+
+### Bug Fixes
+
+* **memory:** Add LRU-based cleanup for SMTP connection pools ([fba58e8](https://github.com/postalsys/emailengine/commit/fba58e8069d74a0738cebab478188eee31749678))
+* **metrics:** Implement background metrics collection to prevent CPU spikes ([b0a200a](https://github.com/postalsys/emailengine/commit/b0a200a8e491bddcf1a3896e12253523036ad339))
+* **redis:** Add recovery mechanism for disconnected accounts after Redis reconnection ([ac9737a](https://github.com/postalsys/emailengine/commit/ac9737a98bdb50220278e809de408582f789cf05))
+* **redis:** Improve Redis reconnection handling for IMAP workers ([de7327e](https://github.com/postalsys/emailengine/commit/de7327e08ca676607433890060f045bbc851a3a7))
+
+## [2.55.0](https://github.com/postalsys/emailengine/compare/v2.54.5...v2.55.0) (2025-08-28)
+
+
+### Features
+
+* **health:** Add worker health monitoring with heartbeat system ([34724e8](https://github.com/postalsys/emailengine/commit/34724e876a021d6de30bffff54856bb9a2c6ef76))
+* **internals:** Add CPU monitoring for worker threads ([8aa9be5](https://github.com/postalsys/emailengine/commit/8aa9be5ab7a09c7d12745d2ddc3632da868d0bcb))
+* **resilience:** Add circuit breaker pattern for worker communication ([79ea27a](https://github.com/postalsys/emailengine/commit/79ea27aed0ae7c5c856746809d43f53bacf3ed2b))
+
+
+### Bug Fixes
+
+* **flush:** Allow flushing non-connected accounts ([07eebc5](https://github.com/postalsys/emailengine/commit/07eebc55ba2d4341d92fb7a1d9078449750b2a7c))
+* **imap:** Fix uneven IMAP worker thread distribution ([339f0e0](https://github.com/postalsys/emailengine/commit/339f0e0b8f7a382a42c29460526a9ddfac91a0fe))
+* **imap:** Prevent 100% CPU usage from reconnection loops ([4d1bf7d](https://github.com/postalsys/emailengine/commit/4d1bf7da53d299f0b203eb09b4ec790848c6cf09))
+* **internals:** Handle unresponsive workers gracefully in admin internals page ([2a2d94b](https://github.com/postalsys/emailengine/commit/2a2d94b916e32b7a5f8a2741dbd8fbb265b98605))
+* **lint:** Remove unused HEARTBEAT_INTERVAL constant and add npm lint script ([19209ab](https://github.com/postalsys/emailengine/commit/19209ab254bfa1262fa5e34f994db51ebca61f5a))
+* **lua:** Fix bugs and add documentation to Redis Lua scripts ([1c4889f](https://github.com/postalsys/emailengine/commit/1c4889f9e055e3c9b16b11513583abc494c92a15))
+
 ## [2.54.5](https://github.com/postalsys/emailengine/compare/v2.54.4...v2.54.5) (2025-08-26)
 
 

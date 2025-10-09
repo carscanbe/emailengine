@@ -123,6 +123,18 @@ async function onCommand(command) {
     }
 }
 
+// Start sending heartbeats to main thread
+setInterval(() => {
+    try {
+        parentPort.postMessage({ cmd: 'heartbeat' });
+    } catch (err) {
+        // Ignore errors, parent might be shutting down
+    }
+}, 10 * 1000).unref();
+
+// Send initial ready signal
+parentPort.postMessage({ cmd: 'ready' });
+
 parentPort.on('message', message => {
     if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
         let { resolve, reject, timer } = callQueue.get(message.mid);
@@ -375,6 +387,9 @@ const notifyWorker = new Worker(
         }
         let body = Buffer.from(JSON.stringify(webhookPayload));
 
+        // Explicitly set Content-Length to prevent undici mismatch errors
+        headers['Content-Length'] = body.length.toString();
+
         const serviceSecret = await getServiceSecret();
         let hmac = createHmac('sha256', serviceSecret);
         hmac.update(body);
@@ -392,12 +407,12 @@ const notifyWorker = new Worker(
                 duration = Date.now() - start;
             } catch (err) {
                 duration = Date.now() - start;
-                throw err;
+                throw err.cause || err;
             }
 
             if (!res.ok) {
-                let err = new Error(`Invalid response: ${res.status} ${res.statusText}`);
-                err.status = res.status;
+                let err = new Error(res.statusText || `Invalid response: ${res.status} ${res.statusText}`);
+                err.statusCode = res.status;
                 throw err;
             }
 
@@ -479,7 +494,9 @@ route: customRoute && customRoute.id,
                             event: job.name,
                             message: err.message,
                             time: Date.now(),
-                            url: customRoute.targetUrl
+                            url: customRoute.targetUrl,
+                            code: err.code,
+                            statusCode: err.statusCode
                         })
                     );
                 } else if (accountWebhooks) {
@@ -490,7 +507,9 @@ route: customRoute && customRoute.id,
                             event: job.name,
                             message: err.message,
                             time: Date.now(),
-                            url: webhooks
+                            url: webhooks,
+                            code: err.code,
+                            statusCode: err.statusCode
                         })
                     );
                 } else {
@@ -498,7 +517,9 @@ route: customRoute && customRoute.id,
                         event: job.name,
                         message: err.message,
                         time: Date.now(),
-                        url: webhooks
+                        url: webhooks,
+                        code: err.code,
+                        statusCode: err.statusCode
                     });
                 }
             } catch (err) {

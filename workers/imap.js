@@ -78,11 +78,56 @@ class ConnectionHandler {
         this.mids = 0;
 
         this.accounts = new Map();
+
+        // Reconnection metrics tracking
+        this.reconnectMetrics = new Map(); // Track metrics per account
+        this.metricsWindow = 60000; // 1-minute window
     }
 
     async init() {
+        // Track Redis connection state for reconnection detection
+        let hasSeenStableConnection = false;
+        let redisWasDisconnected = false;
+
+        // Check initial Redis state
+        if (redis.status === 'ready') {
+            hasSeenStableConnection = true;
+        }
+
+        redis.on('ready', () => {
+            if (redisWasDisconnected && hasSeenStableConnection) {
+                // Redis reconnected after being disconnected during our lifetime
+                logger.info({ msg: 'Redis reconnected after disconnection, exiting worker for clean restart', worker: 'imap' });
+                // Exit gracefully - the main process will restart this worker
+                process.exit(0);
+            }
+            // Mark that we've seen a stable connection
+            hasSeenStableConnection = true;
+        });
+
+        redis.on('end', () => {
+            if (hasSeenStableConnection) {
+                logger.warn({ msg: 'Redis connection lost', worker: 'imap' });
+                redisWasDisconnected = true;
+            }
+        });
+
         // indicate that we are ready to process connections
         parentPort.postMessage({ cmd: 'ready' });
+
+        // Start sending heartbeats to main thread
+        this.startHeartbeat();
+    }
+
+    startHeartbeat() {
+        // Send heartbeat every 10 seconds
+        setInterval(() => {
+            try {
+                parentPort.postMessage({ cmd: 'heartbeat' });
+            } catch (err) {
+                // Ignore errors, parent might be shutting down
+            }
+        }, 10 * 1000).unref();
     }
 
     getLogKey(account) {
@@ -168,7 +213,7 @@ class ConnectionHandler {
                 oauth2App = await oauth2Apps.get(accountData.oauth2.provider);
             }
 
-            if (oauth2App.baseScopes === 'api') {
+            if (oauth2App && oauth2App.baseScopes === 'api') {
                 // Use API instead of IMAP
 
                 switch (oauth2App.provider) {
@@ -592,7 +637,7 @@ class ConnectionHandler {
         return await accountData.connection.createMailbox(message.path);
     }
 
-    async renameMailbox(message) {
+    async modifyMailbox(message) {
         if (!this.accounts.has(message.account)) {
             throw NO_ACTIVE_HANDLER_RESP_ERR;
         }
@@ -602,7 +647,7 @@ class ConnectionHandler {
             throw NO_ACTIVE_HANDLER_RESP_ERR;
         }
 
-        return await accountData.connection.renameMailbox(message.path, message.newPath);
+        return await accountData.connection.modifyMailbox(message.path, message.newPath, message.subscribed);
     }
 
     async deleteMailbox(message) {
@@ -650,6 +695,49 @@ class ConnectionHandler {
             },
             contentType: 'message/rfc822'
         };
+    }
+
+    /**
+     * Track reconnection attempts for monitoring (without blocking)
+     * @param {string} account - Account identifier
+     */
+    trackReconnection(account) {
+        const now = Date.now();
+        const metrics = this.reconnectMetrics.get(account) || {
+            attempts: [],
+            warnings: 0
+        };
+
+        // Clean old attempts outside window
+        metrics.attempts = metrics.attempts.filter(t => now - t < this.metricsWindow);
+        metrics.attempts.push(now);
+
+        // Log warning if excessive reconnections
+        if (metrics.attempts.length > 20) {
+            // More than 20 per minute
+            metrics.warnings++;
+            logger.warn({
+                msg: 'Excessive reconnection rate detected',
+                account,
+                rate: `${metrics.attempts.length}/min`,
+                totalWarnings: metrics.warnings
+            });
+
+            // Emit metrics for monitoring/alerting
+            try {
+                parentPort.postMessage({
+                    cmd: 'metrics',
+                    key: 'imap.reconnect.excessive',
+                    method: 'inc',
+                    args: [1],
+                    meta: { account }
+                });
+            } catch (err) {
+                logger.error({ msg: 'Failed to send metrics', err });
+            }
+        }
+
+        this.reconnectMetrics.set(account, metrics);
     }
 
     async getAttachment(message) {
@@ -763,7 +851,7 @@ class ConnectionHandler {
             case 'getRawMessage':
             case 'getQuota':
             case 'createMailbox':
-            case 'renameMailbox':
+            case 'modifyMailbox':
             case 'deleteMailbox':
             case 'getAttachment':
             case 'submitMessage':

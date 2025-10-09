@@ -123,8 +123,7 @@ const {
     DEFAULT_EENGINE_TIMEOUT,
     DEFAULT_MAX_ATTACHMENT_SIZE,
     MAX_FORM_TTL,
-    NONCE_BYTES,
-    OUTLOOK_EXPIRATION_TIME
+    NONCE_BYTES
 } = consts;
 
 const { fetch: fetchCmd } = require('undici');
@@ -531,16 +530,16 @@ const init = async () => {
 
     handlebars.registerHelper('featureFlag', function (flag, options) {
         if (featureFlags.enabled(flag)) {
-            return options.fn(this); // eslint-disable-line no-invalid-this
+            return options.fn(this);
         }
-        return options.inverse(this); // eslint-disable-line no-invalid-this
+        return options.inverse(this);
     });
 
     handlebars.registerHelper('equals', function (compareVal, baseVal, options) {
         if (baseVal === compareVal) {
-            return options.fn(this); // eslint-disable-line no-invalid-this
+            return options.fn(this);
         }
-        return options.inverse(this); // eslint-disable-line no-invalid-this
+        return options.inverse(this);
     });
 
     handlebars.registerHelper('inc', (nr, inc) => Number(nr) + Number(inc));
@@ -938,7 +937,7 @@ Include your token in requests using one of these methods:
             },
             {
                 name: 'Mailbox',
-                description: 'List, create, rename, and manage mailbox folders. Retrieve folder statistics and special-use designations'
+                description: 'List, create, modify, and manage mailbox folders. Retrieve folder statistics and special-use designations'
             },
             {
                 name: 'Message',
@@ -1924,49 +1923,62 @@ Include your token in requests using one of these methods:
 
                 switch (entry.lifecycleEvent) {
                     case 'reauthorizationRequired': {
-                        // Extend subscription lifetime
+                        // Microsoft is requesting reauthorization - force renewal immediately
+                        request.logger.info({
+                            msg: 'Received reauthorizationRequired lifecycle event',
+                            subscriptionId: outlookSubscription.id,
+                            account: request.query.account
+                        });
 
-                        outlookSubscription.state = {
-                            state: 'renewing',
-                            time: Date.now()
-                        };
-                        await accountObject.update({ outlookSubscription });
+                        // Use the unified renewal method from OutlookClient
+                        // We need to create a client instance to call the renewal method
+                        const { OutlookClient } = require('../lib/email-client/outlook-client');
+                        const client = new OutlookClient(accountData, {
+                            redis,
+                            secret: await getSecret(),
+                            logger: request.logger
+                        });
 
-                        let subscriptionPayload = {
-                            expirationDateTime: new Date(Date.now() + OUTLOOK_EXPIRATION_TIME).toISOString()
-                        };
-
-                        let subscriptionRes;
                         try {
-                            subscriptionRes = await accountObject.oauth2Request(`/v1.0/subscriptions/${outlookSubscription.id}`, 'PATCH', subscriptionPayload);
-                            if (subscriptionRes && subscriptionRes.expirationDateTime) {
-                                outlookSubscription.expirationDateTime = subscriptionRes.expirationDateTime;
+                            // Force renewal when we get reauthorizationRequired
+                            const renewalResult = await client.renewSubscription(true);
+
+                            if (renewalResult.success) {
+                                request.logger.info({
+                                    msg: 'Successfully renewed subscription from lifecycle event',
+                                    subscriptionId: outlookSubscription.id,
+                                    account: request.query.account,
+                                    newExpirationDateTime: renewalResult.expirationDateTime
+                                });
+                            } else {
+                                request.logger.error({
+                                    msg: 'Failed to renew subscription from lifecycle event',
+                                    subscriptionId: outlookSubscription.id,
+                                    account: request.query.account,
+                                    reason: renewalResult.reason,
+                                    error: renewalResult.error
+                                });
                             }
-                            outlookSubscription.state = {
-                                state: 'created',
-                                time: Date.now()
-                            };
                         } catch (err) {
                             request.logger.error({
-                                msg: 'Subscription renewal failed',
+                                msg: 'Exception while renewing subscription from lifecycle event',
                                 subscriptionId: outlookSubscription.id,
                                 account: request.query.account,
-                                requestUrl: `/subscriptions/${outlookSubscription.id}`,
                                 err
                             });
-                            outlookSubscription.state = {
-                                state: 'error',
-                                error: `Subscription renewal failed: ${
-                                    (err.oauthRequest &&
-                                        err.oauthRequest.response &&
-                                        err.oauthRequest.response.error &&
-                                        err.oauthRequest.response.error.message) ||
-                                    err.message
-                                }`,
-                                time: Date.now()
-                            };
                         } finally {
-                            await accountObject.update({ outlookSubscription });
+                            // Clean up client instance
+                            if (client && typeof client.close === 'function') {
+                                try {
+                                    await client.close();
+                                } catch (cleanupErr) {
+                                    request.logger.debug({
+                                        msg: 'Error closing client after lifecycle renewal',
+                                        account: request.query.account,
+                                        err: cleanupErr
+                                    });
+                                }
+                            }
                         }
 
                         break;
@@ -2071,32 +2083,75 @@ Include your token in requests using one of these methods:
                         throw error;
                     }
 
-                    let profileRes;
-                    try {
-                        profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
-                    } catch (err) {
-                        let response = err.oauthRequest && err.oauthRequest.response;
-                        if (response && response.error) {
-                            let message;
-                            if (/Gmail API has not been used in project/.test(response.error.message)) {
-                                message =
-                                    'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
-                            } else {
-                                message = response.error.message;
-                            }
+                    const grantedScopes = r.scope ? r.scope.split(/\s+/) : [];
 
-                            let error = Boom.boomify(new Error(message), { statusCode: response.error.code });
-                            throw error;
+                    request.logger.info({ msg: 'OAuth token received', grantedScopes, hasIdToken: !!r.id_token });
+
+                    let profileRes;
+                    let userEmail;
+                    let userName;
+
+                    // With OpenID Connect scopes (openid, email, profile), the ID token contains user info
+                    // This works for all account types including send-only accounts
+                    if (r.id_token && typeof r.id_token === 'string') {
+                        let [, encodedValue] = r.id_token.split('.');
+                        if (encodedValue) {
+                            try {
+                                let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
+                                if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
+                                    userEmail = decodedValue.email;
+                                    userName = decodedValue.name || null;
+                                    request.logger.info({ msg: 'Extracted user info from ID token', userEmail, userName });
+                                }
+                            } catch (err) {
+                                request.logger.error({ msg: 'Failed to decode Gmail ID token', err });
+                            }
                         }
-                        throw err;
                     }
 
-                    if (!profileRes || !profileRes || !profileRes.emailAddress) {
+                    // If ID token didn't provide email, fall back to Gmail API profile endpoint
+                    // This should rarely happen since we now request openid/email/profile scopes
+                    if (!userEmail) {
+                        // Check if we have scopes that allow accessing the profile endpoint
+                        const hasProfileScope =
+                            grantedScopes.includes('https://mail.google.com/') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.metadata');
+
+                        if (hasProfileScope) {
+                            try {
+                                request.logger.info({ msg: 'Attempting Gmail profile endpoint as fallback' });
+                                profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
+                                if (profileRes && profileRes.emailAddress) {
+                                    userEmail = profileRes.emailAddress;
+                                }
+                            } catch (err) {
+                                request.logger.error({ msg: 'Failed to fetch user info from Gmail API', err: err.message });
+                                let response = err.oauthRequest && err.oauthRequest.response;
+                                if (response && response.error) {
+                                    let message;
+                                    if (/Gmail API has not been used in project/.test(response.error.message)) {
+                                        message =
+                                            'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
+                                    } else {
+                                        message = response.error.message;
+                                    }
+
+                                    let error = Boom.boomify(new Error(message), { statusCode: response.error.code });
+                                    throw error;
+                                }
+                                throw err;
+                            }
+                        }
+                    }
+
+                    if (!userEmail) {
                         let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
                         throw error;
                     }
 
-                    accountData.email = isEmail(profileRes.emailAddress) ? profileRes.emailAddress : accountData.email;
+                    accountData.email = isEmail(userEmail) ? userEmail : accountData.email;
 
                     const defaultScopes = (oauth2App.baseScopes && GMAIL_SCOPES[oauth2App.baseScopes]) || GMAIL_SCOPES.imap;
 
@@ -2107,19 +2162,19 @@ Include your token in requests using one of these methods:
                             accessToken: r.access_token,
                             refreshToken: r.refresh_token,
                             expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : defaultScopes,
+                            scope: grantedScopes.length ? grantedScopes : defaultScopes,
                             tokenType: r.token_type
                         },
                         {
                             auth: {
-                                user: profileRes.emailAddress
+                                user: userEmail
                             }
                         }
                     );
 
-                    accountData.googleHistoryId = Number(profileRes.historyId) || null;
+                    accountData.googleHistoryId = profileRes ? Number(profileRes.historyId) || null : null;
 
-                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: profileRes.emailAddress, provider: oauth2App.provider });
+                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userEmail, provider: oauth2App.provider });
                     break;
                 }
 
@@ -3627,7 +3682,12 @@ Include your token in requests using one of these methods:
                     oauth2App = await oauth2Apps.get(accountData.oauth2.provider);
 
                     if (oauth2App) {
-                        result.type = oauth2App.provider;
+                        // Check if account is already marked as send-only
+                        if (accountData.sendOnly) {
+                            result.sendOnly = true;
+                        } else {
+                            result.type = oauth2App.provider;
+                        }
                         if (oauth2App.id !== oauth2App.provider) {
                             result.app = oauth2App.id;
                         }
@@ -3641,6 +3701,7 @@ Include your token in requests using one of these methods:
                     result.type = 'imap';
                 } else {
                     result.type = 'sending';
+                    result.sendOnly = true;
                 }
 
                 if ((accountData.imap || (oauth2App && (!oauth2App.baseScopes || oauth2App.baseScopes === 'imap'))) && !result.imapIndexer) {
@@ -3981,7 +4042,7 @@ Include your token in requests using one of these methods:
             });
 
             try {
-                return await accountObject.renameMailbox(request.payload.path, request.payload.newPath);
+                return await accountObject.modifyMailbox(request.payload.path, request.payload.newPath, request.payload.subscribed);
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -3999,8 +4060,8 @@ Include your token in requests using one of these methods:
         },
 
         options: {
-            description: 'Rename mailbox',
-            notes: 'Rename an existing mailbox folder',
+            description: 'Modify mailbox',
+            notes: 'Modify an existing mailbox folder (rename or change subscription status)',
             tags: ['api', 'Mailbox'],
 
             plugins: {},
@@ -4024,22 +4085,29 @@ Include your token in requests using one of these methods:
                 }),
 
                 payload: Joi.object({
-                    path: Joi.string().required().example('Previous Folder Name').description('Mailbox folder path to rename').label('ExistingMailboxPath'),
+                    path: Joi.string().required().example('Folder Name').description('Mailbox folder path to modify').label('ExistingMailboxPath'),
                     newPath: Joi.array()
                         .items(Joi.string().max(256))
                         .single()
                         .example(['Parent folder', 'Subfolder'])
-                        .description('New mailbox path as an array or a string. If account is namespaced then namespace prefix is added by default.')
-                        .label('TargetMailboxPath')
-                }).label('RenameMailbox')
+                        .description('New mailbox path as an array or a string. If account is namespaced then namespace prefix is added by default. Optional.')
+                        .label('TargetMailboxPath'),
+                    subscribed: Joi.boolean()
+                        .example(true)
+                        .description('Change mailbox subscription status. Only applies to IMAP accounts, ignored for Gmail and Outlook.')
+                        .label('SubscriptionStatus')
+                })
+                    .or('newPath', 'subscribed')
+                    .label('ModifyMailbox')
             },
 
             response: {
                 schema: Joi.object({
-                    path: Joi.string().required().example('Previous Mail').description('Mailbox folder path to rename').label('ExistingMailboxPath'),
-                    newPath: Joi.string().required().example('Kalender/S&APw-nnip&AOQ-evad').description('Full path to mailbox').label('NewMailboxPath'),
-                    renamed: Joi.boolean().example(true).description('Was the mailbox renamed')
-                }).label('RenameMailboxResponse'),
+                    path: Joi.string().required().example('Mail').description('Mailbox folder path').label('ExistingMailboxPath'),
+                    newPath: Joi.string().example('Kalender/S&APw-nnip&AOQ-evad').description('Full path to mailbox if renamed').label('NewMailboxPath'),
+                    renamed: Joi.boolean().example(true).description('Was the mailbox renamed'),
+                    subscribed: Joi.boolean().example(true).description('Subscription status after modification')
+                }).label('ModifyMailboxResponse'),
                 failAction: 'log'
             }
         }
@@ -9180,6 +9248,15 @@ init()
         });
 
         parentPort.postMessage({ cmd: 'ready' });
+
+        // Start sending heartbeats to main thread
+        setInterval(() => {
+            try {
+                parentPort.postMessage({ cmd: 'heartbeat' });
+            } catch (err) {
+                // Ignore errors, parent might be shutting down
+            }
+        }, 10 * 1000).unref();
     })
     .catch(err => {
         logger.error({ msg: 'Failed to initialize API', err });
