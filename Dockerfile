@@ -28,6 +28,7 @@ RUN chmod +x /entrypoint.sh
 RUN chmod +x /run_monitor.sh
 
 # Copy app folders
+COPY bin bin
 COPY config config
 COPY data data
 COPY lib lib

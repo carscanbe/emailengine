@@ -2272,11 +2272,17 @@ Include your token in requests using one of these methods:
                     }
 
                     if (accountData.oauth2 && accountData.oauth2.auth && accountData.oauth2.auth.delegatedUser) {
+                        // Delegated user (shared mailbox) specified in oauth2.auth.delegatedUser
                         authData.delegatedUser = accountData.oauth2.auth.delegatedUser;
+                        // Ensure email is set to the delegated user if not already provided
+                        if (!accountData.email) {
+                            accountData.email = accountData.oauth2.auth.delegatedUser;
+                        }
                     } else if (accountData.delegated && accountData.email && accountData.email !== userInfo.email) {
-                        // Shared mailbox
+                        // Legacy: Shared mailbox specified via delegated flag
                         authData.delegatedUser = accountData.email;
                     } else {
+                        // Not a delegated account, use the authenticated user's email
                         accountData.email = userInfo.email;
                     }
 
@@ -3720,7 +3726,7 @@ Include your token in requests using one of these methods:
                     result.counters = accountData.counters;
                 }
 
-                if (request.query.quota) {
+                if (request.query.quota && !result.sendOnly) {
                     result.quota = await accountObject.getQuota();
                 }
 
@@ -4652,14 +4658,14 @@ Include your token in requests using one of these methods:
             response: {
                 schema: Joi.object({
                     flags: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
+                        add: Joi.array().items(Joi.string()).example(['\\Seen', '\\Flagged']),
+                        delete: Joi.array().items(Joi.string()).example(['\\Draft']),
+                        set: Joi.array().items(Joi.string()).example(['\\Seen'])
                     }).label('FlagResponse'),
                     labels: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
+                        add: Joi.array().items(Joi.string()).example(['Label1', 'Label2']),
+                        delete: Joi.array().items(Joi.string()).example(['Label3']),
+                        set: Joi.array().items(Joi.string()).example(['Label1'])
                     }).label('FlagResponse')
                 }).label('MessageUpdateResponse'),
                 failAction: 'log'
@@ -4731,14 +4737,14 @@ Include your token in requests using one of these methods:
             response: {
                 schema: Joi.object({
                     flags: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
+                        add: Joi.array().items(Joi.string()).example(['\\Seen', '\\Flagged']),
+                        delete: Joi.array().items(Joi.string()).example(['\\Draft']),
+                        set: Joi.array().items(Joi.string()).example(['\\Seen'])
                     }).label('FlagResponse'),
                     labels: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
+                        add: Joi.array().items(Joi.string()).example(['Label1', 'Label2']),
+                        delete: Joi.array().items(Joi.string()).example(['Label3']),
+                        set: Joi.array().items(Joi.string()).example(['Label1'])
                     }).label('FlagResponse')
                 }).label('MessageUpdateResponse'),
                 failAction: 'log'
@@ -5542,7 +5548,8 @@ Include your token in requests using one of these methods:
             try {
                 return await accountObject.queueMessage(request.payload, {
                     source: 'api',
-                    idempotencyKey: request.headers['idempotency-key']
+                    idempotencyKey: request.headers['idempotency-key'],
+                    useStructuredFormat: request.query.useStructuredFormat
                 });
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
@@ -5588,6 +5595,21 @@ Include your token in requests using one of these methods:
                 params: Joi.object({
                     account: accountIdSchema.required()
                 }),
+
+                query: Joi.object({
+                    documentStore: Joi.boolean()
+                        .truthy('Y', 'true', '1')
+                        .falsy('N', 'false', 0)
+                        .default(false)
+                        .description('If enabled then fetch email used as a reference template from the Document Store'),
+                    useStructuredFormat: Joi.boolean()
+                        .truthy('Y', 'true', '1')
+                        .falsy('N', 'false', 0)
+                        .default(false)
+                        .description(
+                            'For MS Graph accounts: If true, uses structured JSON format (respects from field for shared mailboxes, breaks calendar invites and special MIME types). If false, sends as raw MIME (preserves calendar invites, ignores from field). Default is false (raw MIME).'
+                        )
+                }).label('SubmitQuery'),
 
                 headers: Joi.object({
                     'x-ee-timeout': headerTimeoutSchema,

@@ -1,5 +1,52 @@
 # Changelog
 
+## [2.58.0](https://github.com/postalsys/emailengine/compare/v2.57.3...v2.58.0) (2025-10-27)
+
+
+### Features
+
+* **outlook:** Add MS Graph API category support via labels API ([7de3586](https://github.com/postalsys/emailengine/commit/7de35863d4922ebd4fde4a2e448649a29bfc00b3))
+* **outlook:** Add optional structured format for MS Graph sendMail ([5062e84](https://github.com/postalsys/emailengine/commit/5062e845fe29f16cdb7cce23b767657e1b283dfb))
+
+
+### Bug Fixes
+
+* **gmail:** Exclude OpenID scopes from service account authentication ([faf7821](https://github.com/postalsys/emailengine/commit/faf7821ddac184ba481c9acc9f0a38d2baaf834c))
+* **outlook:** Improve delegated user handling and add clarifying comments ([cef7d25](https://github.com/postalsys/emailengine/commit/cef7d25fe1726e029181566622e156309c800f8a))
+* **outlook:** Preserve calendar invite functionality when sending via Graph API ([92bd7f8](https://github.com/postalsys/emailengine/commit/92bd7f89c93e5998da400986fe698aff9c4d7fc0))
+* **outlook:** Use structured message format for Graph API sendMail to respect from field ([c1bf874](https://github.com/postalsys/emailengine/commit/c1bf8745fc0ceb0013428065a1dcb932781ae3de))
+
+## [2.57.3](https://github.com/postalsys/emailengine/compare/v2.57.2...v2.57.3) (2025-10-23)
+
+
+### Bug Fixes
+
+* **attachments:** Bumped Nodemailer for fix issue with large data-uri images in emails ([64a498c](https://github.com/postalsys/emailengine/commit/64a498cccc8123958761c99e33164849378f2d07))
+
+## [2.57.2](https://github.com/postalsys/emailengine/compare/v2.57.1...v2.57.2) (2025-10-23)
+
+
+### Bug Fixes
+
+* **attachments:** Bumped Nodemailer for fix issue with large data-uri images in emails ([44cd002](https://github.com/postalsys/emailengine/commit/44cd002933635435626739e395bfdf8ba9679be2))
+
+## [2.57.1](https://github.com/postalsys/emailengine/compare/v2.57.0...v2.57.1) (2025-10-20)
+
+
+### Bug Fixes
+
+* Add retry logic for transient errors when fetching referenced messages ([9312f4b](https://github.com/postalsys/emailengine/commit/9312f4bcc95b2423e4bd98e3eeef1230aa02fcb9))
+* Correct OpenAPI response schema and add Docker CLI support ([38d39d6](https://github.com/postalsys/emailengine/commit/38d39d615d7e268261f4d8b49a7e79a943d9c553))
+* Ensure mailbox ID persistence during flush ([bb26992](https://github.com/postalsys/emailengine/commit/bb26992f110e640fa0f98f64dd714a20ac35c085))
+
+## [2.57.0](https://github.com/postalsys/emailengine/compare/v2.56.0...v2.57.0) (2025-10-09)
+
+
+### Features
+
+* Add support for Gmail send-only accounts ([#554](https://github.com/postalsys/emailengine/issues/554)) ([47fb593](https://github.com/postalsys/emailengine/commit/47fb593cfe390f066bd99ff84257abb036782d64))
+* Add support for Outlook send-only accounts ([6b63ee4](https://github.com/postalsys/emailengine/commit/6b63ee4dff1feff087ab65e6233317cae8a4aad7))
+
 ## [2.56.0](https://github.com/postalsys/emailengine/compare/v2.55.8...v2.56.0) (2025-10-05)
 
 
