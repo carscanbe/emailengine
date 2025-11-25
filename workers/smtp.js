@@ -3,7 +3,7 @@
 const { parentPort } = require('worker_threads');
 
 const packageData = require('../package.json');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
 const { getDuration, emitChangeEvent, readEnvValue, matchIp, threadStats, loadTlsConfig, getByteSize } = require('../lib/tools');
@@ -36,7 +36,7 @@ const util = require('util');
 const { redis } = require('../lib/db');
 const { Account } = require('../lib/account');
 const getSecret = require('../lib/get-secret');
-const { Splitter, Joiner } = require('mailsplit');
+const { Splitter, Joiner } = require('@zone-eu/mailsplit');
 const { HeadersRewriter } = require('../lib/headers-rewriter');
 const settings = require('../lib/settings');
 const tokens = require('../lib/tokens');

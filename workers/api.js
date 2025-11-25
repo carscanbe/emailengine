@@ -5,7 +5,7 @@
 const { parentPort } = require('worker_threads');
 
 const packageData = require('../package.json');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 const Path = require('path');
 const Gettext = require('@postalsys/gettext');
@@ -8892,7 +8892,7 @@ ${now}`,
                 'notificationBaseUrl'
             );
 
-            const systemAlerts = [];
+            let systemAlerts = [];
             let authData;
 
             switch (request.auth.artifacts && request.auth.artifacts.provider) {
@@ -9032,6 +9032,16 @@ ${now}`,
                 });
             }
 
+            // Check if setup warnings should be disabled (for documentation screenshots, CI, etc.)
+            const disableSetupWarnings = hasEnvValue('EENGINE_DISABLE_SETUP_WARNINGS')
+                ? getBoolean(readEnvValue('EENGINE_DISABLE_SETUP_WARNINGS'))
+                : false;
+
+            if (disableSetupWarnings) {
+                // Keep only critical (danger) alerts, suppress info/warning level
+                systemAlerts = systemAlerts.filter(alert => alert.level === 'danger');
+            }
+
             return {
                 pageBrandName: pageBrandName || 'EmailEngine',
                 values: request.payload || {},
@@ -9048,6 +9058,10 @@ ${now}`,
                 currentYear: new Date().getFullYear(),
                 showDocumentStore,
                 updateBrowserInfo: !serviceUrl || !language || !timezone,
+
+                // Suppress large banner warnings when EENGINE_DISABLE_SETUP_WARNINGS is set
+                hideLicenseWarning: disableSetupWarnings,
+                disableAuthWarning: disableSetupWarnings,
 
                 mainServiceUrl: serviceUrl,
                 notificationBaseUrl,
