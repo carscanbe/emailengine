@@ -45,6 +45,9 @@ const os = require('os');
 process.env.UV_THREADPOOL_SIZE =
     process.env.UV_THREADPOOL_SIZE && !isNaN(process.env.UV_THREADPOOL_SIZE) ? Number(process.env.UV_THREADPOOL_SIZE) : Math.max(os.cpus().length, 4);
 
+// Disable Tensorflow warnings
+process.env.TF_CPP_MIN_LOG_LEVEL = '2';
+
 // Cache command line arguments before @zone-eu/wild-config processes them
 const argv = process.argv.slice(2);
 
@@ -97,6 +100,8 @@ const {
     DEFAULT_USER_PROMPT: openAiDefaultPrompt
 } = require('@postalsys/email-ai-tools');
 const { fetch: fetchCmd } = require('undici');
+
+const bounceClassifier = require('@postalsys/bounce-classifier');
 
 const v8 = require('node:v8');
 
@@ -293,7 +298,7 @@ const licenseInfo = {
  */
 const THREAD_NAMES = {
     main: 'Main thread',
-    imap: 'IMAP worker',
+    imap: 'Email worker',
     webhooks: 'Webhook worker',
     api: 'HTTP and API server',
     submit: 'Email sending worker',
@@ -418,6 +423,24 @@ const metrics = {
         help: 'IMAP bytes received'
     }),
 
+    oauth2TokenRefresh: new promClient.Counter({
+        name: 'oauth2_token_refresh',
+        help: 'OAuth2 access token refresh attempts',
+        labelNames: ['status', 'provider', 'statusCode']
+    }),
+
+    oauth2ApiRequest: new promClient.Counter({
+        name: 'oauth2_api_request',
+        help: 'OAuth2 API requests (MS Graph, Gmail API)',
+        labelNames: ['status', 'provider', 'statusCode']
+    }),
+
+    outlookSubscriptions: new promClient.Gauge({
+        name: 'outlook_subscriptions',
+        help: 'MS Graph webhook subscription states',
+        labelNames: ['status']
+    }),
+
     webhooks: new promClient.Counter({
         name: 'webhooks',
         help: 'Webhooks sent',
@@ -452,6 +475,16 @@ const metrics = {
         name: 'threads',
         help: 'Worker Threads',
         labelNames: ['type', 'recent']
+    }),
+
+    unresponsiveWorkers: new promClient.Gauge({
+        name: 'unresponsive_workers',
+        help: 'Number of unresponsive worker threads'
+    }),
+
+    licenseDaysRemaining: new promClient.Gauge({
+        name: 'license_days_remaining',
+        help: 'Days until license expires (-1 for lifetime, 0 for no license)'
     }),
 
     emailengineConfig: new promClient.Gauge({
@@ -1913,12 +1946,32 @@ async function updateQueueCounters() {
     metrics.emailengineConfig.set({ config: 'workersWebhooks' }, config.workers.webhooks);
     metrics.emailengineConfig.set({ config: 'workersSubmission' }, config.workers.submit);
 
+    // Update license days remaining metric
+    if (licenseInfo.active && licenseInfo.details) {
+        if (licenseInfo.details.lt) {
+            // Lifetime license
+            metrics.licenseDaysRemaining.set(-1);
+        } else if (licenseInfo.details.expires) {
+            // Time-limited license
+            let expiresAt = new Date(licenseInfo.details.expires).getTime();
+            let daysRemaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+            metrics.licenseDaysRemaining.set(daysRemaining);
+        } else {
+            // Subscription license (no fixed expiry)
+            metrics.licenseDaysRemaining.set(-1);
+        }
+    } else {
+        // No active license
+        metrics.licenseDaysRemaining.set(0);
+    }
+
     // Update thread metrics
     let threadsInfo = await getThreadsInfo();
 
     let now = Date.now();
 
     let threadCounts = new Map();
+    let unresponsiveCount = 0;
     for (let workerThreadInfo of threadsInfo || []) {
         let key = workerThreadInfo.type;
         let metricKey = `${key}_total`;
@@ -1934,6 +1987,11 @@ async function updateQueueCounters() {
         } else {
             threadCounts.set(metricKey, threadCounts.get(metricKey) + 1);
         }
+
+        // Count unresponsive workers
+        if (workerThreadInfo.resourceUsageError && workerThreadInfo.resourceUsageError.unresponsive) {
+            unresponsiveCount++;
+        }
     }
 
     // Set thread count metrics
@@ -1941,6 +1999,9 @@ async function updateQueueCounters() {
         let [type, age] = key.split('_');
         metrics.threads.set({ type, recent: age === 'recent' ? 'yes' : 'no' }, value || 0);
     }
+
+    // Set unresponsive workers metric
+    metrics.unresponsiveWorkers.set(unresponsiveCount);
 
     // Update queue metrics
     for (let queue of ['notify', 'submit', 'documents']) {
@@ -2170,6 +2231,20 @@ async function onCommand(worker, message) {
 
             return false;
         }
+
+        case 'bounceClassify':
+            // Classify bounce response message
+            try {
+                return await bounceClassifier.classify(message.data.message);
+            } catch (err) {
+                // ignore
+                logger.error({
+                    msg: 'Failed to classify bounce response',
+                    bounceResponse: message.data.message,
+                    err
+                });
+            }
+            return false;
 
         // OpenAI integration commands - run in main process to avoid memory overhead
         case 'generateSummary': {
@@ -2427,6 +2502,37 @@ async function onCommand(worker, message) {
             return await getThreadsInfo();
         }
 
+        case 'worker-accounts': {
+            // Get accounts assigned to a specific worker thread
+            const { threadId, page = 1, pageSize = 20 } = message;
+            const accounts = [];
+
+            // Find worker by threadId and get its assigned accounts
+            for (const [account, worker] of assigned) {
+                if (worker.threadId === threadId) {
+                    accounts.push(account);
+                }
+            }
+
+            // Sort accounts for consistent ordering
+            accounts.sort((a, b) => a.localeCompare(b));
+
+            // Paginate
+            const totalAccounts = accounts.length;
+            const totalPages = Math.ceil(totalAccounts / pageSize) || 1;
+            const currentPage = Math.min(Math.max(1, page), totalPages);
+            const start = (currentPage - 1) * pageSize;
+            const pagedAccounts = accounts.slice(start, start + pageSize);
+
+            return {
+                accounts: pagedAccounts,
+                total: totalAccounts,
+                page: currentPage,
+                pageSize,
+                pages: totalPages
+            };
+        }
+
         case 'rate-limit': {
             return await checkRateLimit(message.key, message.count, message.allowed, message.windowSize);
         }
@@ -2603,6 +2709,9 @@ async function collectMetrics() {
         metricsResult[key] = 0;
     });
 
+    // Subscription state counters
+    let subscriptionResults = { valid: 0, expired: 0, unset: 0, failed: 0, pending: 0 };
+
     // Collect from each IMAP worker
     if (workers.has('imap')) {
         let imapWorkers = workers.get('imap');
@@ -2614,12 +2723,24 @@ async function collectMetrics() {
 
             try {
                 let workerStats = await call(imapWorker, { cmd: 'countConnections' });
-                Object.keys(workerStats || {}).forEach(status => {
+
+                // Handle connection states
+                let connectionStats = workerStats?.connections || workerStats || {};
+                Object.keys(connectionStats).forEach(status => {
                     if (!metricsResult[status]) {
                         metricsResult[status] = 0;
                     }
-                    metricsResult[status] += Number(workerStats[status]) || 0;
+                    metricsResult[status] += Number(connectionStats[status]) || 0;
                 });
+
+                // Handle subscription states (MS Graph)
+                if (workerStats?.subscriptions) {
+                    Object.keys(workerStats.subscriptions).forEach(status => {
+                        if (subscriptionResults[status] !== undefined) {
+                            subscriptionResults[status] += Number(workerStats.subscriptions[status]) || 0;
+                        }
+                    });
+                }
             } catch (err) {
                 logger.error({ msg: 'Connection count failed', err });
             }
@@ -2629,9 +2750,14 @@ async function collectMetrics() {
     // Add unassigned accounts to disconnected count
     metricsResult.disconnected = (Number(metricsResult.disconnected) || 0) + (unassigned ? unassigned.size : 0);
 
-    // Update Prometheus metrics
+    // Update Prometheus metrics for connections
     Object.keys(metricsResult).forEach(status => {
         metrics.imapConnections.set({ status }, metricsResult[status]);
+    });
+
+    // Update Prometheus metrics for MS Graph subscriptions
+    Object.keys(subscriptionResults).forEach(status => {
+        metrics.outlookSubscriptions.set({ status }, subscriptionResults[status]);
     });
 }
 
@@ -3037,6 +3163,7 @@ const startApplication = async () => {
 
 // Start the application
 startApplication()
+    .then(bounceClassifier.initialize)
     .then(() => {
         // Start periodic metric collection
         setInterval(() => {

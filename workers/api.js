@@ -842,7 +842,7 @@ const init = async () => {
                         'error',
                         {
                             pageTitle: 'Access Denied',
-                            message: 'Access Denied'
+                            message: `You don't have permission to view this page`
                         },
                         {
                             layout: 'public'
@@ -2520,6 +2520,9 @@ Include your token in requests using one of these methods:
                         .single()
                         .default(['api'])
                         .required()
+                        .description(
+                            'Token permission scopes: "api" for REST API access, "smtp" for SMTP submission, "imap-proxy" for IMAP proxy authentication'
+                        )
                         .label('Scopes'),
 
                     metadata: Joi.string()
@@ -2600,7 +2603,7 @@ Include your token in requests using one of these methods:
 
             response: {
                 schema: Joi.object({
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the account deleted')
+                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the token deleted')
                 }).label('DeleteTokenRequestResponse'),
                 failAction: 'log'
             }
@@ -4384,7 +4387,7 @@ Include your token in requests using one of these methods:
                         .falsy('N', 'false', 0)
                         .default(false)
                         .description(
-                            'Shorthand option to fetch and preprocess HTML and inlined images. Overrides `textType`, `preProcessHtml`, and `preProcessHtml` options.'
+                            'Shorthand option to fetch and preprocess HTML and inline images. Overrides `textType`, `preProcessHtml`, and `embedAttachedImages` options.'
                         )
                         .label('WebSafeHtml'),
 
@@ -4576,7 +4579,7 @@ Include your token in requests using one of these methods:
                         .label('MessageAppendId'),
                     path: Joi.string().example('INBOX').description('Folder this message was uploaded to').label('MessageAppendPath'),
                     uid: Joi.number().integer().example(12345).description('UID of uploaded message'),
-                    uidValidity: Joi.string().example('12345').description('UIDVALIDTITY of the target folder. Numeric value cast as string.'),
+                    uidValidity: Joi.string().example('12345').description('UIDVALIDITY of the target folder. Numeric value cast as string.'),
                     seq: Joi.number().integer().example(12345).description('Sequence number of uploaded message'),
 
                     messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
@@ -5276,13 +5279,13 @@ Include your token in requests using one of these methods:
             if (request.query.documentStore) {
                 for (let key of ['seq', 'modseq']) {
                     if (request.payload.search && key in request.payload.search) {
-                        extraValidationErrors.push({ message: 'Not allowed with documentStore', context: { key } });
+                        extraValidationErrors.push({ message: 'Not available when using Document Store', context: { key } });
                     }
                 }
             } else {
                 for (let key of ['documentQuery']) {
                     if (key in request.payload) {
-                        extraValidationErrors.push({ message: 'Not allowed without documentStore', context: { key } });
+                        extraValidationErrors.push({ message: 'Requires Document Store to be enabled', context: { key } });
                     }
                 }
             }
@@ -5439,7 +5442,7 @@ Include your token in requests using one of these methods:
 
             for (let key of ['seq', 'modseq']) {
                 if (request.payload.search && key in request.payload.search) {
-                    extraValidationErrors.push({ message: 'Not allowed with documentStore', context: { key } });
+                    extraValidationErrors.push({ message: 'Not available when using Document Store', context: { key } });
                 }
             }
 
@@ -5887,7 +5890,7 @@ Include your token in requests using one of these methods:
                             .description('Referenced message ID'),
                         documentStore: Joi.boolean()
                             .example(true)
-                            .description('Was the message dat aloaded from the document store')
+                            .description('Was the message data loaded from the Document Store')
                             .label('ResponseDocumentStore')
                             .meta({ swaggerHidden: true }),
                         success: Joi.boolean().example(true).description('Was the referenced message processed successfully').label('ResponseReferenceSuccess'),
@@ -5923,7 +5926,7 @@ Include your token in requests using one of these methods:
                                         .description('Referenced message ID'),
                                     documentStore: Joi.boolean()
                                         .example(true)
-                                        .description('Was the message dat aloaded from the document store')
+                                        .description('Was the message data loaded from the Document Store')
                                         .label('ResponseDocumentStore')
                                         .meta({ swaggerHidden: true }),
                                     success: Joi.boolean()
@@ -7575,7 +7578,7 @@ Include your token in requests using one of these methods:
             response: {
                 schema: Joi.object({
                     id: Joi.string().max(256).required().example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the gateway deleted'),
+                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the OAuth2 application deleted'),
                     accounts: Joi.number()
                         .integer()
                         .example(12)
@@ -7732,8 +7735,8 @@ Include your token in requests using one of these methods:
                     deliveries: Joi.number().integer().empty('').example(100).description('Count of email deliveries using this gateway'),
                     lastUse: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last delivery time'),
 
-                    user: Joi.string().empty('').trim().max(1024).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).label('Password'),
+                    user: Joi.string().empty('').trim().max(1024).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
@@ -7808,8 +7811,8 @@ Include your token in requests using one of these methods:
 
                     name: Joi.string().empty('').max(256).example('John Smith').description('Account Name').label('Gateway Name').required(),
 
-                    user: Joi.string().empty('').trim().default(null).max(1024).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).default(null).label('Password'),
+                    user: Joi.string().empty('').trim().default(null).max(1024).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).default(null).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname').required(),
                     port: Joi.number()
@@ -7895,8 +7898,8 @@ Include your token in requests using one of these methods:
                 payload: Joi.object({
                     name: Joi.string().empty('').max(256).example('John Smith').description('Account Name').label('Gateway Name'),
 
-                    user: Joi.string().empty('').trim().max(1024).allow(null).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).allow(null).label('Password'),
+                    user: Joi.string().empty('').trim().max(1024).allow(null).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).allow(null).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().empty('').example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
@@ -8008,8 +8011,20 @@ Include your token in requests using one of these methods:
             });
 
             try {
-                return await accountObject.getActiveAccessTokenData();
+                const tokenData = await accountObject.getActiveAccessTokenData();
+
+                // Record metric if token was actually refreshed (not cached)
+                if (!tokenData.cached) {
+                    const provider = tokenData.provider || 'unknown';
+                    metrics(request.logger, 'oauth2TokenRefresh', 'inc', { status: 'success', provider, statusCode: '200' });
+                }
+
+                return tokenData;
             } catch (err) {
+                // Record failed token refresh
+                const statusCode = String(err.statusCode || 0);
+                metrics(request.logger, 'oauth2TokenRefresh', 'inc', { status: 'failure', provider: 'unknown', statusCode });
+
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
                     throw err;
@@ -8981,7 +8996,7 @@ ${now}`,
                     url: '/admin/config/webhooks',
                     level: 'danger',
                     icon: 'link',
-                    message: 'Webhooks are failing, please review'
+                    message: 'Webhook delivery is failing'
                 });
             }
 
@@ -8990,7 +9005,7 @@ ${now}`,
                     url: '/admin/config/license',
                     level: 'warning',
                     icon: 'key',
-                    message: 'License key is not registered'
+                    message: 'No license key registered'
                 });
             }
 
@@ -9033,9 +9048,7 @@ ${now}`,
             }
 
             // Check if setup warnings should be disabled (for documentation screenshots, CI, etc.)
-            const disableSetupWarnings = hasEnvValue('EENGINE_DISABLE_SETUP_WARNINGS')
-                ? getBoolean(readEnvValue('EENGINE_DISABLE_SETUP_WARNINGS'))
-                : false;
+            const disableSetupWarnings = hasEnvValue('EENGINE_DISABLE_SETUP_WARNINGS') ? getBoolean(readEnvValue('EENGINE_DISABLE_SETUP_WARNINGS')) : false;
 
             if (disableSetupWarnings) {
                 // Keep only critical (danger) alerts, suppress info/warning level
