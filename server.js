@@ -71,7 +71,8 @@ const {
     setLicense,
     getRedisStats,
     threadStats,
-    retryAgent
+    httpAgent,
+    reloadHttpProxyAgent
 } = require('./lib/tools');
 const MetricsCollector = require('./lib/metrics-collector');
 
@@ -131,7 +132,7 @@ if (readEnvValue('BUGSNAG_API_KEY')) {
 
 // Import additional dependencies
 const pathlib = require('path');
-const { redis, queueConf } = require('./lib/db');
+const { redis, queueConf, notifyQueue, submitQueue, documentsQueue, exportQueue } = require('./lib/db');
 const promClient = require('prom-client');
 const fs = require('fs').promises;
 const crypto = require('crypto');
@@ -302,6 +303,7 @@ const THREAD_NAMES = {
     webhooks: 'Webhook worker',
     api: 'HTTP and API server',
     submit: 'Email sending worker',
+    export: 'Export worker',
     documents: 'Document store indexing worker',
     imapProxy: 'IMAP proxy server',
     smtp: 'SMTP proxy server'
@@ -314,7 +316,8 @@ const THREAD_NAMES = {
 const THREAD_CONFIG_VALUES = {
     imap: { key: 'EENGINE_WORKERS', value: config.workers.imap },
     submit: { key: 'EENGINE_WORKERS_SUBMIT', value: config.workers.submit },
-    webhooks: { key: 'EENGINE_WORKERS_WEBHOOKS', value: config.workers.webhooks }
+    webhooks: { key: 'EENGINE_WORKERS_WEBHOOKS', value: config.workers.webhooks },
+    export: { key: 'EENGINE_WORKERS_EXPORT', value: config.workers.export || 1 }
 };
 
 // Queue event handlers for different job queues
@@ -1310,6 +1313,11 @@ let spawnWorker = async type => {
                 }
 
                 case 'settings':
+                    // Reload HTTP proxy agent in the main thread
+                    if (message.data && ('httpProxyEnabled' in message.data || 'httpProxyUrl' in message.data)) {
+                        reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
+                    }
+
                     // Forward settings changes to all IMAP workers
                     availableIMAPWorkers.forEach(worker => {
                         try {
@@ -1318,6 +1326,20 @@ let spawnWorker = async type => {
                             logger.error({ msg: 'Unable to forward settings to worker', worker: worker.threadId, callPayload: message, err });
                         }
                     });
+
+                    // Forward settings changes to webhooks, submit, and export workers
+                    for (let type of ['webhooks', 'submit', 'export']) {
+                        let typeWorkers = workers.get(type);
+                        if (typeWorkers) {
+                            typeWorkers.forEach(worker => {
+                                try {
+                                    postMessage(worker, message);
+                                } catch (err) {
+                                    logger.error({ msg: 'Unable to forward settings to worker', type, worker: worker.threadId, err });
+                                }
+                            });
+                        }
+                    }
                     return;
 
                 case 'change':
@@ -1689,7 +1711,7 @@ let licenseCheckHandler = async opts => {
                         app: '@postalsys/emailengine-app',
                         instance: (await settings.get('serviceId')) || ''
                     }),
-                    dispatcher: retryAgent
+                    dispatcher: httpAgent.retry
                 });
 
                 let data = await res.json();
@@ -2618,10 +2640,13 @@ async function onCommand(worker, message) {
             break;
 
         // IMAP operations - forward to assigned worker
+        case 'submitMessage':
+        case 'queueMessage':
         case 'listMessages':
         case 'getRawMessage':
         case 'getText':
         case 'getMessage':
+        case 'getMessages':
         case 'updateMessage':
         case 'updateMessages':
         case 'listMailboxes':
@@ -2633,8 +2658,6 @@ async function onCommand(worker, message) {
         case 'createMailbox':
         case 'modifyMailbox':
         case 'deleteMailbox':
-        case 'submitMessage':
-        case 'queueMessage':
         case 'uploadMessage':
         case 'getAttachment':
         case 'listSignatures': {
@@ -2649,7 +2672,6 @@ async function onCommand(worker, message) {
             if (['getRawMessage', 'getAttachment'].includes(message.cmd) && message.port) {
                 transferList.push(message.port);
             }
-
             if (['submitMessage', 'queueMessage'].includes(message.cmd) && typeof message.raw === 'object') {
                 transferList.push(message.raw);
             }
@@ -2777,6 +2799,10 @@ const closeQueues = cb => {
 
     if (queueEvents.documents) {
         proms.push(queueEvents.documents.close());
+    }
+
+    if (queueEvents.export) {
+        proms.push(queueEvents.export.close());
     }
 
     if (!proms.length) {
@@ -3065,6 +3091,9 @@ const startApplication = async () => {
     // Workers will exit when Redis reconnects after disconnection,
     // and the server will automatically restart them
 
+    // Initialize HTTP proxy agent from settings/env vars before spawning workers
+    await reloadHttpProxyAgent();
+
     // -- START WORKER THREADS
 
     // Start API server first for health checks
@@ -3103,6 +3132,11 @@ const startApplication = async () => {
     // Start submission workers
     for (let i = 0; i < config.workers.submit; i++) {
         await spawnWorker('submit');
+    }
+
+    // Start export workers
+    for (let i = 0; i < (config.workers.export || 1); i++) {
+        await spawnWorker('export');
     }
 
     // Start document processing worker
@@ -3187,6 +3221,31 @@ startApplication()
         queueEvents.notify = new QueueEvents('notify', Object.assign({}, queueConf));
         queueEvents.submit = new QueueEvents('submit', Object.assign({}, queueConf));
         queueEvents.documents = new QueueEvents('documents', Object.assign({}, queueConf));
+        queueEvents.export = new QueueEvents('export', Object.assign({}, queueConf));
+
+        // Periodic queue cleanup (every 6 hours)
+        const QUEUE_CLEANUP_INTERVAL = 6 * 60 * 60 * 1000;
+
+        async function cleanupQueues() {
+            const queues = [notifyQueue, submitQueue, documentsQueue, exportQueue];
+            for (const queue of queues) {
+                try {
+                    // Clean completed jobs older than 24 hours
+                    await queue.clean(24 * 60 * 60 * 1000, 10000, 'completed');
+                    // Clean failed jobs older than 7 days
+                    await queue.clean(7 * 24 * 60 * 60 * 1000, 10000, 'failed');
+                    logger.trace({ msg: 'Queue cleanup completed', queue: queue.name });
+                } catch (err) {
+                    logger.error({ msg: 'Queue cleanup failed', queue: queue.name, err });
+                }
+            }
+        }
+
+        const queueCleanupTimer = setInterval(cleanupQueues, QUEUE_CLEANUP_INTERVAL);
+        queueCleanupTimer.unref();
+
+        // Initial cleanup 5 minutes after startup
+        setTimeout(cleanupQueues, 5 * 60 * 1000).unref();
     })
     .catch(err => {
         logger.fatal({ msg: 'Application startup failed', err });

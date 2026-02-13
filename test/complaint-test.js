@@ -61,6 +61,26 @@ function mightBeAComplaint(messageInfo) {
 }
 
 test('ARF complaint detection tests', async t => {
+    await t.test('handles missing attachments gracefully', async () => {
+        const cases = [
+            { label: 'undefined', attachments: undefined },
+            { label: 'null', attachments: null },
+            { label: 'empty array', attachments: [] }
+        ];
+
+        for (const { label, attachments } of cases) {
+            const messageInfo = {
+                from: { address: 'test@example.com' },
+                subject: 'Test',
+                attachments
+            };
+            const report = await arfDetect(messageInfo);
+            assert.ok(report, `should return report for ${label} attachments`);
+            assert.deepStrictEqual(report.arf, {}, `arf should be empty for ${label} attachments`);
+            assert.deepStrictEqual(report.headers, {}, `headers should be empty for ${label} attachments`);
+        }
+    });
+
     await t.test('Yahoo ARF abuse report', async () => {
         const messageInfo = await parseForArfDetect(path('yahoo.eml'));
         const report = await arfDetect(messageInfo);

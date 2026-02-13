@@ -7,7 +7,7 @@ const logger = require('../lib/logger');
 
 const { REDIS_PREFIX } = require('../lib/consts');
 
-const { getDuration, getBoolean, emitChangeEvent, readEnvValue, hasEnvValue, threadStats } = require('../lib/tools');
+const { getDuration, getBoolean, emitChangeEvent, readEnvValue, hasEnvValue, threadStats, reloadHttpProxyAgent } = require('../lib/tools');
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -452,6 +452,34 @@ class ConnectionHandler {
         return await accountData.connection.getMessage(message.message, message.options);
     }
 
+    async getMessages(message) {
+        if (!this.accounts.has(message.account)) {
+            throw NO_ACTIVE_HANDLER_RESP_ERR;
+        }
+
+        let accountData = this.accounts.get(message.account);
+        if (!accountData.connection) {
+            throw NO_ACTIVE_HANDLER_RESP_ERR;
+        }
+
+        // Use batch method if available (Gmail/Outlook API clients)
+        if (typeof accountData.connection.getMessages === 'function') {
+            return await accountData.connection.getMessages(message.messageIds, message.options);
+        }
+
+        // Fallback to sequential fetching for IMAP
+        const results = [];
+        for (const messageId of message.messageIds) {
+            try {
+                const msg = await accountData.connection.getMessage(messageId, message.options);
+                results.push({ messageId, data: msg, error: null });
+            } catch (err) {
+                results.push({ messageId, data: null, error: { message: err.message, code: err.code } });
+            }
+        }
+        return results;
+    }
+
     async updateMessage(message) {
         if (!this.accounts.has(message.account)) {
             throw NO_ACTIVE_HANDLER_RESP_ERR;
@@ -798,6 +826,10 @@ class ConnectionHandler {
 
         switch (message.cmd) {
             case 'settings':
+                if (message.data && ('httpProxyEnabled' in message.data || 'httpProxyUrl' in message.data)) {
+                    reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
+                }
+
                 if (message.data && message.data.logs) {
                     for (let [account, accountObject] of this.accounts) {
                         // update log handling
@@ -841,6 +873,7 @@ class ConnectionHandler {
             case 'listMessages':
             case 'getText':
             case 'getMessage':
+            case 'getMessages':
             case 'updateMessage':
             case 'updateMessages':
             case 'listMailboxes':

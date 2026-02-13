@@ -241,7 +241,7 @@ const documentsWorker = new Worker(
                         return;
                     }
 
-                    let deleteResult = null;
+                    let deleteResult;
 
                     let filterQuery = {
                         bool: {
@@ -612,7 +612,7 @@ const documentsWorker = new Worker(
                         return;
                     }
 
-                    let deleteResult = null;
+                    let deleteResult;
 
                     try {
                         let messageIdHeader;
@@ -912,6 +912,7 @@ if( ctx._source.bounces != null) {
     Object.assign(
         {
             concurrency: 1,
+            lockDuration: 2 * 60 * 1000, // 2 minutes for ES operations
             maxStalledCount: 5,
             stalledInterval: 60 * 1000
         },

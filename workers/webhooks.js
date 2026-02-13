@@ -10,7 +10,7 @@ const { webhooks: Webhooks } = require('../lib/webhooks');
 
 const { GooglePubSub } = require('../lib/oauth/pubsub/google');
 
-const { readEnvValue, threadStats, getDuration, retryAgent, getServiceSecret } = require('../lib/tools');
+const { readEnvValue, threadStats, getDuration, httpAgent, getServiceSecret, reloadHttpProxyAgent } = require('../lib/tools');
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -176,6 +176,13 @@ parentPort.on('message', message => {
                 });
             });
     }
+
+    if (message && message.cmd === 'settings') {
+        let d = message.data || {};
+        if ('httpProxyEnabled' in d || 'httpProxyUrl' in d) {
+            reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
+        }
+    }
 });
 
 const notifyWorker = new Worker(
@@ -293,7 +300,7 @@ const notifyWorker = new Worker(
                     {
                         let filteredSubData = {};
                         let isPartial = false;
-                        for (let dataKey of Object.keys(job.data.data)) {
+                        for (let dataKey of Object.keys(job.data.data || {})) {
                             switch (dataKey) {
                                 case 'id':
                                 case 'uid':
@@ -402,7 +409,7 @@ const notifyWorker = new Worker(
                     method: 'post',
                     body,
                     headers,
-                    dispatcher: retryAgent
+                    dispatcher: httpAgent.retry
                 });
                 duration = Date.now() - start;
             } catch (err) {
@@ -546,7 +553,16 @@ route: customRoute && customRoute.id,
     },
     Object.assign(
         {
-            concurrency: Number(NOTIFY_QC) || 1
+            concurrency: Number(NOTIFY_QC) || 1,
+
+            // Webhook HTTP requests have 90s timeout, lock should exceed this
+            lockDuration: 3 * 60 * 1000, // 3 minutes
+
+            // Check for stalled jobs every 60 seconds
+            stalledInterval: 60 * 1000,
+
+            // Allow jobs to recover from stalled state up to 3 times
+            maxStalledCount: 3
         },
         queueConf || {}
     )
