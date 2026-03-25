@@ -24,6 +24,13 @@ RUN printf "I'm building for TARGETPLATFORM=${TARGETPLATFORM}" \
     && printf "With uname -s : " && uname -s \
     && printf "and  uname -m : " && uname -mm
 
+RUN apk add --no-cache dumb-init
+RUN apk add --no-cache curl
+RUN apk add --no-cache bash
+
+# Create a non-root user and group
+RUN addgroup -S emailenginegroup && adduser -S emailengineuser -G emailenginegroup
+
 WORKDIR /emailengine
 
 # Install dependencies before copying any source. npm ci is by far the slowest step in this
@@ -55,13 +62,14 @@ COPY sbom.json sbom.json
 COPY scan.js scan.js
 COPY server.js server.js
 
-# The commit hash is passed in rather than read out of the build context, which used to be
-# `COPY .git/refs/heads/master` and tied the build to one branch name. See
-# test/docker-commit-hash-guardrail-test.js for the full account.
-#
-# Declared HERE and not up with the other ARGs: an ARG's value is part of the cache key of every RUN
-# below it, so moving this above `npm ci` makes the install layer miss on every single commit.
-ARG EE_COMMIT_HASH
+# Copy cron stuff
+COPY run_monitor.sh /run_monitor.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+RUN chmod +x /run_monitor.sh
+
+RUN mkdir -p .git/refs/heads
+COPY .git/refs/heads/master .git/refs/heads/master
 
 # version-info.json is generated here and the script is dropped again, so it does not end up in the
 # runtime image. The `:?` check is the whole enforcement that a commit was supplied: update-info.sh
@@ -120,4 +128,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD ["node", "/emailengine/bin/healthcheck.js"]
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-CMD ["node", "/emailengine/server.js"]
+#CMD ["node", "/emailengine/server.js"]
+CMD ["bash", "/entrypoint.sh"]
