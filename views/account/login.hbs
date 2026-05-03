@@ -1,13 +1,13 @@
 <div class="text-center">
-    <h1 class="h4 text-gray-900 mb-4">Sign In to EmailEngine</h1>
+    <h1 class="h4 text-gray-900 mb-4">Sign in to EmailEngine</h1>
 </div>
-<form class="user" method="post" action="/admin/login" style="min-height: 14rem;">
+<form class="user" method="post" action="/admin/login">
     <input type="hidden" id="crumb" name="crumb" value="{{crumb}}" />
     <input type="hidden" name="next" value="{{values.next}}" />
 
     <div class="form-group">
         <input type="text" class="form-control form-control-user {{#if errors.username}}is-invalid{{/if}}"
-            id="exampleInputEmail" name="username" aria-describedby="emailHelp" placeholder="Enter your username"
+            id="loginUsername" name="username" placeholder="Username"
             value="{{values.username}}">
         {{#if errors.username}}
         <span class="invalid-feedback">{{errors.username}}</span>
@@ -15,38 +15,48 @@
     </div>
     <div class="form-group">
         <input type="password" class="form-control form-control-user {{#if errors.password}}is-invalid{{/if}}"
-            id="exampleInputPassword" name="password" placeholder="Enter your password">
+            id="loginPassword" name="password" placeholder="Password">
         {{#if errors.password}}
         <span class="invalid-feedback">{{errors.password}}</span>
         {{/if}}
     </div>
 
-    <div class="form-group">
-        <div class="custom-control custom-checkbox small">
-            <input type="checkbox" class="custom-control-input {{#if errors.remember}}is-invalid{{/if}}"
-                id="customCheck" name="remember" {{#if values.remember}}checked{{/if}}>
-            <label class="custom-control-label" for="customCheck">Keep me signed in</label>
-            {{#if errors.remember}}
-            <span class="invalid-feedback">{{errors.remember}}</span>
-            {{/if}}
-        </div>
-    </div>
+    <!-- Always enable persistent sessions; no UI toggle for now -->
+    <input type="hidden" name="remember" value="Y" />
     <div>
         <button type="submit" class="btn btn-primary btn-user btn-block">
-            Sign In
+            Sign in
         </button>
     </div>
-
-    {{#if providers.okta}}
-    <hr>
-    <div>
-        <a href="/admin/login/okta" class="btn btn-primary btn-user btn-block">
-            Sign in with Okta SSO
-        </a>
-    </div>
-    {{/if}}
-
 </form>
+
+{{#if passkeysAvailable}}
+<div class="d-flex align-items-center my-3">
+    <hr class="flex-grow-1">
+    <span class="px-3 text-muted small">or</span>
+    <hr class="flex-grow-1">
+</div>
+<div>
+    <button type="button" class="btn btn-primary btn-user btn-block" id="passkey-login-btn">
+        <i class="fas fa-fingerprint fa-sm fa-fw mr-2"></i>Sign in with a passkey
+    </button>
+    <div id="passkey-error" class="text-danger small mt-2 text-center" style="display:none;"></div>
+</div>
+{{/if}}
+
+{{#if providers.okta}}
+<div class="d-flex align-items-center my-3">
+    <hr class="flex-grow-1">
+    <span class="px-3 text-muted small">or</span>
+    <hr class="flex-grow-1">
+</div>
+<div class="mt-2">
+    <a href="/admin/login/okta" class="btn btn-primary btn-user btn-block">
+        <i class="fas fa-sign-in-alt fa-sm fa-fw mr-2"></i>Sign in with Okta SSO
+    </a>
+</div>
+{{/if}}
+
 <hr>
 <div class="text-center">
     <a class="small" href="https://emailengine.app/reset-password" target="_blank" rel="noopener noreferrer"

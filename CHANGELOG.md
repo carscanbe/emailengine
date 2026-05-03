@@ -1,5 +1,81 @@
 # Changelog
 
+## [2.67.3](https://github.com/postalsys/emailengine/compare/v2.67.2...v2.67.3) (2026-04-21)
+
+
+### Bug Fixes
+
+* use template literals for translated strings in showErrorPopup ([b56fd1f](https://github.com/postalsys/emailengine/commit/b56fd1fa7612b4cf2b7e99cbd78d7447b89c03c6))
+
+## [2.67.2](https://github.com/postalsys/emailengine/compare/v2.67.1...v2.67.2) (2026-04-21)
+
+
+### Bug Fixes
+
+* restore IMAP XOAUTH2 path for gmailService accounts ([d2ebe9b](https://github.com/postalsys/emailengine/commit/d2ebe9b3c19cd0bcaaf0fa17d40148f79dd7cd2b))
+
+## [2.67.1](https://github.com/postalsys/emailengine/compare/v2.67.0...v2.67.1) (2026-04-17)
+
+
+### Bug Fixes
+
+* detect IMAP drift that landed during an in-progress sync ([8fece8a](https://github.com/postalsys/emailengine/commit/8fece8ad6f3acb5e7391da7a9740279099f62177))
+* improve translation quality across 6 languages ([d7d338e](https://github.com/postalsys/emailengine/commit/d7d338e761152909d4c2ca4732fafb60529413ab))
+* pin undici to 7.25.0 for Node 20 compatibility ([3fa80db](https://github.com/postalsys/emailengine/commit/3fa80db4d64d6fe089fa3a1a0e700a188aeb74f7))
+
+## [2.67.0](https://github.com/postalsys/emailengine/compare/v2.66.0...v2.67.0) (2026-03-31)
+
+
+### Features
+
+* handle MS Graph 'missed' lifecycle event for Outlook notification recovery ([d55f48c](https://github.com/postalsys/emailengine/commit/d55f48c9a183f9e0108801563b1085c176dbeb06))
+* show human-readable missing scopes on OAuth scope error page ([4ee2365](https://github.com/postalsys/emailengine/commit/4ee2365449e3cbece6f4a83d540ae63c18464535))
+
+
+### Bug Fixes
+
+* add IMAP fetch retry timeout and harden passkey registration ([3a1b61b](https://github.com/postalsys/emailengine/commit/3a1b61b00e916c308cae5e7493a2207164d9d45f))
+* close command client proactively after subconnection setup ([02d3687](https://github.com/postalsys/emailengine/commit/02d36874d8533beabe5ad0fba978851b3791cbb5))
+* correct translation errors and remove EmailEngine branding from OAuth scope error ([9284ddd](https://github.com/postalsys/emailengine/commit/9284ddd1e28e40fd24abeea7296636b21c4b3878))
+* use STATUS instead of NOOP as keepalive for 163.com IMAP ([3b3516f](https://github.com/postalsys/emailengine/commit/3b3516feb14e64bab5ac586378237f2160cdf010))
+
+## [2.66.0](https://github.com/postalsys/emailengine/compare/v2.65.0...v2.66.0) (2026-03-29)
+
+
+### Features
+
+* add audit logging for admin authentication events ([0ea15d4](https://github.com/postalsys/emailengine/commit/0ea15d444ed589cd872b11190d07f7751f5cf54b))
+* add passkey (WebAuthn) authentication for admin login ([a39b362](https://github.com/postalsys/emailengine/commit/a39b362152597bcc864307cd7c46cdc78a3808e6))
+* always use persistent sessions and support remember-me for passkey login ([6a6fc74](https://github.com/postalsys/emailengine/commit/6a6fc74748f92372e135e88478a9fa0f83cf690f))
+* show curl example for service account OAuth2 apps ([4ab5eda](https://github.com/postalsys/emailengine/commit/4ab5edabf64373e8b2dd4bb0ea658847d40ba904))
+
+
+### Bug Fixes
+
+* broken Handlebars script tag, Okta session fall-through, login rate limiting, and passkey schema validation ([01e5721](https://github.com/postalsys/emailengine/commit/01e5721ee02ad66ce9c30b58c406988b1cfd1ae3))
+* clear passkey credentials on CLI password reset and document remember-me behavior ([35f7f00](https://github.com/postalsys/emailengine/commit/35f7f00970b7e7f3a514d2ea0d97fce5320f6e1b))
+* do not prefill login username field ([59835a8](https://github.com/postalsys/emailengine/commit/59835a84f3e2a01c6461f29ecb80763dc4a42fe2))
+* harden passkey auth, IMAP sync error handling, and login form UX ([c16b983](https://github.com/postalsys/emailengine/commit/c16b98312f35d87fd8b21974a7eb7eca6459cc3b))
+* harden passkey authentication with validation, rate limits, and audit logging ([75dd289](https://github.com/postalsys/emailengine/commit/75dd289940e7345fa56246c90ff6bc8d01694e6c))
+* login page divider logic, select() log level, and missing trailing newlines ([97ff93e](https://github.com/postalsys/emailengine/commit/97ff93e2cc6c865a0f597a42a124e0abb140e34a))
+* normalize copy across login and security pages ([60e132a](https://github.com/postalsys/emailengine/commit/60e132a9e4e8f96fc621b4b454f95896fb4d48c1))
+* normalize sign-in/sign-out copy to sentence case ([1ccfb16](https://github.com/postalsys/emailengine/commit/1ccfb167a674d887af0ac2db8df3ff434f23e5bb))
+* per-IP passkey rate limiting and credential ownership check ([2455cbe](https://github.com/postalsys/emailengine/commit/2455cbe9d6af5d6eff8ae81ecc335b6820bfc904))
+* prevent message event loss during IMAP sync under heavy load ([ceb139b](https://github.com/postalsys/emailengine/commit/ceb139b825eaf7fc06bf1c88b9bcc89824abbcdb))
+* prevent open redirects via next parameter and require password for passkey registration ([0e7f52a](https://github.com/postalsys/emailengine/commit/0e7f52ada9687234682027ecb93e81515fcb9dbb))
+* prevent unhandled promise rejections during mailbox sync ([e6174de](https://github.com/postalsys/emailengine/commit/e6174defbf1c94f54ac7cbcb45eaa9e5c547926e))
+* reject OAuth2 grants with missing Google granular consent scopes ([3f277d1](https://github.com/postalsys/emailengine/commit/3f277d1428e4a861752eb18b5d74279afefd1efa))
+* remove password hash from error logs and update passkey description copy ([d28dd16](https://github.com/postalsys/emailengine/commit/d28dd16e61fc84d0800546c4f33d4535f52e2a22))
+* remove unnecessary min-height from login form ([f16940d](https://github.com/postalsys/emailengine/commit/f16940d9957df114ce0ff4240107a82619a58705))
+* resolve OAuth2 provider for delegated Outlook accounts ([f35c816](https://github.com/postalsys/emailengine/commit/f35c816e3149eeaa568d86c06fa6783c649c54c5))
+* update client-side Handlebars to 4.7.9 and harden passkey input validation ([882891c](https://github.com/postalsys/emailengine/commit/882891c36ed3704d96ccf227e682e152f5395036))
+* upgrade handlebars to 4.7.9 to resolve prototype pollution vulnerability ([452f5f5](https://github.com/postalsys/emailengine/commit/452f5f54f4007e4b765e18861ce01cde312cc83c))
+
+
+### Performance Improvements
+
+* optimize mailbox listing for accounts with many folders ([a39e5f7](https://github.com/postalsys/emailengine/commit/a39e5f7b02156fc73ab44d1ca4f6e977e4290312))
+
 ## [2.65.0](https://github.com/postalsys/emailengine/compare/v2.64.0...v2.65.0) (2026-03-23)
 
 

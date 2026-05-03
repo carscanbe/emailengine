@@ -200,8 +200,31 @@ const SUPPORTED_LOCALES = locales.map(locale => locale.locale);
 
 const FLAG_SORT_ORDER = ['\\Inbox', '\\Flagged', '\\Sent', '\\Drafts', '\\All', '\\Archive', '\\Junk', '\\Trash'];
 
-const { GMAIL_SCOPES } = require('../lib/oauth/gmail');
+const { GMAIL_SCOPES, OPENID_SCOPES } = require('../lib/oauth/gmail');
 const { MAIL_RU_SCOPES } = require('../lib/oauth/mail-ru');
+
+const GMAIL_SCOPE_DESCRIPTIONS = {
+    'https://mail.google.com/': 'Full email access (IMAP and SMTP)',
+    'https://www.googleapis.com/auth/gmail.modify': 'Read, compose, send, and modify emails',
+    'https://www.googleapis.com/auth/gmail.readonly': 'Read email messages and settings',
+    'https://www.googleapis.com/auth/gmail.send': 'Send email on your behalf',
+    'https://www.googleapis.com/auth/gmail.labels': 'Manage email labels',
+    'https://www.googleapis.com/auth/pubsub': 'Cloud Pub/Sub notifications'
+};
+
+function formatScopeDescription(scope) {
+    if (GMAIL_SCOPE_DESCRIPTIONS[scope]) {
+        return GMAIL_SCOPE_DESCRIPTIONS[scope];
+    }
+    let shortName = scope;
+    try {
+        const url = new URL(scope);
+        shortName = url.pathname.split('/').pop() || scope;
+    } catch (e) {
+        // Not a URL, use as-is
+    }
+    return shortName.replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
 
 const REDACTED_KEYS = ['req.headers.authorization', 'req.headers.cookie', 'err.rawPacket'];
 
@@ -1287,6 +1310,7 @@ Include your token in requests using one of these methods:
                             }
                         };
                     }
+                    return { isValid: false };
                 }
             }
 
@@ -1307,7 +1331,12 @@ Include your token in requests using one of these methods:
             }
 
             // unless it is a login or TOPT (or public) page, require TOTP code
-            if (session.requireTotp && !['/{any*}', '/admin/totp', '/admin/login'].includes(request.route && request.route.path)) {
+            if (
+                session.requireTotp &&
+                !['/{any*}', '/admin/totp', '/admin/login', '/admin/passkey/auth/options', '/admin/passkey/auth/verify'].includes(
+                    request.route && request.route.path
+                )
+            ) {
                 request.requireTotp = true;
             }
 
@@ -1354,6 +1383,8 @@ Include your token in requests using one of these methods:
                     throw error;
                 }
                 request.cookieAuth.set(request.auth.credentials);
+                let oktaUser = request.auth.credentials && request.auth.credentials.profile && request.auth.credentials.profile.username;
+                request.logger.info({ msg: 'Admin login successful', user: oktaUser || 'unknown', method: 'okta', remoteAddress: request.app.ip });
                 return h.redirect('/admin');
             },
             options: {
@@ -2077,7 +2108,7 @@ Include your token in requests using one of these methods:
 
                 // Route recognized lifecycle events to the IMAP worker
                 // so the live client with its OAuth state handles them
-                if (entry.lifecycleEvent === 'reauthorizationRequired' || entry.lifecycleEvent === 'subscriptionRemoved') {
+                if (entry.lifecycleEvent === 'reauthorizationRequired' || entry.lifecycleEvent === 'subscriptionRemoved' || entry.lifecycleEvent === 'missed') {
                     const dedupeKey = `${entry.lifecycleEvent}:${entry.subscriptionId}`;
                     if (seenLifecycleEvents.has(dedupeKey)) {
                         request.logger.debug({
@@ -2208,6 +2239,53 @@ Include your token in requests using one of these methods:
                     const grantedScopes = r.scope ? r.scope.split(/\s+/) : [];
 
                     request.logger.info({ msg: 'OAuth token received', grantedScopes, hasIdToken: !!r.id_token });
+
+                    // Check if user deselected required scopes in Google's granular consent
+                    const requiredFunctionalScopes = oAuth2Client.scopes.filter(s => !OPENID_SCOPES.includes(s));
+                    const missingScopes = requiredFunctionalScopes.filter(s => !grantedScopes.includes(s));
+
+                    if (missingScopes.length > 0) {
+                        request.logger.warn({
+                            msg: 'OAuth2 grant missing required scopes',
+                            requested: requiredFunctionalScopes,
+                            granted: grantedScopes,
+                            missing: missingScopes
+                        });
+
+                        // Best-effort revocation of the partial token
+                        oAuth2Client.revokeToken(r.refresh_token || r.access_token).catch(err => {
+                            request.logger.error({ msg: 'Failed to revoke partial OAuth2 token', err });
+                        });
+
+                        const reAuthNonce = crypto.randomBytes(NONCE_BYTES).toString('base64url');
+                        const reAuthState = `account:add:${reAuthNonce}`;
+                        const reAuthAccountData = Object.assign({}, accountData, {
+                            oauth2: { provider },
+                            _meta: accountMeta
+                        });
+
+                        await redis.set(`${REDIS_PREFIX}${reAuthState}`, JSON.stringify(reAuthAccountData), 'EX', Math.floor(MAX_FORM_TTL / 1000));
+
+                        const reAuthUrl = oAuth2Client.generateAuthUrl({
+                            state: reAuthState,
+                            email: accountData.email
+                        });
+
+                        const missingScopesList = missingScopes.map(formatScopeDescription);
+
+                        return h.view(
+                            'oauth-scope-error',
+                            {
+                                pageTitleFull: request.app.gt.gettext('Email Account Setup'),
+                                templateLocale: request.app.locale,
+                                reAuthUrl,
+                                missingScopesList
+                            },
+                            {
+                                layout: 'public'
+                            }
+                        );
+                    }
 
                     let profileRes;
                     let userEmail;

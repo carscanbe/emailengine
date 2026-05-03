@@ -379,6 +379,10 @@ The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEn
 - Does not work with API-only accounts (e.g., Mail.ru API mode)
 - Requires IMAP support on the email provider
 
+## Authentication Design
+
+- **Passkey (WebAuthn) login is a standalone authentication method.** It intentionally bypasses TOTP. When a user authenticates via passkey, no additional factor is required. This is by design - passkeys are treated as a single sufficient factor.
+
 ## Architecture Notes
 
 - **Multi-threaded**: 8 worker types (API, IMAP, webhooks, submit, export, documents, SMTP server, IMAP proxy)
@@ -412,8 +416,12 @@ The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEn
 ## Code Style Rules
 
 - Never use emojis in code or documentation, only printable ASCII characters
+- Use a single hyphen-minus (`-`) as a dash in UI copy and user-facing strings. Never use double hyphens (`--`), em dashes, or en dashes.
 - When composing git commit messages do not include Claude as co-contributor
-- After making code changes, run `npm run format` and `npm run lint` before committing
+- After making code changes:
+  1. Run `/simplify` to review changed code for reuse, quality, and efficiency
+  2. Run `npm run format` and `npm run lint`
+  3. Run `/security-review` to check for security issues before committing
 - Avoid the circuit breaker pattern unless absolutely necessary. EmailEngine processes many independent accounts through shared workers, so a single failing account can trip a circuit breaker and block all other accounts. Prefer per-account error handling (retry with backoff, error state tracking) over global circuit breakers.
 - Never suppress or swallow unhandled rejections/exceptions at the global handler level. If an error reaches the global `unhandledRejection` or `uncaughtException` handler, the worker must die -- this is the last line of defense. The correct fix is always to handle the error at the source so it never bubbles up to the global handler. This means adding proper try/catch, .catch(), or error event handlers at the actual call site. If the unhandled rejection originates in a dependency (e.g. ImapFlow), fix it in the dependency itself.
 

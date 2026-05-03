@@ -12,6 +12,8 @@ const Redis = require('ioredis');
 const redis = new Redis(config.dbs.redis);
 const webhooksServer = require('./webhooks-server');
 
+const { fetch: fetchCmd } = require('undici');
+
 const accessToken = '2aa97ad0456d6624a55d30780aa2ff61bfb7edc6fa00935b40814b271e718660';
 
 const server = supertest.agent(`http://127.0.0.1:${config.api.port}`).auth(accessToken, { type: 'bearer' });
@@ -22,6 +24,23 @@ const gmailAccountId1 = 'gmail-account1';
 const gmailAccountId2 = 'gmail-account2';
 const gmailSendOnlyAccountId = 'gmail-sendonly-account';
 const outlookServiceAccountId = 'outlook-service-account';
+const gmailServiceAccountId = 'gmail-service-account';
+
+// Helper: acquire MS Graph token using client_credentials flow
+async function getGraphToken() {
+    let tokenRes = await fetchCmd(`https://login.microsoftonline.com/${process.env.OUTLOOK_SERVICE_TENANT_ID}/oauth2/v2.0/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            client_id: process.env.OUTLOOK_SERVICE_CLIENT_ID,
+            client_secret: process.env.OUTLOOK_SERVICE_CLIENT_SECRET,
+            scope: 'https://graph.microsoft.com/.default',
+            grant_type: 'client_credentials'
+        })
+    });
+    let tokenData = await tokenRes.json();
+    return tokenData.access_token;
+}
 
 // Helper function for polling with timeout
 async function waitForCondition(checkFn, options = {}) {
@@ -52,6 +71,8 @@ test('API tests', async t => {
 
     let outlookServiceAppId;
     let outlookReceivedEmailId;
+
+    let gmailServiceAppId;
 
     t.before(async () => {
         testAccount = await nodemailer.createTestAccount();
@@ -1074,6 +1095,163 @@ test('API tests', async t => {
         assert.ok(outlookReceivedEmailId, 'Need received email ID from previous test');
 
         const response = await server.delete(`/v1/account/${outlookServiceAccountId}/message/${outlookReceivedEmailId}`).expect(200);
+
+        assert.ok(response.body.deleted);
+    });
+
+    // --- Outlook Graph API behavior tests (verify syncMissedMessages assumptions) ---
+
+    await t.test('Graph API message query returns messages from all folders with parentFolderId', { timeout: testConfig.OUTLOOK_TIMEOUT }, async () => {
+        let graphToken = await getGraphToken();
+        assert.ok(graphToken, 'Should receive access token');
+        let email = process.env.OUTLOOK_SERVICE_ACCOUNT_EMAIL;
+
+        // Query recent messages with parentFolderId - same pattern as syncMissedMessages
+        let sinceTime = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        let queryParams = new URLSearchParams({
+            $filter: `receivedDateTime gt ${sinceTime}`,
+            $select: 'id,parentFolderId',
+            $top: '10',
+            $orderby: 'receivedDateTime desc'
+        });
+
+        let messagesRes = await fetchCmd(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages?${queryParams}`, {
+            headers: {
+                Authorization: `Bearer ${graphToken}`,
+                Prefer: 'IdType="ImmutableId"'
+            }
+        });
+        assert.equal(messagesRes.status, 200, 'Should return 200');
+
+        let messagesData = await messagesRes.json();
+        assert.ok(Array.isArray(messagesData.value), 'Should return value array');
+        assert.ok(messagesData.value.length > 0, 'Should have at least one recent message');
+
+        // Every message should have both id and parentFolderId
+        for (let msg of messagesData.value) {
+            assert.ok(msg.id, 'Message should have id');
+            assert.ok(msg.parentFolderId, 'Message should have parentFolderId');
+        }
+
+        // Messages should come from multiple folders (Inbox, Sent Items, etc.)
+        let distinctFolders = new Set(messagesData.value.map(m => m.parentFolderId));
+        assert.ok(distinctFolders.size > 1, `Should have messages from multiple folders, got ${distinctFolders.size}`);
+    });
+
+    await t.test('Graph API pagination returns @odata.nextLink', { timeout: testConfig.OUTLOOK_TIMEOUT }, async () => {
+        let graphToken = await getGraphToken();
+        let email = process.env.OUTLOOK_SERVICE_ACCOUNT_EMAIL;
+
+        // Query with $top=1 to force pagination
+        let sinceTime = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        let queryParams = new URLSearchParams({
+            $filter: `receivedDateTime gt ${sinceTime}`,
+            $select: 'id',
+            $top: '1',
+            $orderby: 'receivedDateTime desc'
+        });
+
+        let page1Res = await fetchCmd(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages?${queryParams}`, {
+            headers: {
+                Authorization: `Bearer ${graphToken}`,
+                Prefer: 'IdType="ImmutableId"'
+            }
+        });
+        assert.equal(page1Res.status, 200);
+
+        let page1Data = await page1Res.json();
+        assert.ok(Array.isArray(page1Data.value), 'First page should have value array');
+        assert.equal(page1Data.value.length, 1, 'First page should have exactly 1 message');
+        assert.ok(page1Data['@odata.nextLink'], 'Should have @odata.nextLink for more results');
+
+        // Follow the nextLink
+        let page2Res = await fetchCmd(page1Data['@odata.nextLink'], {
+            headers: {
+                Authorization: `Bearer ${graphToken}`,
+                Prefer: 'IdType="ImmutableId"'
+            }
+        });
+        assert.equal(page2Res.status, 200);
+
+        let page2Data = await page2Res.json();
+        assert.ok(Array.isArray(page2Data.value), 'Second page should have value array');
+        assert.ok(page2Data.value.length > 0, 'Second page should have at least one message');
+
+        // First page and second page should have different message IDs
+        assert.notEqual(page1Data.value[0].id, page2Data.value[0].id, 'Pages should return different messages');
+    });
+
+    // --- Gmail Service Account (IMAP XOAUTH2) tests ---
+
+    await t.test('Create gmailService OAuth2 app', { timeout: 30000 }, async () => {
+        const response = await server
+            .post(`/v1/oauth2`)
+            .send({
+                name: 'Gmail Service Account (IMAP XOAUTH2)',
+                provider: 'gmailService',
+                serviceClient: process.env.GMAIL_SERVICE_POSTALSYS_CLIENT,
+                serviceClientEmail: process.env.GMAIL_SERVICE_POSTALSYS_SERVICE_EMAIL,
+                serviceKey: process.env.GMAIL_SERVICE_POSTALSYS_KEY
+            })
+            .expect(200);
+
+        gmailServiceAppId = response.body.id;
+        assert.ok(gmailServiceAppId);
+    });
+
+    await t.test('Register gmailService account', { timeout: 30000 }, async () => {
+        const response = await server
+            .post(`/v1/account`)
+            .send({
+                account: gmailServiceAccountId,
+                name: 'Gmail Service User',
+                email: process.env.GMAIL_SERVICE_POSTALSYS_ACCOUNT_EMAIL,
+                oauth2: {
+                    provider: gmailServiceAppId,
+                    auth: {
+                        user: process.env.GMAIL_SERVICE_POSTALSYS_ACCOUNT_EMAIL
+                    }
+                }
+            })
+            .expect(200);
+
+        assert.strictEqual(response.body.state, 'new');
+    });
+
+    await t.test('wait until gmailService account connects via IMAP XOAUTH2', { timeout: 120000 }, async () => {
+        let lastResponse;
+        await waitForCondition(
+            async () => {
+                lastResponse = await server.get(`/v1/account/${gmailServiceAccountId}`).expect(200);
+                switch (lastResponse.body.state) {
+                    case 'authenticationError':
+                    case 'connectError':
+                        throw new Error('Invalid account state ' + lastResponse.body.state);
+                    case 'connected':
+                        return true;
+                }
+                return false;
+            },
+            { timeout: testConfig.GMAIL_TIMEOUT, message: `Gmail Service account connection timeout` }
+        );
+
+        assert.notStrictEqual(lastResponse.body.isApi, true, 'gmailService should use IMAP XOAUTH2, not the API path');
+    });
+
+    await t.test('list mailboxes for gmailService account', { timeout: 30000 }, async () => {
+        const response = await server.get(`/v1/account/${gmailServiceAccountId}/mailboxes`).expect(200);
+
+        assert.ok(response.body.mailboxes.some(mb => mb.specialUse === '\\Inbox'));
+    });
+
+    await t.test('delete gmailService account', { timeout: 30000 }, async () => {
+        const response = await server.delete(`/v1/account/${gmailServiceAccountId}`).expect(200);
+
+        assert.ok(response.body.deleted);
+    });
+
+    await t.test('delete gmailService OAuth2 app', { timeout: 30000 }, async () => {
+        const response = await server.delete(`/v1/oauth2/${gmailServiceAppId}`).expect(200);
 
         assert.ok(response.body.deleted);
     });

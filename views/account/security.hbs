@@ -17,7 +17,7 @@
                     <div class="col-4 text-right">
                         {{#if authData.enabled}}
                         <button type="button" class="btn btn-outline-primary" data-toggle="modal"
-                            data-target="#logoutAllModal" title="Log out all sessions" id="logout-all-btn"
+                            data-target="#logoutAllModal" title="Sign out all sessions" id="logout-all-btn"
                             data-placement="top">
                             Sign out everywhere
                         </button>
@@ -33,11 +33,11 @@
                         {{#if authData.enabled}} ******** {{else}}Not configured{{/if}}
                     </div>
                     <div class="col-4 text-right">
-                        <a href="/admin/account/password" class="btn btn-outline-primary bn-xs">
+                        <a href="/admin/account/password" class="btn btn-outline-primary btn-xs">
                             {{#if authData.enabled}}
-                            Change Password
+                            Change password
                             {{else}}
-                            Create Password
+                            Create password
                             {{/if}}
                         </a>
                     </div>
@@ -58,16 +58,61 @@
                     <div class="col-4 text-right">
                         {{#if totp.enabled}}
                         <button type="button" class="btn btn-outline-danger" data-toggle="modal"
-                            data-target="#disableTfaModal" title="Disable Two-factor authentication"
+                            data-target="#disableTfaModal" title="Disable two-factor authentication"
                             id="disable-tfa-btn" data-placement="top">
                             Disable 2FA
                         </button>
                         {{else}}
                         <button type="button" class="btn btn-outline-primary" data-toggle="modal"
-                            data-target="#enableTfaModal" title="Enable Two-factor authentication" id="disable-tfa-btn"
+                            data-target="#enableTfaModal" title="Enable two-factor authentication" id="enable-tfa-btn"
                             data-placement="top">
                             Enable 2FA
                         </button>
+                        {{/if}}
+                    </div>
+                </div>
+            </li>
+
+            <li class="list-group-item">
+                <div class="row" style="align-items: flex-start;">
+                    <div class="col-4" style="padding-top: 0.4rem;">Passkeys
+                        <br><small class="text-muted">Sign in with just a passkey - no password or additional verification needed.</small>
+                    </div>
+                    <div class="col-4">
+                        {{#if passkeys.length}}
+                        <ul class="list-unstyled mb-0">
+                            {{#each passkeys}}
+                            <li class="mb-2">
+                                <strong>{{this.name}}</strong><br>
+                                <small class="text-muted">Added {{this.createdAtFormatted}}</small>
+                                <form method="post" action="/admin/account/passkeys/delete" style="display:inline;"
+                                    class="ml-2">
+                                    <input type="hidden" name="crumb" value="{{../crumb}}" />
+                                    <input type="hidden" name="credentialId" value="{{this.id}}" />
+                                    <button type="submit" class="btn btn-sm btn-outline-danger"
+                                        title="Remove passkey"
+                                        onclick="return confirm('Remove this passkey?');">
+                                        Remove
+                                    </button>
+                                </form>
+                            </li>
+                            {{/each}}
+                        </ul>
+                        {{else}}
+                        <span class="badge badge-light">None registered</span>
+                        {{/if}}
+                    </div>
+                    <div class="col-4 text-right">
+                        {{#if serviceUrl}}
+                        <button type="button" class="btn btn-outline-primary" id="register-passkey-btn">
+                            <i class="fas fa-fingerprint fa-sm fa-fw mr-1"></i>Add passkey
+                        </button>
+                        {{else}}
+                        <button type="button" class="btn btn-outline-secondary" disabled
+                            title="Set a Service URL in configuration before registering passkeys">
+                            Add passkey
+                        </button>
+                        <br><small class="text-muted">Requires Service URL</small>
                         {{/if}}
                     </div>
                 </div>
@@ -87,7 +132,7 @@
                         <button type="button" class="btn btn-outline-primary" data-toggle="modal"
                             data-target="#ssoInstructionsModal" title="Setting up SSO" id="sso-instructions"
                             data-placement="top">
-                            Setup Guide
+                            Setup guide
                         </button>
                     </div>
                 </div>
@@ -101,7 +146,7 @@
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="disableTfaModalLabel">Disable Two-Factor Authentication</h5>
+                <h5 class="modal-title" id="disableTfaModalLabel">Disable two-factor authentication</h5>
                 <button type="button" class="close" data-dismiss="modal" aria-label="Close">
                     <span aria-hidden="true">&times;</span>
                 </button>
@@ -126,7 +171,7 @@
         <form method="post" action="/admin/account/tfa/enable">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="enableTfaModalLabel">Enable Two-Factor Authentication</h5>
+                    <h5 class="modal-title" id="enableTfaModalLabel">Enable two-factor authentication</h5>
                     <button type="button" class="close" data-dismiss="modal" aria-label="Close">
                         <span aria-hidden="true">&times;</span>
                     </button>
@@ -164,7 +209,7 @@
         <form method="post" action="/admin/account/logout-all">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="logoutAllModalLabel">Sign Out from All Devices</h5>
+                    <h5 class="modal-title" id="logoutAllModalLabel">Sign out from all devices</h5>
                     <button type="button" class="close" data-dismiss="modal" aria-label="Close">
                         <span aria-hidden="true">&times;</span>
                     </button>
@@ -179,7 +224,7 @@
                     <input type="hidden" name="crumb" value="{{crumb}}" />
                     <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
                     <button type="submit" class="btn btn-primary"><i
-                            class="fas fa-sign-out-alt fa-sm fa-fw mr-2 text-gray-400"></i> Sign Out Everywhere</button>
+                            class="fas fa-sign-out-alt fa-sm fa-fw mr-2 text-gray-400"></i> Sign out everywhere</button>
                 </div>
             </div>
         </form>
@@ -267,3 +312,47 @@
 
     </div>
 </div>
+
+<div class="modal fade" id="registerPasskeyModal" tabindex="-1" aria-labelledby="registerPasskeyModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="registerPasskeyModalLabel">Register a new passkey</h5>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                {{#if authData.enabled}}
+                <div class="form-group">
+                    <label for="passkey-current-password">Current password</label>
+                    <input type="password" class="form-control" id="passkey-current-password"
+                        placeholder="Enter your current password" maxlength="256" autocomplete="current-password" />
+                    <small class="form-text text-muted">Confirm your identity before registering a new passkey.</small>
+                </div>
+                {{/if}}
+                <div class="form-group">
+                    <label for="passkey-name">Passkey name</label>
+                    <input type="text" class="form-control" id="passkey-name" placeholder="e.g., MacBook Touch ID"
+                        maxlength="100" />
+                    <small class="form-text text-muted">A friendly name to help you identify this passkey.</small>
+                </div>
+                <div id="passkey-register-error" class="text-danger small" style="display:none;"></div>
+                <div id="passkey-register-success" class="text-success small" style="display:none;">
+                    Passkey registered successfully.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <input type="hidden" id="security-crumb" value="{{crumb}}" />
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="passkey-register-confirm-btn">
+                    Register passkey
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/static/vendor/simplewebauthn/browser.min.js"></script>
+<script src="/static/js/passkey-register.js"></script>
