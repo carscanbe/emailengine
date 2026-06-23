@@ -33,7 +33,7 @@ EmailEngine is an email sync platform that provides REST API access to email acc
 - `lib/export.js` - Export class for bulk email export operations
 - `lib/api-routes/export-routes.js` - Export REST API endpoints
 - `workers/api.js` - REST API worker with Hapi server
-- `lib/routes-ui.js` - Web UI routes for admin interface
+- `lib/routes-ui.js` - Admin UI route orchestrator (wires the `lib/ui-routes/*` modules)
 
 ## Technology Stack
 
@@ -48,7 +48,9 @@ EmailEngine is an email sync platform that provides REST API access to email acc
 ```
 npm start         # Production mode
 npm run dev       # Development mode (verbose logging, Redis DB 9)
-npm test          # Run full test suite (lint + tests)
+npm test          # Run full test suite (lint + unit + integration tests)
+npm run test:unit # Fast unit tier only (parallel, no live server)
+npm run test:integration  # Live-server integration tier only
 npm run format    # Format code with Prettier
 npm run format:check  # Check formatting without changes
 npm run lint      # Lint with ESLint
@@ -60,9 +62,16 @@ npm run single    # Single-worker debug mode with Inspector
 
 - Uses Node.js native test runner with native assert module
 - Tests run via Grunt: `npm test` executes `grunt` which runs Node.js test runner
-- Tests located in `/test` directory
-- Uses Redis database 9 for test isolation
-- Run `npm test` for full test suite with linting
+- Uses Redis database 13 for test isolation (`config/test.toml`)
+- Two test tiers:
+  - **Unit tier** (`/test/*-test.js`): self-contained tests that need Redis but not the live server; run in parallel with default `node --test` concurrency. Run with `npm run test:unit`
+  - **Integration tier** (`/test/integration/*-test.js`): tests that run against a live EmailEngine server booted by Grunt (api-test, sendonly-test, api-routes-smoke-test, ui-routes-smoke-test); run serially. Server readiness is detected by polling `/health` (`test/helpers/wait-for-server.js`). Run with `npm run test:integration`
+- Test files must be named `*-test.js` - the runner globs only match that pattern, so helper modules (e.g. `test/integration/test-config.js`, `test/helpers/*`) are never executed as tests
+- New tests go in `/test` unless they make HTTP requests to the live server, in which case they go in `/test/integration`
+- The integration tier is non-hermetic: api-test.js talks to live Gmail/MS Graph and needs credentials from `.env`; failures there are often external-state flakes, re-run before blaming a change
+- Run `npm test` for the full suite with linting (unit tier, then integration tier)
+- CI (`.github/workflows/test.yml`) runs lint, unit, and integration as separate parallel jobs, so a failed section (usually the flaky integration tier) can be re-run alone via "Re-run failed jobs"
+- **E2E tier** (`/test/e2e/*.spec.js`): a separate, browser-driven happy-path suite using Playwright (`@playwright/test`), NOT part of `npm test`. It boots a fresh instance (isolated Redis db 14, `config/e2e.toml`, `NODE_ENV=e2e`), drives the admin UI to enable auth + activate a 14-day trial + create an API token, then exercises the REST API end to end against an Ethereal mailbox. Run with `npm run test:e2e` (one-time `npm run test:e2e:install` to fetch Chromium). It runs in its own workflow (`.github/workflows/e2e.yml`, `workflow_dispatch` + push to master) so it is easy to re-run, and is non-hermetic: it needs outbound internet (Ethereal + the postalsys.com trial endpoint). The trial rate limit is bypassed for the e2e `serviceUrl` (`https://e2e.emailengine.app/`) via the postalsys-web trial allowlist
 
 ## Main Process (server.js)
 
@@ -102,16 +111,18 @@ EmailEngine uses Node.js Worker Threads for isolated execution. Workers communic
 
 | Worker | File | Count | Purpose |
 |--------|------|-------|---------|
-| API | `api.js` | 1 | HTTP server for REST API and admin UI (see API Worker section below) |
+| API | `api.js` | 1* | HTTP server for REST API and admin UI (see API Worker section below) |
 | IMAP | `imap.js` | 4* | Email sync engine (see IMAP Worker section below) |
 | Webhooks | `webhooks.js` | 1* | Webhook delivery processor (see Webhooks section below) |
 | Submit | `submit.js` | 1* | Email delivery processor (see Submit Worker section below) |
 | Export | `export.js` | 1* | Account data export processor (see Export Worker section below) |
-| Documents | `documents.js` | 1 | **Deprecated.** Indexes emails in Elasticsearch (legacy feature) |
+| Documents | `documents.js` | 0-1 | **Deprecated and disabled by default.** Indexes emails in Elasticsearch (legacy feature). Only spawned when the Document Store gate is enabled (see Document Store gate below). |
 | SMTP | `smtp.js` | 1 | Optional SMTP server (see SMTP Server section below) |
 | IMAP Proxy | `imap-proxy.js` | 1 | Optional IMAP proxy server (see IMAP Proxy section below) |
 
-*Configurable via environment variables (`EENGINE_WORKERS`, `EENGINE_WORKERS_WEBHOOKS`, `EENGINE_WORKERS_SUBMIT`, `EENGINE_EXPORT_QC`)
+*Configurable via environment variables (`EENGINE_WORKERS`, `EENGINE_WORKERS_API`, `EENGINE_WORKERS_WEBHOOKS`, `EENGINE_WORKERS_SUBMIT`, `EENGINE_EXPORT_QC`). Multiple API workers (`EENGINE_WORKERS_API` > 1) require `SO_REUSEPORT` (Linux); on macOS/Windows/Node <23.1 it falls back to a single API worker.
+
+**Document Store gate (deprecated feature):** The Document Store is disabled by default. It only runs when EmailEngine is started with the `--documentStore.enabled` CLI flag, the `[documentStore] enabled = true` config value, or `EENGINE_DOCUMENT_STORE_ENABLED=true`. The gate is exposed as `documentStoreFeatureEnabled` (sync) and `isDocumentStoreEnabled()` (sync flag AND the `documentStoreEnabled` setting) from `lib/document-store.js`. When the gate is off: the `documents` worker is not spawned, every document-store-only endpoint (`/v1/chat/{account}`, `/v1/unified/search`, `/admin/config/document-store/*`) is unregistered and returns 404, all runtime document-store code takes its existing "disabled" path, and the admin UI shows an error alert if the `documentStoreEnabled` setting is still on. Runtime reads of the `documentStoreEnabled` setting use `isDocumentStoreEnabled()` so the feature-off state reuses the already-tested setting-off paths.
 
 **Worker Lifecycle:**
 - Main thread spawns workers at startup and monitors health via heartbeats (every 10s)
@@ -147,13 +158,14 @@ The API worker (`workers/api.js`) runs a Hapi.js HTTP server serving both the RE
 **Configuration:**
 - `EENGINE_PORT` / `PORT` - Listen port (default: 3000)
 - `EENGINE_HOST` - Bind address (default: 127.0.0.1)
+- `EENGINE_WORKERS_API` - Number of API/HTTP workers (default: 1). Values >1 share the port via `SO_REUSEPORT` (Linux only); on macOS/Windows/Node <23.1 EmailEngine falls back to a single worker with a warning
 - `EENGINE_MAX_BODY_SIZE` - Max POST body (default: 25MB)
 - `EENGINE_TIMEOUT` - Request timeout (default: 10s), override with `X-EE-Timeout` header
 - `EENGINE_API_PROXY` - Enable X-Forwarded-For parsing
 
 **Key files:**
 - `workers/api.js` - Hapi server setup and middleware
-- `lib/routes-ui.js` - Admin UI routes (88 routes)
+- `lib/routes-ui.js` - Admin UI route orchestrator (wires the `lib/ui-routes/*` route modules)
 - `lib/api-routes/*.js` - REST API route modules
 - `lib/tokens.js` - Token validation and CRUD
 
@@ -300,7 +312,7 @@ The export worker (`workers/export.js`) processes bulk email export jobs via Bul
 - `EENGINE_EXPORT_QC` - Concurrency per worker (default: 1)
 - `EENGINE_EXPORT_TIMEOUT` - Operation timeout (default: 5 minutes)
 - `EENGINE_EXPORT_PATH` - Export file directory (default: OS temp dir)
-- `exportMaxAge` setting - Export file retention (default: 7 days)
+- `EENGINE_EXPORT_MAX_AGE` / `exportMaxAge` setting - Export file retention in ms (default: 24 hours)
 - `exportMaxConcurrent` setting - Per-account concurrent limit (default: 3)
 - `exportMaxGlobalConcurrent` setting - Global concurrent limit (default: 10)
 - `exportMaxMessageSize` setting - Max attachment size (default: 25MB)
@@ -398,14 +410,17 @@ The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEn
 - `EENGINE_HOST` - API server bind address (default: 127.0.0.1)
 - `EENGINE_TIMEOUT` - Command timeout in ms (default: 10000)
 - `EENGINE_LOG_LEVEL` - Logging level (default: trace)
+- `EENGINE_BEACON_DISABLED` - Set to `true` to opt out of the feature beacon (anonymized feature-usage diagnostics piggybacked on the existing license-validation call). License validation itself is unaffected. See `lib/license-beacon.js`.
 
 **Workers:**
 - `EENGINE_WORKERS` - IMAP worker count (default: 4)
+- `EENGINE_WORKERS_API` - API/HTTP worker count (default: 1; values >1 need `SO_REUSEPORT`/Linux, otherwise falls back to 1)
 - `EENGINE_WORKERS_WEBHOOKS` - Webhook worker count (default: 1)
 - `EENGINE_WORKERS_SUBMIT` - Submit worker count (default: 1)
 - `EENGINE_EXPORT_QC` - Export concurrency per worker (default: 1)
 - `EENGINE_EXPORT_TIMEOUT` - Export operation timeout (default: 5 minutes)
 - `EENGINE_NOTIFY_QC` - Webhook concurrency per worker (default: 1)
+- `EENGINE_DOCUMENT_STORE_ENABLED` - Enable the deprecated Document Store feature (default: false; also settable via `--documentStore.enabled` / `[documentStore] enabled`)
 
 **Prepared configuration** (applied on startup):
 - `EENGINE_SETTINGS` - JSON settings object
@@ -418,6 +433,7 @@ The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEn
 - Never use emojis in code or documentation, only printable ASCII characters
 - Use a single hyphen-minus (`-`) as a dash in UI copy and user-facing strings. Never use double hyphens (`--`), em dashes, or en dashes.
 - When composing git commit messages do not include Claude as co-contributor
+- For commits that do not change runtime behavior (docs, comments, CI/workflow tweaks, formatting), append `[skip ci]` to the commit message to avoid triggering the GitHub Actions workflows. Exception: do not add `[skip ci]` to commits using a `fix:` or `feat:` prefix - those must run so the release action is triggered.
 - After making code changes:
   1. Run `/simplify` to review changed code for reuse, quality, and efficiency
   2. Run `npm run format` and `npm run lint`

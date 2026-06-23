@@ -72,7 +72,8 @@ const {
     getRedisStats,
     threadStats,
     httpAgent,
-    reloadHttpProxyAgent
+    reloadHttpProxyAgent,
+    maybeReloadHttpProxyAgent
 } = require('./lib/tools');
 const MetricsCollector = require('./lib/metrics-collector');
 
@@ -106,29 +107,9 @@ const bounceClassifier = require('@postalsys/bounce-classifier');
 
 const v8 = require('node:v8');
 
-// Initialize Bugsnag error tracking if API key is provided
-const Bugsnag = require('@bugsnag/js');
-if (readEnvValue('BUGSNAG_API_KEY')) {
-    Bugsnag.start({
-        apiKey: readEnvValue('BUGSNAG_API_KEY'),
-        appVersion: packageData.version,
-        logger: {
-            debug(...args) {
-                logger.debug({ msg: args.shift(), worker: 'main', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            info(...args) {
-                logger.debug({ msg: args.shift(), worker: 'main', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            warn(...args) {
-                logger.warn({ msg: args.shift(), worker: 'main', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            error(...args) {
-                logger.error({ msg: args.shift(), worker: 'main', source: 'bugsnag', args: args.length ? args : undefined });
-            }
-        }
-    });
-    logger.notifyError = Bugsnag.notify.bind(Bugsnag);
-}
+// Initialize Sentry error tracking if a DSN is provided
+const { initSentry } = require('./lib/sentry');
+initSentry('main');
 
 // Import additional dependencies
 const pathlib = require('path');
@@ -140,6 +121,8 @@ const { compare: cv } = require('compare-versions');
 const Joi = require('joi');
 const { settingsSchema } = require('./lib/schemas');
 const settings = require('./lib/settings');
+const { documentStoreFeatureEnabled } = require('./lib/document-store');
+const { attachBeacon, persistBeaconMarkers } = require('./lib/license-beacon');
 const tokens = require('./lib/tokens');
 
 const { checkRateLimit } = require('./lib/rate-limit');
@@ -147,6 +130,8 @@ const { checkRateLimit } = require('./lib/rate-limit');
 const { QueueEvents } = require('bullmq');
 
 const getSecret = require('./lib/get-secret');
+
+const { rejectWorkerCalls } = require('./lib/reject-worker-calls');
 
 const msgpack = require('msgpack5')();
 
@@ -220,6 +205,10 @@ config.dbs.redis = readEnvValue('EENGINE_REDIS') || readEnvValue('REDIS_URL') ||
 config.workers.imap = getWorkerCount(readEnvValue('EENGINE_WORKERS') || config.workers.imap) || 4;
 config.workers.webhooks = Number(readEnvValue('EENGINE_WORKERS_WEBHOOKS')) || config.workers.webhooks || 1;
 config.workers.submit = Number(readEnvValue('EENGINE_WORKERS_SUBMIT')) || config.workers.submit || 1;
+// API worker count. Values >1 require SO_REUSEPORT (Linux); on unsupported platforms it falls back to 1 at startup.
+// Uses getWorkerCount() for parity with EENGINE_WORKERS (supports "cpus"); Math.floor avoids a fractional
+// count over-spawning, Math.max keeps at least one API worker.
+config.workers.api = Math.max(1, Math.floor(getWorkerCount(readEnvValue('EENGINE_WORKERS_API') || config.workers.api)));
 
 config.api.port =
     (hasEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (hasEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
@@ -256,6 +245,9 @@ const API_PROXY = hasEnvValue('EENGINE_API_PROXY') ? getBoolean(readEnvValue('EE
 // API authentication requirement configuration (default: true)
 const REQUIRE_API_AUTH = hasEnvValue('EENGINE_REQUIRE_API_AUTH') ? getBoolean(readEnvValue('EENGINE_REQUIRE_API_AUTH')) : null;
 
+// Opt-out for the license-validation feature beacon (telemetry rides on the existing license call)
+const BEACON_DISABLED = hasEnvValue('EENGINE_BEACON_DISABLED') ? getBoolean(readEnvValue('EENGINE_BEACON_DISABLED')) : false;
+
 // OAuth2 token access configuration
 const ENABLE_OAUTH_TOKENS_API = hasEnvValue('EENGINE_ENABLE_OAUTH_TOKENS_API') ? getBoolean(readEnvValue('EENGINE_ENABLE_OAUTH_TOKENS_API')) : null;
 
@@ -274,6 +266,12 @@ logger.info({
 const NO_ACTIVE_HANDLER_RESP_ERR = new Error('No active handler for requested account. Try again later.');
 NO_ACTIVE_HANDLER_RESP_ERR.statusCode = 503;
 NO_ACTIVE_HANDLER_RESP_ERR.code = 'WorkerNotAvailable';
+
+// Shared rejection for in-flight calls whose target worker terminated mid-request.
+// Reused across concurrent rejections - never attach per-call fields to this instance.
+const WORKER_DIED_RESP_ERR = new Error('Worker handling the request terminated before completion. Try again.');
+WORKER_DIED_RESP_ERR.statusCode = 503;
+WORKER_DIED_RESP_ERR.code = 'WorkerNotAvailable';
 
 // Update check intervals
 const UPGRADE_CHECK_TIMEOUT = 1 * 24 * 3600 * 1000; // 24 hours
@@ -315,6 +313,7 @@ const THREAD_NAMES = {
  */
 const THREAD_CONFIG_VALUES = {
     imap: { key: 'EENGINE_WORKERS', value: config.workers.imap },
+    api: { key: 'EENGINE_WORKERS_API', value: config.workers.api },
     submit: { key: 'EENGINE_WORKERS_SUBMIT', value: config.workers.submit },
     webhooks: { key: 'EENGINE_WORKERS_WEBHOOKS', value: config.workers.webhooks },
     export: { key: 'EENGINE_WORKERS_EXPORT', value: config.workers.export || 1 }
@@ -325,6 +324,97 @@ const queueEvents = {};
 
 // Unique run index for this server instance
 let runIndex;
+
+// Whether multiple API workers may share the listen port via SO_REUSEPORT.
+// Determined once at startup by probeReusePort(); false means a single API worker.
+let apiWorkerReusePort = false;
+
+// Requested API worker count (EENGINE_WORKERS_API), surfaced on /admin/internals so operators can
+// see when more workers were requested than could be started. Whether we fell back to a single
+// worker is derived: `apiWorkersRequested > 1 && !apiWorkerReusePort`.
+let apiWorkersRequested = 1;
+
+// Why a multi-worker request fell back to a single API worker, surfaced on /admin/internals so the
+// banner can state the real cause. Set during probeReusePort():
+//  - 'platform': SO_REUSEPORT is unsupported on this OS/Node build (Linux with Node < 23.1, macOS, Windows)
+//  - 'port': the probe could not test the port (transient conflict / permission), so support is unknown
+// Stays null when SO_REUSEPORT is supported or only one worker was requested.
+let apiWorkerReusePortFallbackReason = null;
+
+/**
+ * Probe whether SO_REUSEPORT can load-balance across multiple sockets on this
+ * platform. Binds two listeners to the same host:port with reusePort enabled;
+ * both must succeed for load balancing to work. It is unsupported on macOS,
+ * Windows, and Node < 23.1, where either the first bind fails outright (e.g.
+ * ENOTSUP) or - when the reusePort option is silently ignored (Node < 23.1) -
+ * the first bind succeeds as a plain bind and the second fails with EADDRINUSE.
+ * The `stage` field tells the caller where the probe failed so it can separate a
+ * genuine platform/capability limitation from a transient port conflict:
+ *   - 'probe': the first bind failed, so the port could not even be tested. An
+ *     EADDRINUSE/EACCES code here means the port is unavailable (transient); any
+ *     other code means the platform rejected reusePort.
+ *   - 'reuse': the first bind succeeded but the second did not, so reusePort is
+ *     not honored on this platform/Node - a capability limitation, even though
+ *     the failing code is EADDRINUSE.
+ *   - null: SO_REUSEPORT is supported.
+ * @param {string} host - Bind address
+ * @param {number} port - Listen port
+ * @returns {Promise<{supported: boolean, code: (string|null), stage: (string|null)}>}
+ *   Whether SO_REUSEPORT load balancing works, the failing bind's error code (or
+ *   null), and which bind failed ('probe', 'reuse', or null when supported)
+ */
+async function probeReusePort(host, port) {
+    const net = require('net');
+
+    const open = () =>
+        new Promise(resolve => {
+            let srv = net.createServer();
+            srv.once('error', err => resolve({ srv: null, code: (err && err.code) || null }));
+            try {
+                srv.listen({ host, port, reusePort: true }, () => resolve({ srv, code: null }));
+            } catch (err) {
+                resolve({ srv: null, code: (err && err.code) || null });
+            }
+        });
+
+    const close = srv =>
+        new Promise(resolve => {
+            if (!srv) {
+                return resolve();
+            }
+            srv.close(() => resolve());
+        });
+
+    let first = await open();
+    if (!first.srv) {
+        // Could not even bind the first probe socket, so the port itself could not be tested.
+        return { supported: false, code: first.code, stage: 'probe' };
+    }
+
+    let second = await open();
+    await close(first.srv);
+    await close(second.srv);
+
+    if (second.srv) {
+        return { supported: true, code: null, stage: null };
+    }
+
+    // The first bind succeeded but a second listener on the same host:port did not, so the kernel is
+    // not load-balancing via SO_REUSEPORT - the option was accepted/ignored but not honored (e.g.
+    // Linux with Node < 23.1, where reusePort is an unrecognized listen() option). This is a platform
+    // limitation, not a port conflict, even though the failing code is EADDRINUSE.
+    return { supported: false, code: second.code, stage: 'reuse' };
+}
+
+/**
+ * Compute per-worker spawn options. API workers receive their index and whether to
+ * bind with SO_REUSEPORT; other worker types need no extra workerData. Keeps the
+ * startup and respawn paths deriving spawn options from a single place.
+ * @param {string} type - Worker type
+ * @param {number} workerIndex - Zero-based index within the worker type
+ * @returns {Object|undefined} Spawn options for spawnWorker(), or undefined
+ */
+const workerSpawnOpts = (type, workerIndex) => (type === 'api' ? { workerData: { workerIndex, reusePort: apiWorkerReusePort } } : undefined);
 
 // Prepared configuration handling
 let preparedSettings = false;
@@ -374,7 +464,7 @@ if (preparedPasswordString) {
             throw new Error('Password format is invalid');
         }
     } catch (err) {
-        logger.error({ msg: 'Invalid password hash provided', input: preparedPasswordString, err });
+        logger.error({ msg: 'Invalid password hash provided', err });
         logger.flush(() => process.exit(1));
     }
 }
@@ -682,7 +772,7 @@ let updateServerState = async (type, state, payload) => {
         for (let worker of workers.get('api')) {
             let callPayload = {
                 cmd: 'change',
-                type: '${type}ServerState',
+                type: `${type}ServerState`,
                 key: state,
                 payload: payload || null
             };
@@ -930,9 +1020,11 @@ async function sendWebhook(account, event, data) {
 /**
  * Spawn a new worker thread of the specified type
  * @param {string} type - Worker type (imap, api, webhooks, submit, documents, smtp, imapProxy)
+ * @param {Object} [opts] - Optional spawn options
+ * @param {Object} [opts.workerData] - Data passed to the worker thread (e.g. API worker index)
  * @returns {Promise<number|void>} Thread ID if successful
  */
-let spawnWorker = async type => {
+let spawnWorker = async (type, opts) => {
     // Don't spawn workers during shutdown
     if (isClosing) {
         return;
@@ -966,6 +1058,7 @@ let spawnWorker = async type => {
     let worker = new WorkerThread(pathlib.join(__dirname, 'workers', `${type.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}.js`), {
         argv,
         env: SHARE_ENV,
+        workerData: opts && opts.workerData,
         trackUnmanagedFds: true
     });
     metrics.threadStarts.inc();
@@ -1012,6 +1105,13 @@ let spawnWorker = async type => {
         let exitHandler = async exitCode => {
             onlineWorkers.delete(worker);
             metrics.threadStops.inc();
+
+            // Fail any in-flight calls routed to this worker right away, so callers
+            // get a fast retryable error instead of hanging until their own timeout.
+            let rejectedCalls = rejectWorkerCalls(callQueue, worker, WORKER_DIED_RESP_ERR);
+            if (rejectedCalls) {
+                logger.info({ msg: 'Rejected in-flight calls for exited worker', type, threadId: worker.threadId, rejectedCalls });
+            }
 
             workers.get(type).delete(worker);
 
@@ -1117,9 +1217,9 @@ let spawnWorker = async type => {
                 logger.error({ msg: 'Worker unexpectedly exited', exitCode, type });
             }
 
-            // Respawn worker after delay
+            // Respawn worker after delay, preserving any spawn options (e.g. API worker index)
             await new Promise(r => setTimeout(r, 1000));
-            await spawnWorker(type);
+            await spawnWorker(type, opts);
         };
 
         // Handle worker exit
@@ -1325,10 +1425,8 @@ let spawnWorker = async type => {
                 }
 
                 case 'settings':
-                    // Reload HTTP proxy agent in the main thread
-                    if (message.data && ('httpProxyEnabled' in message.data || 'httpProxyUrl' in message.data)) {
-                        reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
-                    }
+                    // Reload the HTTP proxy agent in the main thread when proxy settings change
+                    maybeReloadHttpProxyAgent(message.data);
 
                     // Forward settings changes to all IMAP workers
                     availableIMAPWorkers.forEach(worker => {
@@ -1339,8 +1437,8 @@ let spawnWorker = async type => {
                         }
                     });
 
-                    // Forward settings changes to webhooks, submit, and export workers
-                    for (let type of ['webhooks', 'submit', 'export']) {
+                    // Forward settings changes to API, webhooks, submit, and export workers
+                    for (let type of ['api', 'webhooks', 'submit', 'export']) {
                         let typeWorkers = workers.get(type);
                         if (typeWorkers) {
                             typeWorkers.forEach(worker => {
@@ -1499,7 +1597,8 @@ async function call(worker, message, transferList) {
             reject(err);
         }, ttl);
 
-        // Store callback info
+        // Store callback info. `worker` lets us reject this entry immediately if
+        // the target worker terminates, instead of waiting out the timeout.
         callQueue.set(mid, {
             resolve: result => {
                 clearTimeout(timer);
@@ -1509,7 +1608,8 @@ async function call(worker, message, transferList) {
                 clearTimeout(timer);
                 reject(err);
             },
-            timer
+            timer,
+            worker
         });
 
         try {
@@ -1762,6 +1862,21 @@ let licenseCheckHandler = async opts => {
             (await redis.hUpdateBigger(`${REDIS_PREFIX}settings`, 'subcheck', now - subscriptionCheckTimeout, now))
         ) {
             try {
+                let body = {
+                    key: licenseInfo.details.key,
+                    version: packageData.version,
+                    app: '@postalsys/emailengine-app',
+                    instance: (await settings.get('serviceId')) || ''
+                };
+
+                // Best-effort feature beacon: enrich the existing call with a compact, anonymized
+                // feature snapshot. Time-boxed and fully isolated (attachBeacon never throws) so it
+                // can never block, delay, or alter license validation. The full snapshot is only sent
+                // when its digest changes or once every 30 days; otherwise just the digest rides along.
+                if (!BEACON_DISABLED) {
+                    await attachBeacon(body, { redis, logger, now });
+                }
+
                 // Call license validation API
                 let res = await fetchCmd(`https://postalsys.com/licenses/validate`, {
                     method: 'post',
@@ -1769,12 +1884,7 @@ let licenseCheckHandler = async opts => {
                         'User-Agent': `${packageData.name}/${packageData.version} (+${packageData.homepage})`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        key: licenseInfo.details.key,
-                        version: packageData.version,
-                        app: '@postalsys/emailengine-app',
-                        instance: (await settings.get('serviceId')) || ''
-                    }),
+                    body: JSON.stringify(body),
                     dispatcher: httpAgent.retry
                 });
 
@@ -1805,6 +1915,11 @@ let licenseCheckHandler = async opts => {
                         let validatedUntil = new Date(data.validatedUntil);
                         let nextCheck = Math.min(now + MAX_LICENSE_CHECK_DELAY, validatedUntil.getTime());
                         await redis.hset(`${REDIS_PREFIX}settings`, 'ks', new Date(nextCheck).getTime().toString(16));
+                    }
+
+                    // Persist beacon markers so the full snapshot is only resent when it changes.
+                    if (!BEACON_DISABLED) {
+                        await persistBeaconMarkers({ redis, logger, body, now, needFull: data.needFull });
                     }
                 }
             } catch (err) {
@@ -1850,11 +1965,16 @@ let licenseCheckHandler = async opts => {
                     default:
                         if (config.workers && config.workers[type]) {
                             for (let i = 0; i < config.workers[type]; i++) {
-                                await spawnWorker(type);
+                                await spawnWorker(type, workerSpawnOpts(type, i));
                             }
                         }
                 }
             }
+
+            // Workers were respawned after license activation. Assign any accounts that
+            // accumulated in the unassigned set while workers were suspended, as the
+            // worker ready handler only reassigns after crashes (reassignmentPending)
+            assignAccounts().catch(err => logger.error({ msg: 'Unable to assign accounts after license activation', err }));
         }
     } finally {
         checkingLicense = false;
@@ -2588,6 +2708,16 @@ async function onCommand(worker, message) {
             return await getThreadsInfo();
         }
 
+        case 'apiWorkerScaling': {
+            // Reported on /admin/internals so operators can see when EENGINE_WORKERS_API > 1
+            // was requested but only one worker started, and why (reason: 'platform' | 'port').
+            return {
+                requested: apiWorkersRequested,
+                fallback: apiWorkersRequested > 1 && !apiWorkerReusePort,
+                reason: apiWorkerReusePortFallbackReason
+            };
+        }
+
         case 'worker-accounts': {
             // Get accounts assigned to a specific worker thread
             const { threadId, page = 1, pageSize = 20 } = message;
@@ -3167,9 +3297,9 @@ const startApplication = async () => {
             authData.passwordVersion = Date.now();
 
             await settings.set('authData', authData);
-            logger.debug({ msg: 'Password imported', hash: preparedPassword });
+            logger.debug({ msg: 'Password imported' });
         } catch (err) {
-            logger.error({ msg: 'Password import failed', hash: preparedPassword });
+            logger.error({ msg: 'Password import failed', err });
         }
     }
 
@@ -3192,8 +3322,81 @@ const startApplication = async () => {
 
     // -- START WORKER THREADS
 
-    // Start API server first for health checks
-    await spawnWorker('api');
+    // Start API server first for health checks.
+    // Optionally run several API workers that share the listen port via SO_REUSEPORT.
+    apiWorkersRequested = config.workers.api;
+    // Effective count we actually start; drops to 1 if SO_REUSEPORT is unavailable. Kept as a local
+    // so we don't mutate the parsed config object that is read elsewhere.
+    let effectiveApiWorkers = config.workers.api;
+    if (config.workers.api > 1) {
+        const probe = await probeReusePort(config.api.host, config.api.port);
+        apiWorkerReusePort = probe.supported;
+        if (!apiWorkerReusePort) {
+            // Only a first-bind EADDRINUSE/EACCES (stage 'probe') means we genuinely could not test
+            // the port - a transient conflict or permission issue, which the single API worker we
+            // start next will surface. A failed second bind (stage 'reuse') instead means reusePort
+            // is accepted but not honored on this platform/Node (e.g. Node < 23.1), which is a
+            // capability limitation rather than a port conflict, so it falls through to the
+            // "not available on this platform" message below.
+            if (probe.stage === 'probe' && (probe.code === 'EADDRINUSE' || probe.code === 'EACCES')) {
+                apiWorkerReusePortFallbackReason = 'port';
+                logger.warn({
+                    msg: 'Could not probe SO_REUSEPORT because the API port is unavailable; starting a single API worker',
+                    requested: apiWorkersRequested,
+                    code: probe.code,
+                    host: config.api.host,
+                    port: config.api.port
+                });
+            } else {
+                apiWorkerReusePortFallbackReason = 'platform';
+                logger.warn({
+                    msg: 'Multiple API workers requested but SO_REUSEPORT is not available on this platform; starting a single API worker',
+                    requested: apiWorkersRequested,
+                    code: probe.code
+                });
+            }
+            effectiveApiWorkers = 1;
+            // The /admin/internals warning banner (via the apiWorkerScaling command) tells the
+            // operator only one worker started; the thread-config popover keeps showing the
+            // configured EENGINE_WORKERS_API value rather than being rewritten here.
+        } else {
+            logger.info({ msg: 'SO_REUSEPORT is available; starting multiple API workers', workers: effectiveApiWorkers });
+        }
+    }
+
+    let apiPromises = [];
+    for (let i = 0; i < effectiveApiWorkers; i++) {
+        apiPromises.push(spawnWorker('api', workerSpawnOpts('api', i)));
+    }
+
+    // Tolerate partial API-worker startup: proceed as long as at least one worker reached 'ready'
+    // (the spawnWorker exit handler respawns any that failed). Only abort startup if EVERY API
+    // worker failed, preserving the original single-worker "no API worker => exit" behavior.
+    let apiResults = await Promise.allSettled(apiPromises);
+    let apiReady = apiResults.filter(result => result.status === 'fulfilled').length;
+    let apiFailed = apiResults.length - apiReady;
+    if (apiFailed) {
+        logger.error({
+            msg: 'Some API workers failed to start; they will be respawned',
+            requested: apiWorkersRequested,
+            attempted: apiResults.length,
+            ready: apiReady,
+            failed: apiFailed,
+            errors: apiResults
+                .filter(result => result.status === 'rejected')
+                .map(result => ({
+                    message: result.reason && result.reason.message,
+                    exitCode: result.reason && result.reason.exitCode,
+                    threadId: result.reason && result.reason.threadId
+                }))
+        });
+    }
+    if (!apiReady) {
+        // No API worker came up at all - fatal, same as the original single-worker behavior. This
+        // rejects startApplication(), which logs fatal and exits the process.
+        throw new Error('No API worker thread could be started');
+    }
+    logger.info({ msg: 'API workers started', requested: apiWorkersRequested, ready: apiReady });
 
     // Small delay to allow API to start
     await new Promise(r => setTimeout(r, 100));
@@ -3235,8 +3438,10 @@ const startApplication = async () => {
         await spawnWorker('export');
     }
 
-    // Start document processing worker
-    await spawnWorker('documents');
+    // Start document processing worker (deprecated Document Store feature; only when enabled)
+    if (documentStoreFeatureEnabled) {
+        await spawnWorker('documents');
+    }
 
     // Start SMTP proxy if enabled
     if (await settings.get('smtpServerEnabled')) {

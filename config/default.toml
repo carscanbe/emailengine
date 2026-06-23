@@ -1,6 +1,8 @@
 
 [workers]
 imap = 4
+# Number of API/HTTP workers. Values >1 require SO_REUSEPORT (Linux); on other platforms it falls back to 1.
+api = 1
 webhooks = 1
 "imapProxy" = 1
 
@@ -28,6 +30,11 @@ host = "127.0.0.1"
 secret = ""        # client password, if not set allows any password
 proxy = false      # Set to true if using HAProxy with send-proxy option
 #maxMessageSize = "25M" # maximum message size accepted by SMTP server (default: 25MB)
+
+[documentStore]
+# Deprecated Document Store (ElasticSearch) feature. Disabled by default; the worker and
+# all document-store API/UI endpoints are only available when this is enabled.
+enabled = false
 
 [dbs]
 # redis connection

@@ -10,30 +10,11 @@ const { webhooks: Webhooks } = require('../lib/webhooks');
 
 const { GooglePubSub } = require('../lib/oauth/pubsub/google');
 
-const { readEnvValue, threadStats, getDuration, httpAgent, getServiceSecret, reloadHttpProxyAgent } = require('../lib/tools');
+const { readEnvValue, threadStats, getDuration, httpAgent, getServiceSecret, maybeReloadHttpProxyAgent } = require('../lib/tools');
+const { sendWebhookRequest } = require('../lib/webhook-request');
 
-const Bugsnag = require('@bugsnag/js');
-if (readEnvValue('BUGSNAG_API_KEY')) {
-    Bugsnag.start({
-        apiKey: readEnvValue('BUGSNAG_API_KEY'),
-        appVersion: packageData.version,
-        logger: {
-            debug(...args) {
-                logger.debug({ msg: args.shift(), worker: 'webhooks', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            info(...args) {
-                logger.debug({ msg: args.shift(), worker: 'webhooks', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            warn(...args) {
-                logger.warn({ msg: args.shift(), worker: 'webhooks', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            error(...args) {
-                logger.error({ msg: args.shift(), worker: 'webhooks', source: 'bugsnag', args: args.length ? args : undefined });
-            }
-        }
-    });
-    logger.notifyError = Bugsnag.notify.bind(Bugsnag);
-}
+const { initSentry } = require('../lib/sentry');
+initSentry('webhooks');
 
 const { redis, queueConf } = require('../lib/db');
 const { Worker } = require('bullmq');
@@ -199,10 +180,7 @@ parentPort.on('message', message => {
     }
 
     if (message && message.cmd === 'settings') {
-        let d = message.data || {};
-        if ('httpProxyEnabled' in d || 'httpProxyUrl' in d) {
-            reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
-        }
+        maybeReloadHttpProxyAgent(message.data);
     }
 });
 
@@ -424,9 +402,9 @@ const notifyWorker = new Worker(
         headers['X-EE-Wh-Signature'] = hmac.digest('base64url');
 
         try {
-            let res;
+            let status;
             try {
-                res = await fetchCmd(parsed.toString(), {
+                status = await sendWebhookRequest(fetchCmd, parsed.toString(), {
                     method: 'post',
                     body,
                     headers,
@@ -436,18 +414,6 @@ const notifyWorker = new Worker(
             } catch (err) {
                 duration = Date.now() - start;
                 throw err.cause || err;
-            }
-
-            if (!res.ok) {
-                // Drain response body to release connection back to pool
-                try {
-                    await res.text();
-                } catch {
-                    // ignore drain errors
-                }
-                let err = new Error(res.statusText || `Invalid response: ${res.status} ${res.statusText}`);
-                err.statusCode = res.status;
-                throw err;
             }
 
             logger.trace({
@@ -460,7 +426,7 @@ const notifyWorker = new Worker(
                 requestBodySize: body.length,
                 accountWebhooks: !!accountWebhooks,
                 event: job.name,
-                status: res.status,
+                status,
                 account: job.data.account,
                 route: customRoute && customRoute.id
             });

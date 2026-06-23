@@ -76,6 +76,12 @@ function createMockRedis() {
             };
         },
         ttl: async () => 3600,
+        hincrby: async (key, field, increment) => {
+            if (!mockRedisData[key]) mockRedisData[key] = {};
+            mockRedisData[key][field] = String((Number(mockRedisData[key][field]) || 0) + increment);
+            return Number(mockRedisData[key][field]);
+        },
+        zpopmin: async () => [],
         eval: async () => 1,
         smembers: async () => [],
         srem: async () => {},
@@ -118,11 +124,6 @@ require.cache[dbPath] = {
 
 // Now safe to import production modules
 const { Export, generateExportId, calculateScore } = require('../lib/export');
-
-// Replicate the getNextBatch minScore calculation logic
-function calculateMinScore(lastScore) {
-    return lastScore > 0 ? '(' + lastScore : lastScore;
-}
 
 test('Export functionality tests', async t => {
     t.after(() => {
@@ -538,22 +539,6 @@ test('Export functionality tests', async t => {
         const decoded = msgpack.decode(Buffer.from(encoded, 'base64url'));
 
         assert.strictEqual(decoded.uid, 4294967295);
-    });
-
-    // getNextBatch minScore calculation tests
-    await t.test('calculateMinScore uses exclusive lower bound for lastScore > 0', async () => {
-        const minScore = calculateMinScore(1700000000000);
-        assert.ok(minScore.toString().startsWith('('), 'Should use exclusive lower bound');
-    });
-
-    await t.test('calculateMinScore uses inclusive lower bound for lastScore = 0', async () => {
-        const minScore = calculateMinScore(0);
-        assert.strictEqual(minScore, 0, 'Should use inclusive lower bound for 0');
-    });
-
-    await t.test('calculateMinScore handles small positive values', async () => {
-        const minScore = calculateMinScore(1);
-        assert.strictEqual(minScore, '(1', 'Should use exclusive for any positive value');
     });
 
     // Worker callQueue timeout cleanup test (Issue 1 regression)
@@ -1326,6 +1311,38 @@ test('Export functionality tests', async t => {
         assert.ok(Number(mockRedisData[exportKey].expiresAt) > Date.now(), 'expiresAt should be refreshed to a future value');
     });
 
+    await t.test('Export.startProcessing() resets progress counters and clears the queue', async () => {
+        const account = 'test-account';
+        const exportId = 'exp_test123';
+        const exportKey = `exp:${account}:${exportId}`;
+        const queueKey = `exq:${account}:${exportId}`;
+        // Simulate state left over from a previous (interrupted) run that is being reprocessed.
+        mockRedisData[exportKey] = {
+            exportId,
+            status: 'processing',
+            phase: 'exporting',
+            messagesQueued: '100',
+            messagesExported: '42',
+            messagesSkipped: '3',
+            bytesWritten: '12345',
+            foldersScanned: '2',
+            foldersTotal: '4',
+            truncated: '1'
+        };
+        mockRedisData[queueKey] = { leftover: '1' };
+
+        await Export.startProcessing(account, exportId);
+
+        assert.strictEqual(Number(mockRedisData[exportKey].messagesQueued), 0);
+        assert.strictEqual(Number(mockRedisData[exportKey].messagesExported), 0);
+        assert.strictEqual(Number(mockRedisData[exportKey].messagesSkipped), 0);
+        assert.strictEqual(Number(mockRedisData[exportKey].bytesWritten), 0);
+        assert.strictEqual(Number(mockRedisData[exportKey].foldersScanned), 0);
+        assert.strictEqual(Number(mockRedisData[exportKey].foldersTotal), 0);
+        assert.strictEqual(mockRedisData[exportKey].truncated, '0');
+        assert.strictEqual(mockRedisData[queueKey], undefined, 'Queue key should be cleared');
+    });
+
     // Export.deleteFully() tests
     await t.test('Export.deleteFully() removes export and queue keys', async () => {
         const account = 'test-account';
@@ -1341,6 +1358,29 @@ test('Export functionality tests', async t => {
         assert.strictEqual(mockRedisData[queueKey], undefined, 'Queue key should be deleted');
     });
 
+    // Export.getNextBatch() tests
+    await t.test('Export.getNextBatch() counts undecodable entries as skipped', async () => {
+        const account = 'test-account';
+        const exportId = 'exp_test123';
+        const exportKey = `exp:${account}:${exportId}`;
+        mockRedisData[exportKey] = { exportId, status: 'processing', messagesSkipped: '0' };
+
+        const validEntry = msgpack.encode({ folder: 'INBOX', messageId: '<a@b>', uid: 1, size: 10 }).toString('base64url');
+        const garbageEntry = 'not-valid-msgpack-data';
+
+        const originalZpopmin = mockRedis.zpopmin;
+        mockRedis.zpopmin = async () => [validEntry, '1', garbageEntry, '2'];
+        try {
+            const messages = await Export.getNextBatch(account, exportId, 10);
+
+            assert.strictEqual(messages.length, 1, 'Only the decodable entry should be returned');
+            assert.strictEqual(messages[0].messageId, '<a@b>');
+            assert.strictEqual(Number(mockRedisData[exportKey].messagesSkipped), 1, 'Undecodable entry should be counted as skipped');
+        } finally {
+            mockRedis.zpopmin = originalZpopmin;
+        }
+    });
+
     // Schema validation for truncated field
     await t.test('exportStatusSchema accepts truncated field', async () => {
         const schemasPath = require.resolve('../lib/schemas');
@@ -1354,5 +1394,80 @@ test('Export functionality tests', async t => {
         });
 
         assert.ok(!result.error, `Should accept truncated field, got error: ${result.error?.message}`);
+    });
+});
+
+// Regression tests for the error classifiers the export worker uses to decide between skipping a
+// single message, retrying, or failing the whole job. Account.assertMessageFound throws a Boom 404
+// whose code/status live only in err.output - isSkippableError used to read only the plain fields,
+// so an expunged message failed the entire export instead of being counted as skipped.
+test('Export error classifiers', async t => {
+    const Boom = require('@hapi/boom');
+    const { isTransientError, isSkippableError, isFolderMissingError, isRetryableError } = require('../lib/export');
+
+    await t.test('Boom 404 from Account.assertMessageFound is skippable', () => {
+        // exact construction from lib/account.js assertFound()
+        let error = Boom.boomify(new Error('Requested message was not found'), { statusCode: 404 });
+        error.output.payload.code = 'MessageNotFound';
+
+        assert.strictEqual(isSkippableError(error), true, 'Boom-wrapped MessageNotFound must be skippable');
+        assert.strictEqual(isTransientError(error), false, 'a missing message is not transient');
+    });
+
+    await t.test('Boom 404 from Account.assertFolderFound is a missing folder', () => {
+        let error = Boom.boomify(new Error('Requested folder was not found'), { statusCode: 404 });
+        error.output.payload.code = 'FolderNotFound';
+
+        assert.strictEqual(isFolderMissingError(error), true);
+    });
+
+    await t.test('plain RPC-reconstructed not-found errors keep working', () => {
+        // workers/export.js call() rebuilds RPC errors with plain code/statusCode fields
+        let err = new Error('Folder not found');
+        err.code = 'NotFound';
+        err.statusCode = 404;
+
+        assert.strictEqual(isFolderMissingError(err), true);
+        assert.strictEqual(isSkippableError(err), true);
+    });
+
+    await t.test('transient and permanent errors are not skippable', () => {
+        let timeout = new Error('connection timed out');
+        timeout.code = 'ETIMEDOUT';
+        assert.strictEqual(isTransientError(timeout), true);
+        assert.strictEqual(isSkippableError(timeout), false);
+
+        let upstream = new Error('upstream failed');
+        upstream.statusCode = 502;
+        assert.strictEqual(isTransientError(upstream), true);
+        assert.strictEqual(isSkippableError(upstream), false);
+
+        let other = new Error('something else');
+        assert.strictEqual(isTransientError(other), false);
+        assert.strictEqual(isSkippableError(other), false);
+        assert.strictEqual(isFolderMissingError(other), false);
+    });
+
+    // The API-account batch fetch path retries a superset of isTransientError: rate limits and
+    // Outlook's dropped-batch-response (EMISSING_RESPONSE) on top of the transient network/5xx set.
+    // A single such blip must not fail an entire multi-message export.
+    await t.test('rate limits, dropped batch responses, and transient errors are retryable', () => {
+        assert.strictEqual(isRetryableError({ statusCode: 429 }), true, '429 is retryable');
+        assert.strictEqual(isRetryableError({ code: 'rateLimitExceeded' }), true);
+        assert.strictEqual(isRetryableError({ code: 'userRateLimitExceeded' }), true);
+        assert.strictEqual(isRetryableError({ code: 'EMISSING_RESPONSE' }), true, 'dropped Outlook batch response is retryable');
+        assert.strictEqual(isRetryableError({ statusCode: 503 }), true, 'transient 5xx is retryable');
+        assert.strictEqual(isRetryableError({ code: 'ETIMEDOUT' }), true);
+    });
+
+    await t.test('skippable and permanent errors are not retryable', () => {
+        let notFound = new Error('Requested message was not found');
+        notFound.code = 'MessageNotFound';
+        notFound.statusCode = 404;
+        assert.strictEqual(isRetryableError(notFound), false, 'a missing message is not retryable');
+
+        assert.strictEqual(isRetryableError({ statusCode: 400 }), false, 'a 4xx (other than 429) is not retryable');
+        assert.strictEqual(isRetryableError({ code: 'InvalidGrant' }), false);
+        assert.strictEqual(isRetryableError(new Error('something else')), false);
     });
 });

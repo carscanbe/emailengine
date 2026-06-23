@@ -1,5 +1,105 @@
 # Changelog
 
+## [2.72.1](https://github.com/postalsys/emailengine/compare/v2.72.0...v2.72.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* log expected API client errors (4xx) at warn instead of error ([c51e347](https://github.com/postalsys/emailengine/commit/c51e3476e346f321af845905a89141bf07a83421))
+
+## [2.72.0](https://github.com/postalsys/emailengine/compare/v2.71.0...v2.72.0) (2026-06-18)
+
+
+### Features
+
+* adopt pre-existing Gmail Pub/Sub resources with ownership tracking ([fe43fad](https://github.com/postalsys/emailengine/commit/fe43fadad624025a56139382428256eb810f9e08))
+
+## [2.71.0](https://github.com/postalsys/emailengine/compare/v2.70.0...v2.71.0) (2026-06-15)
+
+
+### Features
+
+* add anonymized feature beacon to license validation ([954d92a](https://github.com/postalsys/emailengine/commit/954d92a9d8e7c5fff6f1b8c711dfd228f556387a))
+* disable deprecated Document Store by default behind a feature gate ([8790f75](https://github.com/postalsys/emailengine/commit/8790f7538ba2ee8d6ec73d1f3bbc221c2f54f0fe))
+
+
+### Bug Fixes
+
+* defer export worker job consumption until startup recovery completes ([a21b0a5](https://github.com/postalsys/emailengine/commit/a21b0a50fdb98d13a2227a020069129d23fe225b))
+* fail export when a folder cannot be indexed ([36c9c9d](https://github.com/postalsys/emailengine/commit/36c9c9d536540cd5a61b16b69af5e8e84c194ee6))
+* filter transient fetch failures from Sentry and retry DNS errors ([883b9b4](https://github.com/postalsys/emailengine/commit/883b9b487e3580c5b1240d28cd519d190c402b47))
+* retry transient errors in API-account batch export path ([6cba7c7](https://github.com/postalsys/emailengine/commit/6cba7c72658a037f68867cf2464f7d3420a79507))
+* translate OAuth scope error page across 6 languages ([4ae1919](https://github.com/postalsys/emailengine/commit/4ae19199fe628f8a4f7177d53db1f05167077e3e))
+* upgrade joi to 17.13.4 and @postalsys/certs to 1.0.15 (GHSA-q7cg-457f-vx79) ([6ec77e5](https://github.com/postalsys/emailengine/commit/6ec77e50b288b14550cd09b724f5aab59d17ced4))
+
+## [2.70.0](https://github.com/postalsys/emailengine/compare/v2.69.0...v2.70.0) (2026-06-11)
+
+
+### Features
+
+* allow enabling Sentry error reporting from the admin UI ([a4076a4](https://github.com/postalsys/emailengine/commit/a4076a4fa6658ccc998f9bfe35dddf015cd12b09))
+* replace Bugsnag with self-hosted Sentry for error tracking ([62de831](https://github.com/postalsys/emailengine/commit/62de831a2911da9b649fe693547ba09d70e2e481))
+* tag Sentry error reports with instance id and license key ([2e9683f](https://github.com/postalsys/emailengine/commit/2e9683f27d54ff8fa7ba3f6f4453866fd135f173))
+
+
+### Bug Fixes
+
+* align API response schemas with actual responses and fix uncovered API bugs ([abacbf6](https://github.com/postalsys/emailengine/commit/abacbf66f048a77d00d180a831a97594380d8ed9))
+* align remaining API response schemas with actual responses ([06136ab](https://github.com/postalsys/emailengine/commit/06136abd20a97c45b25aac7f93653387eb55928a))
+* assign unassigned accounts after license activation ([5677977](https://github.com/postalsys/emailengine/commit/56779778eba27f2d1604ff06f17e5736a5ddee61))
+* do not crash at startup when a feature flag env variable is set to a falsy value ([98ad979](https://github.com/postalsys/emailengine/commit/98ad97988e752fad9e2ae11eff63f35ffcf84976))
+* report correct nextAttempt time for queued messages ([d5ebdfb](https://github.com/postalsys/emailengine/commit/d5ebdfb029b3ed331a8239ace7426f4f0704ae2e))
+* resolve code review findings in Gmail bulk ops, exports, webhooks, and schemas ([f0ddb46](https://github.com/postalsys/emailengine/commit/f0ddb4631fb924ddb93e0a99d0e20bc9f0cc8ee2))
+
+## [2.69.0](https://github.com/postalsys/emailengine/compare/v2.68.1...v2.69.0) (2026-06-09)
+
+
+### Features
+
+* add label/category filtering to message search ([c171c4e](https://github.com/postalsys/emailengine/commit/c171c4e1efe582f7e532b69108110a1c48aa3ede))
+* detect unsafe Redis eviction config in dashboard warnings ([712d5d6](https://github.com/postalsys/emailengine/commit/712d5d69b99cc45c6f3e123a084ef054236e0110))
+* rebuild lost IMAP sync state without replaying messageNew ([9fe391e](https://github.com/postalsys/emailengine/commit/9fe391e9d6350485aded780709305d698a4c65fb))
+* surface token hash for identification in API, UI, and logs ([8e2a5a9](https://github.com/postalsys/emailengine/commit/8e2a5a9f2bb5194e92575c34c0006a8c4e21888d))
+
+
+### Bug Fixes
+
+* avoid 500 on GET /admin/totp without a partial-auth session ([b6f2394](https://github.com/postalsys/emailengine/commit/b6f2394182379d94a05f95c84f5ce04ae6f87a05))
+* bound inbound line length in the IMAP proxy parser ([9fb8a5e](https://github.com/postalsys/emailengine/commit/9fb8a5e301564dee46b48ca32a5b84e4832d96e8))
+* close leaks and a worker crash found in the connection hardening review ([e97950e](https://github.com/postalsys/emailengine/commit/e97950e7e907ac5b5549302b8865c5d2bfb0d6e2))
+* count undecodable export queue entries as skipped ([72e2498](https://github.com/postalsys/emailengine/commit/72e2498390f17ad24d5f7b1577540674d7e1fe09))
+* distinguish SO_REUSEPORT fallback cause in logs and admin UI ([99ad9f3](https://github.com/postalsys/emailengine/commit/99ad9f3359eab5bafc4726535584874d4823f7bd))
+* drain webhook response body on every delivery path ([2cc3e7a](https://github.com/postalsys/emailengine/commit/2cc3e7aef114b5b913dea5c363278e1a883d5a48))
+* extract gettext strings from the decomposed ui-routes modules ([227e60f](https://github.com/postalsys/emailengine/commit/227e60ff4f354c5d0f55534877c8ab6fbdd92c7d))
+* guard cross-thread download streams against early producer errors ([191ec62](https://github.com/postalsys/emailengine/commit/191ec6204887c3abe78da7a9944e3165b19c0b87))
+* guard IMAP notification handlers against malformed events ([0248953](https://github.com/postalsys/emailengine/commit/0248953a5dcccba5d46704bf7113a70fb5ac3150))
+* guard webhook notifications in BullMQ failure handlers ([e90048e](https://github.com/postalsys/emailengine/commit/e90048e7b7bd92916219602f92305342234df4a3))
+* harden IMAP proxy STARTTLS against command injection ([3661ddd](https://github.com/postalsys/emailengine/commit/3661dddbf216b29ec8f074d3f6422dd4db5d9e7b))
+* harden inter-thread IPC (worker-death call rejection, webhook guards, stream cleanup) ([0111a8e](https://github.com/postalsys/emailengine/commit/0111a8e2bf139c3412cc37e5e933fd5316cee8fc))
+* harden message export against data loss and corruption ([540d867](https://github.com/postalsys/emailengine/commit/540d8678ec25f62e8123fc78fa929f4e4713b5d4))
+* harden multiple-API-worker startup and centralize proxy-agent reload ([7f2db9e](https://github.com/postalsys/emailengine/commit/7f2db9e557d960aa1b7523b7d8678598683c2f29))
+* list Outlook folders with slashes in the name ([dd35e7b](https://github.com/postalsys/emailengine/commit/dd35e7b262a47f9395811d75c4bcc1d9ab4c6ec0))
+* only reseed lost IMAP sync state when no stored state exists ([78e0141](https://github.com/postalsys/emailengine/commit/78e0141e9f3478d2a2a1206c805258c6807a45d8))
+* prevent IMAP worker crash on download stream errors ([d9d5396](https://github.com/postalsys/emailengine/commit/d9d539632cc245a8e2a14585fc7918186bee00b6))
+* prevent post-BYE command dispatch in IMAP proxy teardown ([d51e92d](https://github.com/postalsys/emailengine/commit/d51e92d298e9373a6dc5c2eb0919885e161b45c7))
+* re-arm a generous idle timeout for proxied IMAP connections ([627c6d4](https://github.com/postalsys/emailengine/commit/627c6d472e50f6fc3e958e4774226557a526018d))
+* reject in-flight worker calls when a worker thread terminates ([08e7b01](https://github.com/postalsys/emailengine/commit/08e7b0128a4b8e9f9e5a96fefe49110bd032bd2c))
+* release cross-thread download streams on abort and error ([6514249](https://github.com/postalsys/emailengine/commit/65142499d095bbcb5f0bb49755a2e24f6e52fa62))
+* release MessagePort streams when message/attachment downloads fail ([787f4f5](https://github.com/postalsys/emailengine/commit/787f4f5ef6364ec1389c15269c8f7f8eaaa2142a))
+* return 422 for unsupported label search and surface Outlook categories ([d981359](https://github.com/postalsys/emailengine/commit/d981359b78b61d2c8a03e4e35086a4c9674ce53a))
+* return the append destination folder from uploadMessage ([96aed6b](https://github.com/postalsys/emailengine/commit/96aed6b1144e1d3ee9da79b3a1fb03606245f83c))
+* send correctly typed SMTP and IMAP proxy state change notifications ([3fbd27f](https://github.com/postalsys/emailengine/commit/3fbd27fc08bb74f9738a3fc95d4177fa4978c263))
+* tear down subconnections when deleting an IMAP account ([bd81a33](https://github.com/postalsys/emailengine/commit/bd81a33caf9400cbee2781a9180f1a901c1d6e48))
+
+## [2.68.1](https://github.com/postalsys/emailengine/compare/v2.68.0...v2.68.1) (2026-06-01)
+
+
+### Bug Fixes
+
+* harden mergeObjects and tighten CodeQL scanning ([d35025d](https://github.com/postalsys/emailengine/commit/d35025daabf8fe7b3f5200b0000f52c3a012f4eb))
+* prevent IMAP proxy worker crashes and connection leaks ([#596](https://github.com/postalsys/emailengine/issues/596)) ([4453330](https://github.com/postalsys/emailengine/commit/4453330ad38fb3e64692add1357d48227e1956e0))
+* stop referencing prepared password string in error log ([50cdb89](https://github.com/postalsys/emailengine/commit/50cdb8998e27f33f700f267cb39ddba39e7d32d0))
+
 ## [2.68.0](https://github.com/postalsys/emailengine/compare/v2.67.3...v2.68.0) (2026-05-26)
 
 

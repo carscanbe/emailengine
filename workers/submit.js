@@ -7,32 +7,12 @@ const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
 const { REDIS_PREFIX } = require('../lib/consts');
-const { getDuration, readEnvValue, threadStats, reloadHttpProxyAgent } = require('../lib/tools');
+const { getDuration, readEnvValue, threadStats, maybeReloadHttpProxyAgent } = require('../lib/tools');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 const settings = require('../lib/settings');
 
-const Bugsnag = require('@bugsnag/js');
-if (readEnvValue('BUGSNAG_API_KEY')) {
-    Bugsnag.start({
-        apiKey: readEnvValue('BUGSNAG_API_KEY'),
-        appVersion: packageData.version,
-        logger: {
-            debug(...args) {
-                logger.debug({ msg: args.shift(), worker: 'submit', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            info(...args) {
-                logger.debug({ msg: args.shift(), worker: 'submit', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            warn(...args) {
-                logger.warn({ msg: args.shift(), worker: 'submit', source: 'bugsnag', args: args.length ? args : undefined });
-            },
-            error(...args) {
-                logger.error({ msg: args.shift(), worker: 'submit', source: 'bugsnag', args: args.length ? args : undefined });
-            }
-        }
-    });
-    logger.notifyError = Bugsnag.notify.bind(Bugsnag);
-}
+const { initSentry } = require('../lib/sentry');
+initSentry('submit');
 
 const util = require('util');
 const { redis, queueConf, submitQueue } = require('../lib/db');
@@ -62,15 +42,7 @@ const SUBMIT_QC = (readEnvValue('EENGINE_SUBMIT_QC') && Number(readEnvValue('EEN
 
 const SUBMIT_DELAY = getDuration(readEnvValue('EENGINE_SUBMIT_DELAY') || config.submitDelay) || null;
 
-const NON_RETRYABLE_CODES = new Set([
-    'EAUTH', // authentication failed
-    'ENOAUTH', // no credentials provided
-    'EOAUTH2', // OAuth2 token failure
-    'ETLS', // TLS handshake failed
-    'EENVELOPE', // invalid sender/recipients
-    'EMESSAGE', // message content error
-    'EPROTOCOL' // SMTP protocol mismatch
-]);
+const { shouldDiscardJob } = require('../lib/delivery-error');
 
 let callQueue = new Map();
 let mids = 0;
@@ -222,13 +194,15 @@ const submitWorker = new Worker(
             }
 
             let backoffDelay = Number(job.opts.backoff && job.opts.backoff.delay) || 0;
-            let nextAttempt = job.attemptsMade < job.opts.attempts ? Math.round(job.processedOn + Math.pow(2, job.attemptsMade) * backoffDelay) : false;
+            // job.attemptsMade is not yet incremented for the ongoing attempt, so the
+            // next retry (if this attempt fails) is delayed by 2^attemptsMade * base
+            let nextAttempt = job.attemptsMade + 1 < job.opts.attempts ? Math.round(job.processedOn + Math.pow(2, job.attemptsMade) * backoffDelay) : false;
 
             queueEntry.job = {
                 id: job.id,
                 attemptsMade: job.attemptsMade,
                 attempts: job.opts.attempts,
-                nextAttempt: new Date(nextAttempt).toISOString()
+                nextAttempt: nextAttempt ? new Date(nextAttempt).toISOString() : false
             };
 
             let res = await accountObject.submitMessage(queueEntry);
@@ -306,9 +280,7 @@ const submitWorker = new Worker(
                 // ignore
             }
 
-            const isPermanentSmtp = err.statusCode >= 500 && err.statusCode !== 503;
-            const isPermanentCode = NON_RETRYABLE_CODES.has(err.code);
-            if ((isPermanentSmtp || isPermanentCode) && job.attemptsMade < job.opts.attempts) {
+            if (shouldDiscardJob(err, job)) {
                 try {
                     // do not retry after 5xx error (except 503 which is transient)
                     await job.discard();
@@ -409,12 +381,24 @@ submitWorker.on('failed', async job => {
                 logger.error({ msg: 'Failed to remove queue entry', account: job.data.account, queueId: job.data.queueId, messageId: job.data.messageId, err });
             }
             // report as failed
-            await notify(job.data.account, EMAIL_FAILED_NOTIFY, {
-                messageId: job.data.messageId,
-                queueId: job.data.queueId,
-                error: job.stacktrace && job.stacktrace[0] && job.stacktrace[0].split('\n').shift(),
-                networkRouting: job.progress?.networkRouting
-            });
+            try {
+                await notify(job.data.account, EMAIL_FAILED_NOTIFY, {
+                    messageId: job.data.messageId,
+                    queueId: job.data.queueId,
+                    error: job.stacktrace && job.stacktrace[0] && job.stacktrace[0].split('\n').shift(),
+                    networkRouting: job.progress?.networkRouting
+                });
+            } catch (notifyErr) {
+                // A failed webhook notification must not bubble out of this BullMQ
+                // event listener as an unhandled rejection and take down the worker.
+                logger.error({
+                    msg: 'Failed to deliver submission failure notification',
+                    account: job.data.account,
+                    queueId: job.data.queueId,
+                    messageId: job.data.messageId,
+                    err: notifyErr
+                });
+            }
         }
     }
 
@@ -497,10 +481,7 @@ parentPort.on('message', message => {
     }
 
     if (message && message.cmd === 'settings') {
-        let d = message.data || {};
-        if ('httpProxyEnabled' in d || 'httpProxyUrl' in d) {
-            reloadHttpProxyAgent().catch(err => logger.error({ msg: 'Failed to reload HTTP proxy agent', err }));
-        }
+        maybeReloadHttpProxyAgent(message.data);
     }
 });
 
