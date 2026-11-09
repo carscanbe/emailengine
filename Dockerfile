@@ -17,6 +17,7 @@ ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG TARGETARCH
 ARG TARGETVARIANT
+ARG EE_COMMIT_HASH
 RUN printf "I'm building for TARGETPLATFORM=${TARGETPLATFORM}" \
     && printf ", BUILDPLATFORM=${BUILDPLATFORM}" \
     && printf ", TARGETARCH=${TARGETARCH}" \
@@ -98,7 +99,7 @@ FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea
 # `apk upgrade` patches the Alpine packages that the base image itself lags on - at the time of
 # writing node:24-alpine still carries an openssl below 3.5.8-r0. dumb-init reaps zombies as PID 1.
 # npm is removed outright: it is a build-time tool, and leaving it in only adds scan surface.
-RUN apk add --no-cache dumb-init \
+RUN apk add --no-cache dumb-init bash curl \
     && apk upgrade --no-cache \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
@@ -111,6 +112,8 @@ WORKDIR /emailengine
 # code it runs or plant a module the next start would load. Nothing at runtime writes under
 # /emailengine: exports go to EENGINE_EXPORT_PATH, which defaults to the system temporary directory.
 COPY --from=builder /emailengine /emailengine
+COPY --from=builder /entrypoint.sh /entrypoint.sh
+COPY --from=builder /run_monitor.sh /run_monitor.sh
 
 RUN node -e "console.log('node arch: ' + os.arch())"
 RUN node -e "console.log(process.versions)"
