@@ -6,7 +6,7 @@
 # Deliberately a denylist rather than "ignore everything, then un-ignore what is copied": a new COPY
 # in the Dockerfile should just work, not fail on a file this list forgot to let through.
 
-.git
+#.git # fly needs .git folder to build
 .github
 node_modules
 
