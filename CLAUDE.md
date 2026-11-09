@@ -4,407 +4,142 @@
 
 EmailEngine is an email sync platform that provides REST API access to email accounts. It supports IMAP/SMTP, Gmail API, and Microsoft Graph (Outlook) with real-time webhooks for email events.
 
-## Project Structure
-
-- `server.js` - Main process orchestrator (see Main Process section)
-- `/bin` - CLI executable entry point
-- `/lib` - Core library modules (account, OAuth, email clients, API routes)
-- `/lib/email-client` - Email client implementations (IMAP, Gmail API, Outlook Graph)
-- `/lib/api-routes` - REST API route handlers
-- `/lib/ui-routes` - Web UI route handlers
-- `/lib/lua` - Redis Lua scripts for atomic operations
-- `/lib/oauth` - OAuth provider implementations
-- `/lib/imapproxy` - IMAP proxy server implementation
-- `/workers` - Worker thread modules (8 worker types, see Workers section)
-- `/test` - Unit and integration tests
-- `/config` - TOML configuration files
-- `/views` - Handlebars templates for web UI
-- `/static` - Frontend assets (CSS, JS)
-- `/translations` - i18n translation files (7 languages)
-
-### Key Files
-
-- `lib/account.js` - Account class, manages IMAP/SMTP interactions
-- `lib/account/account-state.js` - Account state machine
-- `lib/email-client/base-client.js` - Base email client class
-- `lib/email-client/gmail-client.js` - Gmail API integration
-- `lib/email-client/outlook-client.js` - Microsoft Graph integration
-- `lib/oauth2-apps.js` - OAuth2 application configurations
-- `lib/export.js` - Export class for bulk email export operations
-- `lib/api-routes/export-routes.js` - Export REST API endpoints
-- `workers/api.js` - REST API worker with Hapi server
-- `lib/routes-ui.js` - Admin UI route orchestrator (wires the `lib/ui-routes/*` modules)
-
-## Technology Stack
-
-- **Runtime**: Node.js >=20.x with Worker Threads
-- **API Framework**: Hapi.js
-- **Database**: Redis (ioredis) + BullMQ for job queues
-- **Email**: ImapFlow (IMAP), Nodemailer (SMTP)
-- **OAuth2**: Gmail API, Microsoft Graph, Mail.ru
-
-## Development Commands
-
-```
-npm start         # Production mode
-npm run dev       # Development mode (verbose logging, Redis DB 9)
-npm test          # Run full test suite (lint + unit + integration tests)
-npm run test:unit # Fast unit tier only (parallel, no live server)
-npm run test:integration  # Live-server integration tier only
-npm run format    # Format code with Prettier
-npm run format:check  # Check formatting without changes
-npm run lint      # Lint with ESLint
-npm run swagger   # Generate OpenAPI docs
-npm run single    # Single-worker debug mode with Inspector
-```
-
-## Testing
-
-- Uses Node.js native test runner with native assert module
-- Tests run via Grunt: `npm test` executes `grunt` which runs Node.js test runner
-- Uses Redis database 13 for test isolation (`config/test.toml`)
-- Two test tiers:
-  - **Unit tier** (`/test/*-test.js`): self-contained tests that need Redis but not the live server; run in parallel with default `node --test` concurrency. Run with `npm run test:unit`
-  - **Integration tier** (`/test/integration/*-test.js`): tests that run against a live EmailEngine server booted by Grunt (api-test, sendonly-test, api-routes-smoke-test, ui-routes-smoke-test); run serially. Server readiness is detected by polling `/health` (`test/helpers/wait-for-server.js`). Run with `npm run test:integration`
-- Test files must be named `*-test.js` - the runner globs only match that pattern, so helper modules (e.g. `test/integration/test-config.js`, `test/helpers/*`) are never executed as tests
-- New tests go in `/test` unless they make HTTP requests to the live server, in which case they go in `/test/integration`
-- The integration tier is non-hermetic: api-test.js talks to live Gmail/MS Graph and needs credentials from `.env`; failures there are often external-state flakes, re-run before blaming a change
-- Run `npm test` for the full suite with linting (unit tier, then integration tier)
-- CI (`.github/workflows/test.yml`) runs lint, unit, and integration as separate parallel jobs, so a failed section (usually the flaky integration tier) can be re-run alone via "Re-run failed jobs"
-- **E2E tier** (`/test/e2e/*.spec.js`): a separate, browser-driven happy-path suite using Playwright (`@playwright/test`), NOT part of `npm test`. It boots a fresh instance (isolated Redis db 14, `config/e2e.toml`, `NODE_ENV=e2e`), drives the admin UI to enable auth + activate a 14-day trial + create an API token, then exercises the REST API end to end against an Ethereal mailbox. Run with `npm run test:e2e` (one-time `npm run test:e2e:install` to fetch Chromium). It runs in its own workflow (`.github/workflows/e2e.yml`, `workflow_dispatch` + push to master) so it is easy to re-run, and is non-hermetic: it needs outbound internet (Ethereal + the postalsys.com trial endpoint). The trial rate limit is bypassed for the e2e `serviceUrl` (`https://e2e.emailengine.app/`) via the postalsys-web trial allowlist
-
-## Main Process (server.js)
-
-The main process orchestrates all worker threads and manages system lifecycle:
-
-**Responsibilities:**
-- Spawns and monitors worker threads (health checks every 5s via heartbeats)
-- Assigns email accounts to IMAP workers using load-balanced round-robin
-- Routes inter-thread RPC calls with configurable timeout (`EENGINE_TIMEOUT`, default: 10s)
-- Manages Redis connection and monitors latency
-- Handles license validation (checks every 20 minutes, 28-day grace period)
-- Collects Prometheus metrics from all workers
-
-**Startup sequence:**
-1. Load license from file/environment/Redis
-2. Initialize settings (secrets, passwords, service ID)
-3. Start API worker (wait for ready)
-4. Start all IMAP workers (wait for ready)
-5. Assign accounts to IMAP workers
-6. Start webhooks, submit, documents workers
-7. Start optional SMTP/IMAP proxy servers if enabled
-
-**Account assignment:**
-- Initial: Round-robin with load awareness (accounts per worker = ceil(total/workers))
-- Reassignment after crashes: Rendezvous hashing for consistent routing
-- Failsafe: 10-second timeout ensures orphaned accounts get reassigned
-
-**Key functions:**
-- `spawnWorker(type)` - Create worker thread
-- `assignAccounts()` - Distribute accounts to IMAP workers
-- `call(worker, message)` - RPC with timeout
-- `checkWorkerHealth()` - Monitor heartbeats, auto-restart unresponsive workers
-
-## Workers
-
-EmailEngine uses Node.js Worker Threads for isolated execution. Workers communicate via message passing with the main thread (`server.js`).
-
-| Worker | File | Count | Purpose |
-|--------|------|-------|---------|
-| API | `api.js` | 1* | HTTP server for REST API and admin UI (see API Worker section below) |
-| IMAP | `imap.js` | 4* | Email sync engine (see IMAP Worker section below) |
-| Webhooks | `webhooks.js` | 1* | Webhook delivery processor (see Webhooks section below) |
-| Submit | `submit.js` | 1* | Email delivery processor (see Submit Worker section below) |
-| Export | `export.js` | 1* | Account data export processor (see Export Worker section below) |
-| Documents | `documents.js` | 0-1 | **Deprecated and disabled by default.** Indexes emails in Elasticsearch (legacy feature). Only spawned when the Document Store gate is enabled (see Document Store gate below). |
-| SMTP | `smtp.js` | 1 | Optional SMTP server (see SMTP Server section below) |
-| IMAP Proxy | `imap-proxy.js` | 1 | Optional IMAP proxy server (see IMAP Proxy section below) |
-
-*Configurable via environment variables (`EENGINE_WORKERS`, `EENGINE_WORKERS_API`, `EENGINE_WORKERS_WEBHOOKS`, `EENGINE_WORKERS_SUBMIT`, `EENGINE_EXPORT_QC`). Multiple API workers (`EENGINE_WORKERS_API` > 1) require `SO_REUSEPORT` (Linux); on macOS/Windows/Node <23.1 it falls back to a single API worker.
-
-**Document Store gate (deprecated feature):** The Document Store is disabled by default. It only runs when EmailEngine is started with the `--documentStore.enabled` CLI flag, the `[documentStore] enabled = true` config value, or `EENGINE_DOCUMENT_STORE_ENABLED=true`. The gate is exposed as `documentStoreFeatureEnabled` (sync) and `isDocumentStoreEnabled()` (sync flag AND the `documentStoreEnabled` setting) from `lib/document-store.js`. When the gate is off: the `documents` worker is not spawned, every document-store-only endpoint (`/v1/chat/{account}`, `/v1/unified/search`, `/admin/config/document-store/*`) is unregistered and returns 404, all runtime document-store code takes its existing "disabled" path, and the admin UI shows an error alert if the `documentStoreEnabled` setting is still on. Runtime reads of the `documentStoreEnabled` setting use `isDocumentStoreEnabled()` so the feature-off state reuses the already-tested setting-off paths.
-
-**Worker Lifecycle:**
-- Main thread spawns workers at startup and monitors health via heartbeats (every 10s)
-- IMAP workers receive account assignments from main thread
-- Workers auto-restart on crash; accounts are reassigned to available workers
-- BullMQ queues distribute jobs to webhooks, submit, and documents workers
-
-### API Worker
-
-The API worker (`workers/api.js`) runs a Hapi.js HTTP server serving both the REST API (`/v1/*`) and admin web UI (`/admin/*`).
-
-**Server features:**
-- REST API with OpenAPI/Swagger documentation (`/admin/swagger`)
-- Admin dashboard with Handlebars templates
-- Server-Sent Events (SSE) for real-time account updates (`/admin/changes`)
-- Static file serving, CSRF protection, i18n support (7 languages)
-
-**Authentication:**
-- **API tokens**: Bearer token via `Authorization` header or `?access_token=` query param
-- **Sessions**: Cookie-based (`ee` cookie) for admin UI
-- **OAuth2**: Optional OKTA integration (`OKTA_OAUTH2_*` env vars)
-- **TOTP**: Optional two-factor authentication for admin login
-
-**Token scopes:** `api`, `metrics`, `smtp`, `imap-proxy`, `*` (all)
-
-**API route categories:**
-- `/v1/account/{account}/*` - Account and message operations
-- `/v1/token*` - API token management
-- `/v1/settings` - Global configuration
-- `/v1/oauth2*` - OAuth2 app management
-- `/v1/webhooks*`, `/v1/templates*`, `/v1/gateways*` - Resources
-
-**Configuration:**
-- `EENGINE_PORT` / `PORT` - Listen port (default: 3000)
-- `EENGINE_HOST` - Bind address (default: 127.0.0.1)
-- `EENGINE_WORKERS_API` - Number of API/HTTP workers (default: 1). Values >1 share the port via `SO_REUSEPORT` (Linux only); on macOS/Windows/Node <23.1 EmailEngine falls back to a single worker with a warning
-- `EENGINE_MAX_BODY_SIZE` - Max POST body (default: 25MB)
-- `EENGINE_TIMEOUT` - Request timeout (default: 10s), override with `X-EE-Timeout` header
-- `EENGINE_API_PROXY` - Enable X-Forwarded-For parsing
-
-**Key files:**
-- `workers/api.js` - Hapi server setup and middleware
-- `lib/routes-ui.js` - Admin UI route orchestrator (wires the `lib/ui-routes/*` route modules)
-- `lib/api-routes/*.js` - REST API route modules
-- `lib/tokens.js` - Token validation and CRUD
-
-### IMAP Worker
-
-The IMAP worker (`workers/imap.js`) manages all email account connections and synchronization. Each worker handles multiple accounts via the `ConnectionHandler` class.
-
-**Connection types:**
-- **IMAP**: Native IMAP via ImapFlow library with IDLE for real-time sync
-- **Gmail API**: OAuth2-based, uses Pub/Sub for notifications (10-min polling fallback)
-- **Outlook API**: Microsoft Graph with subscription webhooks (3-day auto-renewal)
-
-**Synchronization:**
-- IMAP: Persistent IDLE connection for real-time change detection
-- Full mailbox sync on connect, then 15-minute periodic resync
-- UID tracking with UIDValidity validation (full resync if changed)
-- Exponential backoff reconnection (2s initial, 30s max)
-
-**Operations supported:**
-- Message: `listMessages`, `getMessage`, `getText`, `getRawMessage`, `getAttachment`
-- Message actions: `updateMessage`, `moveMessage`, `deleteMessage`, `uploadMessage`
-- Mailbox: `listMailboxes`, `createMailbox`, `modifyMailbox`, `deleteMailbox`
-- Account: `pause`, `resume`, `delete`, `getQuota` (IMAP only)
-
-**Error handling:**
-- Auth failures tracked; auto-disable after threshold (4-hour window)
-- Transient errors (timeout, DNS) trigger reconnection with backoff
-- Permanent errors (5xx) fail immediately
-- Excessive reconnection detection (>20/min triggers warning)
-
-**Key files:**
-- `workers/imap.js` - Worker thread with ConnectionHandler class
-- `lib/email-client/imap-client.js` - IMAP implementation
-- `lib/email-client/gmail-client.js` - Gmail API implementation
-- `lib/email-client/outlook-client.js` - Outlook/Graph implementation
-- `lib/email-client/base-client.js` - Shared client logic
-
-**Limitations:**
-- Gmail/Outlook: `getQuota` not supported
-- Gmail: No IDLE equivalent (polling fallback)
-- Outlook: `uploadMessage` only works for drafts
-
-### Webhooks
-
-The webhooks system (`workers/webhooks.js`, `lib/webhooks.js`) delivers real-time HTTP POST notifications when email events occur. Uses BullMQ queue for reliable delivery with retries.
-
-**Supported events:**
-- Message events: `messageNew`, `messageDeleted`, `messageUpdated`, `messageSent`, `messageDeliveryError`, `messageFailed`, `messageBounce`, `messageComplaint`
-- Mailbox events: `mailboxNew`, `mailboxDeleted`, `mailboxReset`
-- Account events: `accountAdded`, `accountInitialized`, `accountDeleted`, `authenticationError`, `authenticationSuccess`, `connectError`
-- Tracking events: `trackOpen`, `trackClick`, `listUnsubscribe`, `listSubscribe`
-- Export events: `exportCompleted`, `exportFailed`
-
-**Configuration levels:**
-1. Global: `webhooksEnabled`, `webhooks` (URL), `webhookEvents` (whitelist)
-2. Per-account: `webhooks` URL overrides global
-3. Custom routes: Multiple URLs with JavaScript filter/transform functions
-
-**Delivery details:**
-- Retries: 10 attempts with exponential backoff (starting at 5s)
-- Authentication: Basic auth via URL credentials, custom headers, or HMAC-SHA256 signature
-- Signature header: `X-EE-Wh-Signature` (HMAC-SHA256 of body using service secret)
-- Concurrency: Configurable via `EENGINE_NOTIFY_QC` (default: 1)
-
-**Custom routes** (`lib/webhooks.js`):
-- `fn` - JavaScript filter function returning boolean (include/exclude event)
-- `map` - JavaScript transform function to modify payload before delivery
-- Functions run in sandboxed SubScript environment (30s timeout, 1MB max)
-
-**Key files:**
-- `workers/webhooks.js` - BullMQ worker processing webhook queue
-- `lib/webhooks.js` - WebhooksHandler class for CRUD and payload formatting
-- `lib/email-client/notification-handler.js` - Event emission to webhook queue
-
-### Submit Worker
-
-The submit worker (`workers/submit.js`) processes queued outbound emails via BullMQ and delivers them through SMTP or provider APIs (Gmail, Outlook). All email sending in EmailEngine is asynchronous.
-
-**How it works:**
-1. API/SMTP server queues message to Redis (content) + BullMQ (job metadata)
-2. Submit worker picks up job from queue
-3. Loads account and calls `submitMessage()` in base-client.js
-4. Sends via SMTP or OAuth2 API depending on account configuration
-5. Fires webhook events for success/failure
-
-**Retry logic:**
-- Default: 10 attempts (`deliveryAttempts` setting)
-- Backoff: Exponential starting at 5s (`5s, 10s, 20s, 40s...`)
-- Retries on transient errors (< 500 status code)
-- No retry on permanent 5xx errors (message rejected)
-
-**Webhook events:**
-- `messageSent` - Message accepted by SMTP server
-- `messageDeliveryError` - Retryable error occurred (includes `nextAttempt`)
-- `messageFailed` - All retries exhausted, delivery failed
-
-**Configuration:**
-- `EENGINE_SUBMIT_QC` - Concurrency per worker (default: 1)
-- `EENGINE_SUBMIT_DELAY` - Rate limiting (e.g., `1s` = 1 msg/sec)
-- `deliveryAttempts` setting - Default retry count (default: 10)
-
-**Post-delivery actions:**
-- Uploads to Sent folder (if IMAP account, not Gmail)
-- Sets `\Answered` flag on replied messages
-- Sets `$Forwarded` flag on forwarded messages
-- Updates gateway delivery stats (if using gateway)
-
-**Key files:**
-- `workers/submit.js` - BullMQ worker implementation
-- `lib/email-client/base-client.js` - `queueMessage()` and `submitMessage()` logic
-- `lib/outbox.js` - Queue inspection API
-
-### Export Worker
-
-The export worker (`workers/export.js`) processes bulk email export jobs via BullMQ. It extracts messages from accounts and writes them to compressed NDJSON files with optional encryption.
-
-**How it works:**
-1. API creates export job with date range and folder filters
-2. Worker indexes matching messages from specified folders
-3. Fetches message content in batches (parallel for API accounts, sequential for IMAP)
-4. Writes to gzip-compressed NDJSON file (optionally encrypted)
-5. Fires webhook events on completion or failure
-
-**Export phases:**
-- `pending` - Job queued, waiting for worker
-- `indexing` - Scanning folders for matching messages
-- `exporting` - Fetching and writing message content
-- `complete` - Export finished successfully
-
-**Error handling and recovery:**
-- **Transient errors** (network timeouts, 5xx responses): Retry with exponential backoff
-- **Skippable errors** (message not found, 404): Skip message, increment counter
-- **Account validation**: Checks every 60s if account still exists
-**Retry configuration:**
-- IMAP messages: 3 retries with 2s base delay (exponential backoff)
-- API batch requests: 5 retries for rate limits (429) with 5s base delay
-- Folder indexing: 3 retries with 1s base delay
-
-**Webhook events:**
-- `exportCompleted` - Export finished with stats (messages exported, skipped, bytes)
-- `exportFailed` - Export failed with error details and phase info
-
-**Configuration:**
-- `EENGINE_EXPORT_QC` - Concurrency per worker (default: 1)
-- `EENGINE_EXPORT_TIMEOUT` - Operation timeout (default: 5 minutes)
-- `EENGINE_EXPORT_PATH` - Export file directory (default: OS temp dir)
-- `EENGINE_EXPORT_MAX_AGE` / `exportMaxAge` setting - Export file retention in ms (default: 24 hours)
-- `exportMaxConcurrent` setting - Per-account concurrent limit (default: 3)
-- `exportMaxGlobalConcurrent` setting - Global concurrent limit (default: 10)
-- `exportMaxMessageSize` setting - Max attachment size (default: 25MB)
-
-**API endpoints:**
-- `POST /v1/account/{account}/export` - Create export job
-- `GET /v1/account/{account}/export/{exportId}` - Get export status
-- `GET /v1/account/{account}/export/{exportId}/download` - Download completed export
-- `DELETE /v1/account/{account}/export/{exportId}` - Cancel/delete export
-- `GET /v1/account/{account}/exports` - List exports with pagination
-
-**Key files:**
-- `workers/export.js` - BullMQ worker implementation
-- `lib/export.js` - Export class with CRUD and queue operations
-- `lib/api-routes/export-routes.js` - REST API endpoints
-
-### SMTP Server
-
-The SMTP server (`workers/smtp.js`) is a built-in Message Submission Agent (MSA) that allows legacy applications to send emails through EmailEngine using standard SMTP protocol. Messages are queued for asynchronous delivery via the Submit worker.
-
-**How it works:**
-1. Client connects and optionally authenticates via SMTP AUTH
-2. Client sends message with MAIL FROM, RCPT TO, and DATA commands
-3. Server queues message for delivery through the associated EmailEngine account
-4. Returns queue ID and scheduled send time
-
-**Authentication methods:**
-- With auth enabled (`smtpServerAuthEnabled`):
-  - Username: Account ID
-  - Password: Global password (`smtpServerPassword`) or 64-char hex token with `smtp` scope
-- Without auth: Specify account via `X-EE-Account` header in message
-
-**Configuration** (settings or environment variables):
-- `smtpServerEnabled` / `EENGINE_SMTP_ENABLED` - Enable the server
-- `smtpServerPort` / `EENGINE_SMTP_PORT` - Listen port (default: 2525)
-- `smtpServerHost` / `EENGINE_SMTP_HOST` - Bind address (default: 127.0.0.1)
-- `smtpServerAuthEnabled` - Require SMTP authentication
-- `smtpServerPassword` / `EENGINE_SMTP_SECRET` - Global password (encrypted)
-- `smtpServerTLSEnabled` - Enable TLS encryption
-- `smtpServerProxy` / `EENGINE_SMTP_PROXY` - Enable PROXY protocol (HAProxy)
-
-**Special headers** (removed before sending):
-- `X-EE-Account` - Specify sending account (when auth disabled)
-- `X-EE-Idempotency-Key` - Prevent duplicate submissions
-
-**Limitations:**
-- Max message size: 25MB (configurable via `EENGINE_MAX_SMTP_MESSAGE_SIZE`)
-- Asynchronous delivery only (messages queued, not sent immediately)
-- Account must have valid SMTP or OAuth2 credentials configured
-
-### IMAP Proxy
-
-The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEngine-managed accounts. It abstracts OAuth2 complexity, enabling legacy clients to connect to Gmail, Microsoft 365, and other OAuth2-only providers.
-
-**How it works:**
-1. Client connects and authenticates with account ID + password/token
-2. Proxy validates credentials and establishes connection to real mail server
-3. After auth, all IMAP commands pass through transparently to backend
-
-**Authentication methods:**
-- Global password: Configure `imapProxyServerPassword` setting
-- Access tokens: 64-character hex token with `imap-proxy` or `*` scope
-
-**Configuration** (settings or environment variables):
-- `imapProxyServerEnabled` / `EENGINE_IMAP_PROXY_ENABLED` - Enable the proxy
-- `imapProxyServerPort` / `EENGINE_IMAP_PROXY_PORT` - Listen port (default: 2993)
-- `imapProxyServerHost` / `EENGINE_IMAP_PROXY_HOST` - Bind address
-- `imapProxyServerTLSEnabled` - Enable TLS encryption
-- `imapProxyServerProxy` - Enable PROXY protocol (HAProxy)
-
-**Key files:**
-- `lib/imapproxy/imap-server.js` - Main proxy server and authentication logic
-- `lib/imapproxy/imap-core/` - IMAP protocol implementation (RFC 3501)
-
-**Limitations:**
-- Does not work with API-only accounts (e.g., Mail.ru API mode)
-- Requires IMAP support on the email provider
+## Dependency Updates
+
+Always use `npm run update` to bump dependencies - never edit versions in package.json by hand and never run a bare `npx ncu`. The script does a full refresh (`ncu -u` + fresh lockfile + `copy-static-files.sh` + regenerated license listing and gettext catalog); a manual package.json edit skips the artifact regeneration and leaves `static/licenses.html` and the translation catalog stale. Version constraints for packages that must not be upgraded to latest live in `.ncurc.js` with per-package rationale.
+
+## MCP endpoint
+
+EmailEngine serves the Model Context Protocol at `POST /mcp` (stateless Streamable HTTP, protocol revisions 2025-06-18/2025-11-25 via `initialize` and 2026-07-28 via per-request `_meta`; GET/DELETE answer 405, sessions are never minted). The protocol code lives in `lib/mcp/` (`protocol.js` is the transport-free state machine, `tools.js` the registry/executor, `resources.js` accounts-as-resources, `listen.js` the `subscriptions/listen` SSE bridge fed from the same change fanout as `/v1/changes`, `oauth.js` the minimal authorization server). Tools are declared per route via a `plugins.mcp` block; everything else (input schema from the joi validators through `lib/mcp/json-schema.js`, annotations from `routeGrant()`) is derived, and every `tools/call` dispatches through `server.inject()` with the caller's own credential, so REST enforcement (scopes, permissions, account binding, restrictions, audit log) applies unchanged. The tool manifest is locked by `test/fixtures/mcp-tools-golden.json` (`UPDATE_MCP_GOLDEN=true npm run test:unit` to re-record). `tools/list` is per-credential advertisement: an account-bound token sees only tools taking an `account` argument, a token holding one MCP scope sees only the tools that scope's surface table covers (`surfaceBoundAdmits()`), and a permission-narrowed token sees only tools whose grant its record allows (the grant and its surfaces are stored on each registry entry) - enforcement stays on the injected inner request either way. The instructions a client surfaces are written for the credential asking (`serverInstructions({ account, manage, mail })`, flags read off the advertised catalog).
+
+Gates: `EENGINE_MCP_ENABLED` / `--mcp.enabled` / `[mcp] enabled` (default true) controls route registration; the `mcpEnabled` setting (default false, admin UI Configuration > MCP) turns the endpoint on; `mcpOAuthEnabled` + a configured `serviceUrl` additionally enable OAuth discovery (`/.well-known/oauth-*`), dynamic client registration, the admin consent page `/admin/mcp/authorize`, and the token endpoint.
+
+MCP ships as a quiet beta. The admin UI labels it Beta everywhere it surfaces (side menu entry, config page header and intro alert, the `mcp` scope row on the token form), the endpoint is off by default, and it stays out of `/swagger.json`. Deliberately NOT advertised: no README coverage yet, and commits touching MCP use the `fix:` prefix - never `feat:` - so release notes list the work under Bug Fixes instead of headlining a minor release. The docs site is no longer part of that: learn.emailengine.app has carried an MCP section since 2026-08-21, rewritten for 2.82.0. Keep that stance until the feature graduates; graduation is when the `feat:`-style announcement, public docs and badge removal happen together.
+
+The consent page deliberately lives on the admin surface (`/admin/mcp/authorize`, rendered as a consent dialog in the chrome-free `prompt` admin layout - Tailwind/FlyonUI like the login layout it mirrors - untranslated like the rest of the admin UI), NOT on the framework-free public surface with the hosted auth form: approving mints an instance credential and requires an authenticated admin session, which itself only exists inside the `EENGINE_ADMIN_ACCESS_ADDRESSES` perimeter, so a whitelist-exempt consent page could never approve anything anyway - it would only widen what an unlisted address can probe. Do not move it or restyle it as a public page.
+
+Two behaviors of the consent page are deliberate and easy to "fix" back into problems. **Nothing reachable before the human clicks redirects off the origin**: client registration is open and unauthenticated, so a validated `redirect_uri` is not enough to make an automatic error redirect safe (anyone can register their own address and aim a link at it), and every pre-consent failure therefore renders instead - only approval and Deny redirect. **Deny is checked before the admin-session gate**, because refusing to issue a credential does not require the authority to issue one, and on a passwordless instance the page offers no other button. The consent prompt, the MCP config page's generator and the token form all mint from `MCP_SECTIONS` (`lib/token-permission-view.js`): two sections, instance management (`mcp-manage` scope; levels observe / operate / administer, plus none) offered first and defaulting to observe, and email access (`mcp` scope; levels none / read / mail / full) defaulting to none unless the person picks a level or the client's `scope` request named `mcp` (a hint for the starting position, never a grant). Each level is a pair list derived from the scope's `SURFACE_GRANTS` table (Observe is the read pairs minus `read/provisioning`, which is only `POST /v1/verifyAccount` and connects to any host with supplied credentials), and `mcpGrantsFor(choice)` turns a choice into `{ scopes, permissions: { grants } }`: the scopes of the sections not declined, management first, and the union of their pairs. A minted MCP token ALWAYS carries that explicit list - the old "full = no record" level is gone, because a consent given for today's tools must not grow to include a tool shipped next release. The consent POST defaults an absent `manage` to observe and an absent `mail` to none, so a stale form fails narrow; declining both sections re-renders with an error rather than minting a token that can do nothing. `test/mcp-consent-test.js` asserts each combination reaches the minted token; MCP-minted tokens are reviewable at `/admin/tokens?scope=mcp-manage&scope=mcp` (the tokens listing's scope filter takes a list, backed by `tokens.list()` `opts.scope`). Both MCP scopes are surface-bound: the api-token strategy honors them only on requests carrying `request.app.mcpInternal` (set by `lib/mcp/inject.js`, unreachable from the network) and only for grants listed in the scope's `SURFACE_GRANTS` table (`perRequestSurfaceAdmits()`) - `test/mcp-tools-test.js` asserts every exposed tool stays inside some MCP surface, and `test/surface-grants-test.js` pins the mail table so no issued mail token widens on upgrade. The management tools reach the routes that used to be in the never-grantable `admin` group and now live in five grantable groups (`settings`, `oauth2`, `license`, `token`, `provisioning`); what stays never grantable is minting a token and the live provider access token. Those five have to be NAMED by a record: a two-axis record that omits `groups` reaches `IMPLICIT_GROUPS` (`lib/api-routes/permission-map.js`, the thirteen sections that existed when the two-axis form shipped, pinned by `test/token-permissions-test.js`) and never the live grantable list, because the schema promised "omit to allow all of them" and an API-minted `{ actions: ['read', 'write'] }` token from 2.79 would otherwise have woken up on 2.80 able to retarget an account's host and move the webhook target. A section added later joins `GRANTABLE_GROUPS`, not `IMPLICIT_GROUPS`. Two payload rules sit below those grants: `assertNoPrivilegedSettings()` refuses `PRIVILEGED_SETTINGS_KEYS` (`lib/privileged-settings.js`, a leaf module whose labelled groups render `PRIVILEGED_SETTINGS_SUMMARY` into the settings tool descriptions, the `settings` group description and the token form: operator scripts, proxies, secrets, the built-in listeners including the SMTP server's authentication switch, the TLS provisioning mode and hostname list, the service URL, mail certificate checking, the URL the AI key is sent to, the MCP and audit switches) to a narrowed credential on both `GET` and `POST /v1/settings`, and the MCP settings tools never offer those keys; `assertNoNetworkOverride()` refuses `proxy` on the provisioning routes as it does on the submit routes.
+
+## Queue browser
+
+`/admin/queues` (`lib/ui-routes/queue-routes.js`, model in `lib/queue-browser/`) is the in-house browser for the three BullMQ queues, which replaced the bundled bull-board page on 2026-10-14; `/admin/bull-board` and its deep links redirect there. `definitions.js` names the queues, the five states and which actions apply (the export queue is read-only: an export is managed from its account page, where cancelling it also removes its file); `format.js` turns a stored job into a webhook delivery, an outgoing message or an export and explains a failure in the worker's own terms (pure, tested in `test/queue-browser-format-test.js`); `index.js` holds everything that touches Redis. Listings read one page of a state straight from BullMQ, and a search is a scan of that state bounded by `SCAN_LIMIT` (500 jobs, newest first) that the page reports the extent of - a queue has no index by account or anything else in the payload, and an unbounded scan would read every webhook payload with it. Counts refresh by polling `/admin/queues/counts` from `static/js/queues.js`, not over the change feed: a busy instance fans out thousands of queue events a minute and none of them is worth pushing to a page that shows totals.
+
+Two things make the submit queue different from a generic BullMQ queue, and they are why bull-board was wrong for it: a message's content lives outside its job in the account's `iaq:` hash, so removing a job alone orphans the message in Redis, and retrying a job whose content is gone completes without sending anything while reporting success. Every submit action therefore goes through `lib/outbox.js`, which owns both halves: `del()` removes the content with the job (refusing one a worker holds), `retry()` refuses a message that is not failed or whose content is gone (409 with `code` NotFailed / ContentGone) and otherwise resets the attempt count, `promote()` sends a delayed message now. The REST API exposes the same two as `POST /v1/outbox/{queueId}/retry` and `/promote` (MCP tools `retry_queued_message` and `send_queued_message_now`, in the `mcp-manage` surface next to the cancel, never in the pinned mail table). For a retry to have something to send, the submit worker's `failed` handler keeps the content of a finally failed message (`retainFailedContent()`) instead of deleting it, within the bounds above (`selectFailedContentToDrop()` in `lib/queue-retention.js`, pure); `pruneFailedContent()` runs from the periodic queue cleanup in `server.js` and after a clean of the failed set, and drops the content of any job that is gone. Both workers record a failed attempt on the job's progress field (`{status: 'error', error: {message, code, statusCode, responseCode}}`, the shape the submit worker always wrote, now with the SMTP reply code so `describeFailure()` can ask `isPermanentDeliveryError()` instead of reading a status as a verdict), because BullMQ itself keeps only the failure message; a delivered webhook is recorded as the processor's return value, which BullMQ stores in the same write that completes the job. The retained contents are a hash (`iaqf`, field `[account, queueId]`, value `{t, s}`) so a release is one HDEL; the count bound is capped at `FAILED_JOB_RETENTION_COUNT` and the age is the failed-job age, so BullMQ's own `removeOnFail` never removes a job before its content goes.
+
+## OpenAPI document
+
+`/swagger.json` is generated in-house by `lib/openapi/` from the route joi schemas - there is no documentation-generator dependency (hapi-swagger was archived upstream and is gone). `joi-schema.js` converts joi `describe()` output into Schema Objects, `build-document.js` walks `server.table()`, `index.js` registers the route. Document-level options (tag list and order, security scheme) live in `lib/swagger-options.js`; per-route documentation metadata lives in each route's `plugins.openapi` block (`responses`, `produces`, `x-ee-behavior`, `x-codeSamples`).
+
+`info.description` (in `workers/api.js`) is rendered both by external consumers and by the admin reference landing page, which shows it instead of prose of its own. Keep it to paragraphs, backtick code spans and absolute links: `lib/api-reference/format.js` escapes first and only adds back a closed tag set, so headings, lists or raw HTML render as visible literal text.
+
+`x-codeSamples` is the standard extension for hand-written per-operation snippets (`[{ lang, source, label? }]`, also read by Redoc and Scalar). The reference page puts them ahead of the generated curl/Node/Python tabs. Reach for one when the synthesized example misrepresents an endpoint - the request body of `POST /v1/account/{account}/message/{message}/submit`, for instance, is entirely optional overrides, which the generated snippet shows as if they were the payload.
+
+The document is a published surface: the README points at it, emailengine.dev mirrors it, and it feeds Postman and code generators. `.label()` on a joi schema is therefore a public type name, and the endpoint is intentionally unauthenticated. Any change that alters the document has to be acknowledged by re-recording `test/fixtures/openapi-golden.json` (see `.claude/rules/testing.md`).
+
+## Email autodiscovery
+
+`lib/autodetect-imap-settings.js` resolves IMAP/SMTP settings for an address. The MX-based resolver is tried first and, failing that, five resolvers race under a five second budget each (SRV, `.well-known`, `autoconfig.<domain>`, the Mozilla ISPDB, and Exchange autodiscovery); the first to answer wins.
+
+The Exchange branch has three requirements that are not guesses, and getting any of them wrong looks like a working request that returns nothing:
+
+- **`Content-Type: text/xml`.** Exchange answers `application/xml` with 415 before it parses the body.
+- **`EMailAddress` before `AcceptableResponseSchema`** in the legacy ("POX") request. The schema declares a sequence, and the other order returns `<ErrorCode>600</ErrorCode>` ("Invalid Request").
+- **Every place the sequence names, not just `autodiscover.<domain>`.** The https POST to the SRV target (or to `autodiscover.<domain>`) is one of several documented locations, and a provider can publish only one of the others: the root domain `https://<domain>/autodiscover/autodiscover.xml`, and whatever the unauthenticated plain-http GET to `http://autodiscover.<domain>/autodiscover/autodiscover.xml` redirects to. IONOS/1&1 publishes only the last of those - `autodiscover.<domain>` is a CNAME to a redirector listening on port 80 only - so for every domain on that provider the one request EmailEngine made could not connect. The candidates are raced rather than walked in order, because this branch shares the five second budget. A POX answer carrying `<Action>redirectUrl</Action>` is followed too, bounded by `MAX_AUTODISCOVER_REDIRECTS`, and **anonymously**: the origin comes out of the body of a server that answered 200 without asking for anything, so letting it collect the password would make the host the address domain points at the one that decides where the password goes. `<RedirectAddr>` names a different address and is not followed at all.
+
+- **Both endpoints, not just the legacy one.** `autodiscover.xml` (POX) and `autodiscover.svc` (SOAP `GetUserSettings`) are populated from different Exchange configuration. Hosted Exchange commonly answers POX with nothing but the `WEB` protocol while the IMAP and SMTP endpoints, the ones its webmail shows on its own "POP and IMAP settings" page, come back only from SOAP as `ExternalImap4Connections` / `ExternalSmtpConnections`. Verified against OVH (both Email Pro and Hosted Exchange run Exchange 2019 behind `pro*`/`ex*.mail.ovh.net`).
+
+All three were wrong from the module's first commit in 2021 until 2026-09-08, so this path had never resolved a real Exchange server.
+
+**Credentials.** Hosted Exchange refuses both endpoints anonymously with a 401 offering Basic. `autodetectImapSettings(email, gt, credentials)` therefore takes an optional `{ user, pass }`, and `runAutodiscovery()` asks anonymously first, only offering the password once the server has asked for it, then puts the authenticated POX and SOAP requests in flight together (either can be the one carrying IMAP settings, and the budget is shared with four other resolvers). POX wins a tie because it is the only one of the two that names the login to use. Two callers pass credentials, because they are the ones holding a password: the hosted setup form, and `POST /v1/autoconfig` for an integrator running its own setup UI. `GET /v1/autoconfig` takes the address in a query string, where a password must never go, so it stays anonymous and an Exchange domain still resolves to nothing there. The POST is grouped with `POST /v1/verifyAccount` under `provisioning` rather than with the GET under `diagnostics`, since it relays a supplied credential.
+
+The password reaches a host named by DNS records under the address domain's own control, which is the same trust the discovered IMAP host already gets. What must not happen is that host handing the password on, so three rules hold it in place. The retry is sent only after a 401 whose `WWW-Authenticate` actually offers Basic, and never to a host that answered some other way: a 404 from a wildcard-DNS parking host, a CDN answering an unknown path with 200, and a server offering only NTLM all answered without asking for a password, and an anonymous 200 carrying no settings ends the lookup rather than escalating. It goes to the origin that issued the challenge, read off `res.url`, rather than replaying the redirect chain, which would strip the header on a cross-origin hop and arrive unauthenticated. And that origin has to be https, because a redirect is allowed to lead to http and Basic there is a cleartext password. `fetchWithVettedRedirects` drops `Authorization`/`Cookie` when a redirect leaves the origin, the way fetch() does.
+
+**Skipping the server settings step.** A setup link minted with `skipServerSettings` (`POST /v1/authentication/form`, carried inside the signed blob) lets the hosted form go from the address and password straight to the calling application. It is the default there, so a caller that wants the step shown regardless has to send `skipServerSettings: false`; the flag is only ever written into the blob when it is on (`filterEmptyObjectValues()` drops a false one), which is what leaves links minted before the default flipped, and the admin UI's own `POST /admin/accounts/new` links, on the settings form as before. `POST /accounts/new/imap` renders `views/accounts/register/validating.hbs` instead of the settings form when `hasCompleteServerSettings()` holds - the same answer that arms the settings page's auto-verify, asked of the `connectionFields` schema rather than of a hand-kept list, so "complete" means "the create endpoint would accept this"; that page checks the connection through the existing `/accounts/new/imap/test` and submits the same field set the settings form would have. It is best effort in both directions: nothing discovered means the settings form as before, and a failed check hands the visitor that form through `POST /accounts/new/imap/settings`. The form's action is the settings form until the check passes, so a browser without JavaScript and an interrupted check both land there rather than creating an account from settings nobody verified.
+
+**An empty answer is not an answer.** `resolver()` resolves on the first branch to come back, so a resolver that parsed a response describing no server at all used to beat a slower one that had the real settings. A result naming neither an IMAP nor an SMTP host now counts as a loss for every branch, which is also what makes the hosted form say autodiscovery failed instead of rendering a form with empty server fields.
+
+Do not reach for a provider-specific rule here. Keying off the `_autodiscover._tcp` SRV target (for OVH it is the mail server itself, `:993` implicit TLS and `:587` STARTTLS) works, but SOAP autodiscovery covers the same accounts through a documented protocol and covers every other Exchange with it.
+
+## One-time passcodes (OTP-Token)
+
+`otp: { code, origin }` on `POST /v1/account/{account}/submit` (and per mail merge entry) becomes the `OTP-Token` header of draft-goto-otp-token, written by nodemailer's `MailComposer` (from 10.3.1; before that only its mailer applied the option, so EmailEngine's direct `MailComposer` use dropped it). An invalid value is an `EOTP` error that `getRawEmail()` turns into a 400, and `useStructuredFormat` refuses an otp outright because a structured Graph send carries no header but `X-*` ones. Reading goes the other way through `lib/otp.js`: mailparser's `parseOtpToken()` applies the draft's rules (exactly one header, an https origin) and the message details of all three backends carry `otp: { code, origin, authenticated }`. The header itself is unauthenticated, so `authenticated` is true only when the topmost `Authentication-Results` written by a server `authenticationTrust()` trusts (Google, Microsoft; the same rule as the AI summary) records a passing DKIM signature from the origin's organizational domain - every other mailbox reports false, never a guess. The messageNew payload carries `otp` only while the `notifyHeaders` setting lists `OTP-Token` (or `*`), because the draft keeps the passcode out of sight of people and a webhook copies it to every receiver; the fetch path asks for the authentication headers only then. The draft expires on 25 March 2027: check for a newer revision before then.
+
+## Security headers
+
+`lib/security-headers.js` stamps every response from an `onPreResponse` extension registered after the error-page one in `workers/api.js`, so error pages, redirects and JSON errors carry the headers too. The request path (plus route tags) picks a profile - `static`, `api`, `admin`, `public` - and with it the framing headers, COOP/CORP, `Cache-Control: no-store` and the Content-Security-Policy preset. A view rendered with the public layout takes the public CSP preset even on an admin path (error pages, the branding preview), because that layout carries operator-injected markup; `frame-ancestors` follows the path regardless. The admin policy is nonce-based for scripts and stylesheets: `attachSecurityContext()` mints `request.app.cspNonce` at the top of the `onRequest` extension, the view context exposes it as `cspNonce`, every inline `<script>` in `views/` carries `nonce="{{cspNonce}}"` (`test/views-csp-guardrail-test.js` enforces it, `.claude/rules/admin-ui.md` has the authoring rules), and `style-src-elem` carries the same nonce, so no first-party code appends a `<style>` element: ACE runs with `useStrictCSP` and links its sheets through `views/partials/ace_assets.hbs`, the message browser widget receives `styleNonce`. Style attributes stay allowed (`style-src-attr 'unsafe-inline'`) because sanitised email HTML arrives with every rule inlined into them. A route adjusts single directives through `options.plugins.securityHeaders.directives` (the message browser allows remote images; the MCP consent page drops `form-action` because its redirect target is the client's own URI; the account page takes `OAUTH_REDIRECT_FORM_DIRECTIVES` because its Re-authenticate form posts to `/accounts/new`, which answers with a redirect to the provider). Chrome checks a form submission's redirect target against the SUBMITTING page's `form-action`, so any page carrying a form whose POST ends off-origin has to say so - `test/ui-routes-table-test.js` reads the views and fails when one does not. Machine-facing routes outside `/v1` (`/metrics`, `/swagger.json`, `/mcp`) carry the `external` tag, which is what selects the API profile, JSON errors and the CSRF exemption for them. Public pages stay frameable and get a relaxed policy on purpose. HSTS is sent when `serviceUrl` is https, the same signal that marks the cookies Secure; `Cache-Control` is only filled in where a handler set none. `/static` responses carry no CSP because `static/js/evaluation-worker.js` runs operator code through `new Function` by design. A nonce policy is only as good as the markup surviving to the browser, so every `<script>` a view renders also carries `data-cfasync="false"` to keep an HTML-rewriting CDN from re-creating it without the nonce; `EENGINE_CSP_MODE` is the operator's escape hatch for a proxy offering no such opt-out.
+
+## Device-bound admin sessions (DBSC)
+
+`lib/dbsc/` binds an admin session to a key the browser keeps in the device's security hardware ([Device Bound Session Credentials](https://w3c.github.io/webappsec-dbsc/)), behind the `dbscEnabled` setting (default off, privileged, Beta on the Security page, quiet like MCP: `fix:` commits, no README). `protocol.js` is the wire format, `jwt.js` verifies proofs with Node's own crypto, `store.js` keeps bindings and single-use challenges in Redis, `index.js` holds the offer (`onPreResponse` on rendered admin pages), the two routes' logic (`POST /admin/dbsc/start`, `/admin/dbsc/refresh`, registered by `lib/ui-routes/dbsc-routes.js`) and the enforcement (`onPostAuth`). A bound session's requests, the message browser's `sess_` API calls included, need the short-lived iron-sealed `eeb` cookie that only the key can renew; an unbound session (any browser without support) works as before.
+
+What is deliberate and easy to "fix" back into a hole:
+
+- **Nothing deletes a binding**, not a refusal and not a logout. The session cookie says nothing about being bound, so a removed binding would let a copy of the same cookie pass as an unbound session, and let its holder bind a key of their own. Logout (`endDeviceBinding()`) marks it `ended` instead (`SET XX KEEPTTL`), which refuses the session cookie everywhere once the last bound cookie runs out, and only the TTL removes it. Found by the security review before the feature shipped.
+- **A session is bound once** (`SET NX`): a second registration answers 409, or whoever holds the cookie could replace the key.
+- **Refresh answers by what the browser does with the status.** It ignores a 3xx, so the route reads the session in `try` mode and tells an ended, unknown or switched-off session `{"continue": false}`; every 4xx other than 403 ends the session in the browser, which is how repeated bad proofs are stopped (`MAX_REFRESH_FAILURES`, then 401). It is in `TOTP_EXEMPT_PATHS` for the same reason.
+- **Challenges are single use.** Chrome signs proactive refreshes over the challenge it cached; that is answered with a fresh one in a 403 and Chrome retries, one extra round trip.
+- **Chrome only binds on a trusted https origin**: not on http, not on localhost, not with a certificate error, and not in Playwright's unsigned Chrome for Testing on macOS (no platform key store). Verified against Chrome 156 on 2026-11-05; `test/e2e/pages-dbsc.spec.js` runs only with a signed Chrome and a public https URL (`EE_E2E_DBSC_CHROME`, `EE_E2E_DBSC_URL`, e.g. a cloudflared tunnel to port 7099) and skips otherwise. `test/dbsc-test.js` covers the protocol on a real hapi server, and `test/dbsc-jwt-test.js` carries two proofs Chrome actually sent.
+- The sign-out message after a refusal is a flash, and flashes are keyed by the `crumb` cookie, so a bare copied session cookie is told nothing while the session's own browser is told why.
+
+## Releases
+
+Releases are drafted, not published, by `release-please` (`release-please-config.json`, manifest mode - the `draft` option has no action input, which is why the config file exists). The binaries are built, signed and notarized outside CI by `upload.sh`, which uploads them to the draft and then publishes it. Nobody can reach a version whose binaries do not exist yet.
+
+Three settings in that config are load-bearing, and none of them are cosmetic:
+
+- `include-component-in-tag: false` - it defaults to TRUE, which would tag releases `emailengine-app-v2.77.0` instead of `v2.77.0` and break `upload.sh`, every download URL and the whole tag history.
+- `force-tag-creation: true` - GitHub withholds the tag for a draft release, and `upload.sh` builds from the tag (falling back to HEAD behind an interactive prompt without it).
+- `draft: true` - what makes the whole flow work.
+
+npm publishes when release-please creates the release, not when the draft is later published - `release_created` reports the release object regardless of its visibility. Deferring it to a `release` event was considered and rejected: draft releases raise no event, and one raised inside Actions by `GITHUB_TOKEN` never triggers a workflow, so such a job would fire only because `upload.sh` publishes with a real user's credentials. Too many conditions, and the failure mode is a silent non-publication. Publishing early is safe because the npm package is the Node source and does not carry the binaries.
+
+The npm job must stay in `.github/workflows/release.yaml`: npm trusted publishing (OIDC, which is why no npm token secret exists) is bound to the repository AND the workflow filename.
+
+## TLS certificates
+
+Every TLS listener (the SMTP server, the IMAP proxy, and the API when `EENGINE_API_TLS` is on) asks `lib/tls/context.js` what to serve, and it answers in one fixed order:
+
+1. **Environment or config file**, per listener (`EENGINE_SMTP_TLS_*`, `EENGINE_IMAPPROXY_TLS_*`, `EENGINE_API_TLS_*`, `[api.tls]`). An explicit instruction outranks anything EmailEngine decided on its own. It used to be the other way round - the material was loaded and then overwritten by the ACME record.
+2. **An uploaded certificate** (admin UI, stored by `lib/tls/store.js` in the `tls` Redis hash), for every hostname it covers.
+3. **The Let's Encrypt certificate** for that hostname, from the `@postalsys/certs` store.
+4. **A self-signed certificate** covering every configured hostname.
+
+The `tlsProvisioning` setting picks which of those stored sources are admitted, so it decides what is served and not only whether an order is placed: `acme` (default) allows all of them, `manual` stops consulting the Let's Encrypt store, `self-signed` stops consulting the uploaded certificate too. Material from the environment is admitted by every mode - it is not a source EmailEngine chose. A mode that only gated ordering would leave an instance switched to "self-signed only" still serving the Let's Encrypt certificate it had, which is the same class of bug as the fallback that never existed.
+
+The self-signed fallback is not decoration: before it existed, a listener with TLS switched on and no certificate refused to start (`ETLSNOCERT`) and crash-looped, while the admin UI promised a self-signed certificate would be used. It is generated by `lib/tls/self-signed.js` (Node `crypto` plus a small DER writer in `lib/tls/der.js` - see the pure-JavaScript rule below), is unique to the instance, and its key is encrypted at rest. Say it is unverifiable wherever it surfaces; never imply otherwise.
+
+Which names are served comes from `serviceUrl` plus the `tlsHostnames` setting. **Each hostname gets its own certificate**, served by SNI, so the built-in MSA on `smtp.example.com` can hold a certificate for that name while the admin UI is on another. `acmeEligibleHostnames()` drops the names a CA cannot validate (address literals, single labels, `.local`/`.lan`/`.internal`/`.home.arpa`).
+
+**Every certificate has an id and each listener has a default.** `lib/tls/listeners.js` (dependency-free, so `lib/tools.js` and `lib/schemas.js` can share it) names the three listeners, their setting keys (`apiTLSCertificate` / `smtpServerTLSCertificate` / `imapProxyServerTLSCertificate`) and the id grammar; `lib/tls/catalog.js` lists everything the instance holds under those ids (`env:api`/`env:smtp`/`env:imapProxy` for the material a listener's environment prefix or `[api.tls]` supplies, read from the shared environment in every worker; `manual`; `acme:<hostname>`; `self-signed`, listed generated or not) in precedence order, and `listenerView()` is the one decision both the listener (`context.js`) and the page (`status.js`) consume: per name the first entry the `tlsProvisioning` mode admits that covers it (`admittedFor()`, with environment material admitted only for its own listener), the default from `resolveDefaultCertificate()` (an explicit id if it exists, whatever the mode admits; otherwise the listener's own environment material, then the entry for the primary hostname, then any, then self-signed), and the self-signed entry appended for any configured name nothing covers - there is no longer an environment exception there. `entryForName()` is the SNI rule: the default for names it covers, a per-name entry otherwise, the default for a name nothing covers. `context.js` only turns the view into secure contexts; it no longer reads certificate material off the listener's options. A chosen certificate that no longer exists is tolerated everywhere the same way (`selection: 'missing'`: the listener logs and presents its automatic choice, the page says so under the dropdown and pre-selects Automatic); nothing rewrites the setting on delete, because the API path could not be covered and one outcome per event beats a tidier setting on one path. `catalog.js` snapshots `[api.tls]` at load because `workers/api.js` merges the resolved material back into that config object. The three settings are in `TLS_MATERIAL_SETTINGS`, so a write reloads the listeners.
+
+**Nothing orders a certificate in the foreground.** `lib/tls/provision.js` owns every reason one might be ordered, including renewal, and it is the only caller of `acquireCert`. The admin UI's button asks the reconciler to run and then watches the recorded state over the change feed (`tlsCertificateState`, dispatched to page scripts as the `ee:change` CustomEvent). Ticking "Enable TLS" used to hold an HTTP request open for a whole ACME order, before the setting was saved, and untick itself on failure. Do not reintroduce provisioning on a render or on a checkbox: `test/tls-status-test.js` asserts that building the page model never reaches the CA.
+
+**A first order needs a listener that would serve it.** The reconciler places an automatic first order for a name only while some listener has TLS switched on (`listenersServeTls()`: the API listener via `EENGINE_API_TLS`, the SMTP server, the IMAP proxy); renewals of an existing certificate and the page's Request button are not gated. Without that gate every upgraded instance behind a TLS-terminating reverse proxy - a public https Service URL, port 80 routed elsewhere - started failing http-01 orders on the timer and retried them forever, for a certificate nothing would serve. The row for such a name reads "Not requested".
+
+A renewal does **not** restart the SMTP or IMAP proxy worker. `reloadTlsCertificates()` sends `apiReloadCertificates`/`smtpReloadCertificates`/`imapProxyReloadCertificates`, and each worker swaps its secure context in place through `updateSecureContext()`. Restarting cut every submission and IMAP session in flight for a certificate with a month left on it. A change to what a listener *is* (port, address, enabled) still restarts it, but only the one that changed: `applyServerSettings()` in `lib/ui-routes/network-config-routes.js` sends that listener's own `smtpReload`/`imapProxyReload`.
+
+The TLS page (`views/config/tls.hbs`, model in `lib/tls/status.js`) is status first: three listener tiles, then one row per hostname, then the source setting, then the stored uploaded and self-signed material, with the upload form on its own subpage. Hostnames are rows that post immediately (`POST /admin/config/tls/hostnames` and `/hostnames/delete`, writing the `tlsHostnames` setting); the Service URL's own name is a row that cannot be removed. Badge severity follows consequence, not the presence of a file: "Missing" is not a state (a listener with TLS on always has the self-signed fallback), a name nothing serves yet is neutral ("Not requested" for a public name, "Self-signed" otherwise), self-signed is a warning only while a listener with TLS on is presenting it (`served`, read off the listener reports), and the header badge is the worst of the listener tiles plus, once something is served, the rows. Keep those rules in `certificateLabel()`, which the SMTP and IMAP proxy pages share, never in the templates.
+
+`GET /.well-known/acme-challenge/{token}` lives in `lib/ui-routes/tls-config-routes.js` and answers two kinds of token: a real ACME key authorization, and a short-lived preflight probe armed by the *Check reachability* button, which makes the request the CA will make and reports what actually failed (no DNS record, port 80 answered by something else). Both the preflight and the provisioning request refuse a hostname that is not configured for the instance - they act on the name they are given, and an admin session is not a reason to accept an arbitrary one.
+
+## Detailed guidance (loaded on demand)
+
+Path-scoped rules in `.claude/rules/` load automatically when you work with the matching files. Read the relevant one before changing that area:
+
+- `.claude/rules/workers.md` - per-worker behavior and failure contracts (`workers/**`, `lib/email-client/**`, webhook/export/delivery modules)
+- `.claude/rules/testing.md` - test tiers, route-table guardrails, test-authoring rules (`test/**`, route modules)
+- `.claude/rules/admin-ui.md` - admin UI theme, component partials, build steps, framework-free public pages (`views/**`, `static/**`)
 
 ## Authentication Design
 
 - **Passkey (WebAuthn) login is a standalone authentication method.** It intentionally bypasses TOTP. When a user authenticates via passkey, no additional factor is required. This is by design - passkeys are treated as a single sufficient factor.
 
-## Architecture Notes
-
-- **Multi-threaded**: 8 worker types (API, IMAP, webhooks, submit, export, documents, SMTP server, IMAP proxy)
-- **Redis-backed**: Primary data store with Lua scripts for atomic operations
-- **Encrypted**: All credentials encrypted at rest (AES-256-GCM)
-- **State machine**: Account states (init, connecting, syncing, connected, authenticationError, connectError, unset)
-
 ## Environment Variables
 
+`ENVIRONMENT.md` is the complete operator-facing list, and `test/env-docs-guardrail-test.js` fails when the code reads an `EENGINE_*` variable it does not list (or it lists one nothing reads). The entries below are the ones whose behavior needs more than a table row. Seven limits that used to be environment-only are settings too (`disableThreadCollapse`, `queueKeepFailed`, `queueKeepFailedAge`, `queueKeepFailedContent`, `queueKeepFailedContentSize`, `tokenLogEntries`, `tokenLogAge`): `lib/env-setting-overrides.js` resolves each one with the environment variable winning over the setting and the setting over the default, reads them through a ten-second per-process cache, and the settings pages flag a field whose variable is set (`envOverriddenSettings`) and do not save a value for it, so the pinned environment value is never copied into a setting that would outlive the variable. The token log limits are privileged settings like `tokenAuditLog`: a narrowed credential must not be able to shrink the audit trail its own requests land in.
+
 **Core:**
+
 - `EENGINE_REDIS` / `REDIS_URL` - Redis connection URI (default: `redis://127.0.0.1:6379/8`)
 - `EENGINE_PORT` / `PORT` - API server port (default: 3000)
 - `EENGINE_HOST` - API server bind address (default: 127.0.0.1)
@@ -413,31 +148,86 @@ The IMAP proxy (`lib/imapproxy/`) allows standard IMAP clients to access EmailEn
 - `EENGINE_BEACON_DISABLED` - Set to `true` to opt out of the feature beacon (anonymized feature-usage diagnostics piggybacked on the existing license-validation call). License validation itself is unaffected. See `lib/license-beacon.js`.
 
 **Workers:**
+
 - `EENGINE_WORKERS` - IMAP worker count (default: 4)
 - `EENGINE_WORKERS_API` - API/HTTP worker count (default: 1; values >1 need `SO_REUSEPORT`/Linux, otherwise falls back to 1)
 - `EENGINE_WORKERS_WEBHOOKS` - Webhook worker count (default: 1)
 - `EENGINE_WORKERS_SUBMIT` - Submit worker count (default: 1)
+- `EENGINE_WORKERS_EXPORT` - Export worker count (default: 1; also `--workers.export` / `[workers] export`)
 - `EENGINE_EXPORT_QC` - Export concurrency per worker (default: 1)
 - `EENGINE_EXPORT_TIMEOUT` - Export operation timeout (default: 5 minutes)
 - `EENGINE_NOTIFY_QC` - Webhook concurrency per worker (default: 1)
-- `EENGINE_DOCUMENT_STORE_ENABLED` - Enable the deprecated Document Store feature (default: false; also settable via `--documentStore.enabled` / `[documentStore] enabled`)
+- `EENGINE_IMAP_STALE_CHECK_INTERVAL` - Quiet period (e.g. `1h`) after which a resync pass checks the main mailbox over the command connection and reconnects an IMAP account whose primary connection has stopped seeing new messages (default: unset, disabled). See `checkStaleMainView()` in `lib/email-client/imap-client.js`
+- `EENGINE_OUTLOOK_FALLBACK_POLL_INTERVAL` - How often each connected MS Graph account runs a missed-notification recovery pass, catching new messages whose change notification Graph dropped without sending a `missed` lifecycle event (duration, default `10m`, `0` disables, never below 10 s). A pass that missed nothing is one Graph listing request. See `setupFallbackPollTimer()` in `lib/email-client/outlook-client.js`
+- `EENGINE_SMTP_MAX_CLIENTS` - Maximum concurrent SMTP server connections (default: 100; also `[smtp] maxClients`). Each connection buffers its message in memory up to `EENGINE_MAX_SMTP_MESSAGE_SIZE`, so this bounds the SMTP worker's memory; excess connections are refused with a 421
+- `EENGINE_IMAPPROXY_MAX_CLIENTS` - Maximum concurrent IMAP proxy connections, counted from accept (default: 1000; also `[imap] maxClients`). Excess connections get `* BYE Too many connections` and are closed. Before login a command may carry at most 32 literals and the state rule runs before any literal is accepted, so an unauthenticated client cannot buffer APPEND data; with the PROXY protocol on, the header must arrive within `proxyHeaderTimeout` (10 s)
+- `EENGINE_MCP_ENABLED` - Register the MCP endpoint routes (default: true; also settable via `--mcp.enabled` / `[mcp] enabled`). Registration alone serves nothing: the `mcpEnabled` setting (default false) is the runtime switch
+- `EENGINE_CSP_MODE` - How the Content-Security-Policy is delivered: `enforce` (default), `report-only` (framing stays enforced, the rest of the policy goes to `Content-Security-Policy-Report-Only` so violations only show in the browser console) or `off` (the framing directive only). Also `[api] cspMode`. The other security headers are not affected by it
+
+**Network trust and egress:**
+
+- `EENGINE_HTTP_PROXY_ENABLED` / `EENGINE_HTTP_PROXY_URL` - Override the `httpProxyEnabled` / `httpProxyUrl` settings (the dedicated proxy for outbound HTTP/HTTPS). Every outbound HTTP/HTTPS request goes through the shared dispatchers in `lib/tools.js` (`httpAgent.fetch`, `.retry`, `.webhook`, and `.live` for long-lived clients such as ACME), whose proxy is picked by `resolveHttpProxy()`: the dedicated HTTP proxy when it is enabled and has a URL, otherwise the global `proxyEnabled` / `proxyUrl` proxy that IMAP and SMTP connections use, so one setting covers Gmail API, Microsoft Graph, OAuth2, webhooks, license validation, update checks, ACME, OpenAI and Sentry. `EENGINE_HTTP_PROXY_ENABLED=false` is the one way to keep IMAP/SMTP on a proxy while HTTP goes direct. The main thread resolves the proxy before spawning and passes it to every worker as `workerData.httpProxyUrl`, so `lib/tools.js` builds the dispatchers at module load and refreshes them itself from the `settings` broadcast (`maybeReloadHttpProxyAgent()`, a no-op when the resolved proxy is unchanged); a new worker type or outbound call needs no proxy wiring, only one of the shared dispatchers rather than a bare `fetch()`. The exception is traffic made for one account: an OAuth2 client built with `oauth2Apps.getClient(id, { route })` sends every token and API request through `httpAgent.forRoute(route)`. The route comes from `getAccountHttpRoute()` in `lib/utils/network.js` and mirrors the account's IMAP connection: its own `proxy`, otherwise the `localAddresses` / `imapStrategy` pick, which applies only while no instance-wide HTTP proxy is in use. That is why the admin UI labels `imapStrategy` "Mailbox access" and `smtpStrategy` "Sending over SMTP"; the keys keep their historical names. A client built without one (Pub/Sub setup, app verification) stays on the shared dispatchers.
+- `EENGINE_ADMIN_ACCESS_ADDRESSES` - Comma-separated IPs/CIDRs allowed to reach `/admin` (default: unset, no restriction)
+- `EENGINE_API_PROXY_ADDRESSES` - Comma-separated IPs/CIDRs of proxies allowed to set `X-Forwarded-For`. Unset means the header is honored from any peer whenever the API proxy setting is on, which is the historical default. Set this whenever you rely on `EENGINE_ADMIN_ACCESS_ADDRESSES` or per-token `restrictions.addresses`, otherwise a client that can reach the port directly picks its own source address. See `lib/utils/network.js` `resolveClientIp()`
+- `EENGINE_WEBHOOK_EGRESS_POLICY` - Where webhook deliveries and the IMAP/SMTP autodiscovery lookups (`GET` and `POST /v1/autoconfig`, the hosted setup form) may be sent: `link-local` (default, blocks the cloud instance metadata range), `private` (also blocks RFC1918, loopback, CGNAT, ULA), or `off`. Any policy other than `off` also stops webhook redirects being followed, since a permitted host could otherwise redirect to a blocked one; autodiscovery follows redirects one vetted hop at a time through `lib/egress-fetch.js`. Enforced twice: `assertAllowedUrl()` refuses a bad destination up front, and `createEgressLookup()` re-applies the policy as the connect-time `lookup` of `httpAgent.webhook`, so the addresses vetted are the addresses connected to. Behind a proxy only the up-front check applies. The policy covers the discovery requests themselves, not the IMAP and SMTP servers they discover: the mail servers EmailEngine then connects to are chosen by the address domain's own DNS records and are not filtered (see the note in `lib/tools.js`). The policy is owned by `lib/webhook-egress.js`; the classification lives in `lib/egress-filter.js`
+- `EENGINE_GCP_METADATA_HOST` - Where a Cloud Pub/Sub app using the attached service account (`authMethod: 'metadataServer'`) reaches the Google Cloud metadata server: `host`, `host:port` or `http://host[:port]` (default `metadata.google.internal`; Google's own `GCE_METADATA_HOST` is read when this is unset). Only the host moves - the paths, the `Metadata-Flavor: Google` header and the http scheme are fixed - and it is deliberately an environment value, never an app field or setting: the request bypasses the HTTP proxy and the egress policy, and the verify report echoes what came back, so a host a narrowed API token could choose would be a probe of the instance's own network. A malformed value is an error, not a fallback to the default. The method is Pub/Sub-only because the metadata server's token is the service account's own and cannot do domain-wide delegation, and `assertNoAttachedIdentity()` refuses it on `POST /v1/oauth2` for a narrowed credential (the app would act as the deployment's own cloud identity in whatever project the payload names, with nothing of the caller's). See `lib/oauth/gcp-metadata.js`
+
+**TLS certificates:**
+
+- `EENGINE_API_TLS` - serve the API and admin UI over HTTPS (also `[api] tls`). `EENGINE_API_TLS_CERT` / `_KEY` / `_CA` / `_PASSPHRASE` / `_CIPHERS` / `_MIN_VERSION` / `_MAX_VERSION` supply the material, and `[api.tls] certPath` / `keyPath` read it from files. Anything left unset falls back to what EmailEngine manages itself (uploaded, Let's Encrypt, self-signed), so an instance that already holds a certificate for its own service domain does not need a second pipeline to serve it here
+- `EENGINE_SMTP_TLS_*` and `EENGINE_IMAPPROXY_TLS_*` - the same variable names for the SMTP server and the IMAP proxy. Neither reads a `*_PATH` variable: point `EENGINE_SMTP_TLS_CERT_FILE` at the file instead (the `_FILE` convention `readEnvValue()` applies to every environment value), or paste the PEM into the variable itself. Material supplied this way outranks every certificate EmailEngine manages
+
+**TLS certificate provisioning (ACME):**
+
+- `EENGINE_ACME_DIRECTORY_URL` / `EENGINE_ACME_ENVIRONMENT` - The CA directory Let's Encrypt certificates are ordered from (default: `https://acme-v02.api.letsencrypt.org/directory`) and the name of the stored ACME account record (default: `emailengine`). Override both or neither: the environment names the account record and the directory names the CA that issued it, so moving one alone presents an account key the other CA has never seen and every request is rejected. `lib/cert-handler.js` logs a warning when only one of them is set, since nothing in the CA's rejection says why. Point them at `https://acme-staging-v02.api.letsencrypt.org/directory` plus a distinct environment name to rehearse issuance - staging has the same asynchronous order finalization as production and no rate limits worth worrying about, but its certificates are signed by an untrusted root, so it must never be what a build ships. `lib/cert-handler.js` is the single place that constructs `@postalsys/certs`; all three workers that touch certificates (API, SMTP server, IMAP proxy) get their handler from it, and `test/acme-config-guardrail-test.js` keeps it that way
+
+**Queue retention** (the four failed-entry bounds are also settings, see above):
+
+- `EENGINE_QUEUE_REMOVE_AFTER` - Initial value for the `queueKeep` setting: completed entries to retain (default: 0)
+- `EENGINE_QUEUE_KEEP_FAILED` - Failed entries retained per queue, at least (default: 500); a `queueKeep` setting above it raises the count, so the queue page names whichever of the two applies. Failures are the only record that a delivery was given up on, so they are never dropped on arrival; raise or lower this against Redis memory, remembering a `messageNew` payload can carry up to `notifyTextSize` of message text
+- `EENGINE_QUEUE_KEEP_FAILED_AGE` - How long failed entries are retained, in seconds (default: 604800, 7 days)
+- `EENGINE_QUEUE_KEEP_FAILED_CONTENT` / `EENGINE_QUEUE_KEEP_FAILED_CONTENT_SIZE` - How many of the most recent failed messages keep their raw content so they can be retried (default: 100), and how much content that may add up to in total (default: 100MB, a byte size). Content is dropped oldest first past either bound, past the failed-job age, and whenever the failed job itself is gone; `0` keeps none, which is how it was before failed messages could be retried. See `lib/outbox.js`
+
+**Token audit log** (both limits are also settings, see above; only written when the `tokenAuditLog` setting is on, off by default):
+
+- `EENGINE_TOKEN_LOG_ENTRIES` - Requests retained per access token (default: 1000). Every write trims, so this bounds the feature's whole storage cost: a full log of typical entries is roughly 170KB of Redis per token, and it is the token count that scales it, not request volume. Values below 1 fall back to the default rather than being clamped
+- `EENGINE_TOKEN_LOG_AGE` - How long a token's log survives its last use, in seconds (default: 604800, 7 days). Refreshed on every write, so a token nobody uses takes its log with it
+
+**Message rendering:**
+
+- `EENGINE_DISABLE_THREAD_COLLAPSE` - Overrides the `disableThreadCollapse` setting. Set to `true` to stop web-safe HTML from folding quoted thread history into a collapsed `<details class="ee-collapsed-thread">` block (default: folding enabled). The marker carries class names only - its `<summary>` is empty on purpose, so a renderer that does not know about it shows nothing extra. See `lib/web-safe-html.js`
 
 **Prepared configuration** (applied on startup):
-- `EENGINE_SETTINGS` - JSON settings object
+
+- `EENGINE_SETTINGS` - JSON settings object, re-applied through `settings.set()` on every boot, so a value saved for one of its keys in the admin UI reverts at the next restart. The key list is recorded as the `preparedSettingsKeys` setting, which `lib/ui-routes/settings-page.js` turns into `envManagedKeys` in every settings-form view context so the page can flag those fields
 - `EENGINE_PREPARED_TOKEN` - Base64url msgpack-encoded API token
-- `EENGINE_PREPARED_PASSWORD` - Base64url PBKDF2 password hash
+- `EENGINE_PREPARED_PASSWORD` - Base64url PBKDF2 password hash. Written only when it differs from the stored hash: the write bumps `passwordVersion`, which ends every admin session and message-browser token
 - `EENGINE_PREPARED_LICENSE` - License key
+
+## Pure JavaScript only
+
+EmailEngine ships as a single-file binary for Linux x64, macOS (x64 and arm64) and Windows x64 - the `pkg.targets` list in `package.json`, which the release assets match - and it also runs from npm on whatever Node the operator already has. Two rules follow from that, and neither has an exception:
+
+- **No compiled dependencies.** Never add a package with a native addon, a `node-gyp` build step, prebuilt binaries or a WASM blob, and never write one. Everything must be pure JavaScript that `pkg` can bundle and that runs unchanged on every target. When a task seems to need one (cryptography, image handling, parsing), it is done with Node's own built-in modules instead: `crypto` generates keys and signs, and `lib/tls/self-signed.js` builds an X.509 certificate out of `crypto` plus a small DER writer for exactly this reason.
+- **No shelling out.** Never invoke a CLI tool at runtime (`openssl`, `dig`, `curl`, `sh`, ...). None of them is guaranteed to exist on a customer's machine, several do not exist on Windows at all, and a `pkg` binary carries no shell of its own. Do the work in JavaScript. This applies to tests as well: a test that shells out to `openssl` fails on the platforms that matter most.
+
+- **Node.js 20 is the minimum.** `engines.node` is `>=20.19.0` (the oldest release the dependency tree accepts; `server.js` warns below it and refuses to start below 20, see `lib/node-version.js`), and runtime code, tests and tooling have to work on Node 20, 22 and 24. CI's unit job runs Node 24 and 20.19.0 (see `.claude/rules/testing.md` for why that exact 20.x).
+- **The runtime dependency graph is CommonJS only.** `pkg` snapshots a CommonJS module graph and cannot load ES modules, so `require()` of every runtime dependency has to work with `--no-experimental-require-module`. Node 22+ (and 20.19) enable require(esm) by default, which hides an ESM-only dependency in development and tests until a binary is built. Never add or upgrade to an ESM-only package, and a CommonJS wrapper that only does a dynamic `import()` of ESM code does not count. When a dependency goes ESM-only, pin its last CommonJS release in `.ncurc.js` (`reject` or `target`) with the reason, so `npm run update` cannot move it. The worked examples are `marked` and `he`, held on their last CommonJS releases in `.ncurc.js`. When a transitive dependency goes ESM-only, a `package.json` `overrides` entry pins it, and an override in one of our libraries does not propagate to EmailEngine, so this repo has to carry its own. Where one of our libraries depends on an ESM-only package it cannot replace, the library can instead bundle it into real CommonJS at build time: `@postalsys/email-text-tools` does that for jsdom (from 2.6.3), which is what took jsdom and its ESM-only `@csstools/*` chain out of this tree. Check with `npm run test:cjs`, which runs the unit tier with `NODE_OPTIONS=--no-experimental-require-module`; CI runs it on the Node 24 unit leg.
+
+Build-time-only devDependencies (tailwindcss, playwright, pkg itself) are not covered by this: they never reach a running instance.
 
 ## Code Style Rules
 
 - Never use emojis in code or documentation, only printable ASCII characters
 - Use a single hyphen-minus (`-`) as a dash in UI copy and user-facing strings. Never use double hyphens (`--`), em dashes, or en dashes.
 - When composing git commit messages do not include Claude as co-contributor
-- For commits that do not change runtime behavior (docs, comments, CI/workflow tweaks, formatting), append `[skip ci]` to the commit message to avoid triggering the GitHub Actions workflows. Exception: do not add `[skip ci]` to commits using a `fix:` or `feat:` prefix - those must run so the release action is triggered.
+- Prefer the `fix:` conventional-commit prefix for changes that alter runtime behavior. `feat:` is reserved for a genuinely new, noticeable capability a user would look for in the changelog - a new endpoint, a new setting, a new provider. Raising a limit, tightening a bound, reworking internals or improving existing behavior is a `fix:` even when the diff is large, because the prefix drives the release notes and a minor bump promises users something new to try.
+- For commits that do not change runtime behavior (docs, comments, CI/workflow tweaks, formatting), append `[skip ci]` to the commit message to avoid triggering the GitHub Actions workflows. Exception: do not add `[skip ci]` to commits using a `fix:` or `feat:` prefix - those must run so the release action is triggered. GitHub reads the marker off the HEAD commit of a push, not off each commit in it, so a `[skip ci]` docs commit pushed on top of a `fix:` commit silences the workflows for both and the release PR is never opened. When a push mixes the two, the release-triggering commit has to be last. Never quote the marker literally in a commit message body either, not even when writing about it - GitHub matches it anywhere in the message, so a commit explaining the rule skips itself. There is no repairing any of it afterwards: `master` is protected against force-pushes, so the only way back is another commit.
 - After making code changes:
-  1. Run `/simplify` to review changed code for reuse, quality, and efficiency
-  2. Run `npm run format` and `npm run lint`
-  3. Run `/security-review` to check for security issues before committing
+    1. Run `/simplify` to review changed code for reuse, quality, and efficiency
+    2. If the change touches the front end (`views/`, `static/`, admin UI or public pages), review it as a principal UX expert and SaaS product expert. Run the app and take screenshots of every affected page and state (Playwright is already a devDependency), including light and dark themes and a narrow viewport where relevant, then look at them and judge layout, hierarchy, spacing, copy, consistency with the rest of the admin UI, empty and error states, and whether the flow makes sense to an operator. If anything needs improving UX- or design-wise, fix it and re-screenshot until it holds up; do not stop at "the code looks right"
+    3. Run `npm run format` and `npm run lint`
+    4. Run `/security-review` to check for security issues before committing
 - After pushing, check the GitHub Actions runs for the push (e.g. `gh run list --branch <branch>`) and report their status. If a run fails for a strange or unrelated reason (for example a checkout step reporting "account suspended", HTTP 403, or other auth/infrastructure errors that have nothing to do with the change), check https://www.githubstatus.com/ for an active GitHub incident before assuming the failure is caused by the code.
 - Avoid the circuit breaker pattern unless absolutely necessary. EmailEngine processes many independent accounts through shared workers, so a single failing account can trip a circuit breaker and block all other accounts. Prefer per-account error handling (retry with backoff, error state tracking) over global circuit breakers.
 - Never suppress or swallow unhandled rejections/exceptions at the global handler level. If an error reaches the global `unhandledRejection` or `uncaughtException` handler, the worker must die -- this is the last line of defense. The correct fix is always to handle the error at the source so it never bubbles up to the global handler. This means adding proper try/catch, .catch(), or error event handlers at the actual call site. If the unhandled rejection originates in a dependency (e.g. ImapFlow), fix it in the dependency itself.

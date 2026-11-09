@@ -1,0 +1,14 @@
+{{!--
+    The "Limit to one account" field, offered identically by the OAuth consent prompt and the
+    admin token generator so the two cannot drift on the wording - the same reason
+    mcp_access_levels.hbs exists. The control itself is the shared ui/account-picker; only the
+    label and the hint, which are about what the binding means for an MCP client, live here.
+    Params:
+      id       - input id, also the posted field name (required)
+      value    - current value, for validation re-renders (optional)
+      selected - picker entry for that value (optional)
+      error    - validation error message (optional)
+--}}
+{{> ui/account-picker id=id value=value selected=selected error=error label="Limit to one account"
+    placeholder="Search by name, email address, or account ID"
+    hint="Limit access to this account and exclude instance-wide tools. Leave blank to allow all accounts and instance tools within the selected access levels."}}

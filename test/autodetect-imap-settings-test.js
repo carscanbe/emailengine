@@ -9,16 +9,42 @@
 // The pure helpers are exercised directly. The resolver is exercised through the
 // public autodetectImapSettings() with dns.promises mocked, staying on the MX
 // branch (and the Gmail -> SRV branch) so no real DNS or HTTP is performed - the
-// HTTP-based fallback resolvers (autoconfig/well-known/mozilla/autodiscover) are
-// intentionally out of scope here.
+// network halves of the HTTP-based fallback resolvers (autoconfig/well-known/
+// mozilla) are intentionally out of scope here, while their response processing is
+// covered via processAutoconfigFile/processAutodiscoverResponse.
+//
+// Exchange autodiscovery is the exception: its request sequence is what the whole
+// feature turns on, so runAutodiscovery() is driven with an injected fetch that
+// records what would have gone on the wire.
 
 const test = require('node:test');
 const { mock } = require('node:test');
 const assert = require('node:assert').strict;
 
 const dns = require('dns').promises;
+const http = require('http');
+const { fetch: fetchCmd } = require('undici');
 
-const { autodetectImapSettings, processAutoconfigFile, getAppPassword, escapeXml } = require('../lib/autodetect-imap-settings');
+const {
+    autodetectImapSettings,
+    processAutoconfigFile,
+    processAutodiscoverResponse,
+    processAutodiscoverSoapResponse,
+    buildAutodiscoverRequest,
+    buildAutodiscoverSoapRequest,
+    runAutodiscovery,
+    resolver,
+    resolveUsingSRV,
+    timedFunction,
+    MAX_AUTODISCOVERY_BODY,
+    MAX_AUTODISCOVER_REDIRECTS,
+    autodiscoverRedirectOrigin,
+    poxRedirectUrl,
+    resolveUsingAutodiscovery,
+    hasResolvedHost,
+    getAppPassword,
+    escapeXml
+} = require('../lib/autodetect-imap-settings');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 
@@ -57,6 +83,24 @@ test('getAppPassword', async t => {
 
     await t.test('matches the domain case-insensitively', () => {
         assert.strictEqual(getAppPassword('User@AOL.COM', null, gt).provider, 'AOL');
+    });
+
+    await t.test('matches the canonical provider domains without an exchange lookup', () => {
+        // The hosted form's failAction re-render resolves the hint with exchange=false (no MX
+        // lookup, no probe budget), so the big providers must match by domain alone.
+        for (const [email, provider] of [
+            ['user@gmail.com', 'Gmail'],
+            ['user@googlemail.com', 'Gmail'],
+            ['user@icloud.com', 'iCloud'],
+            ['user@me.com', 'iCloud'],
+            ['user@mac.com', 'iCloud'],
+            ['user@outlook.com', 'Microsoft'],
+            ['user@hotmail.com', 'Microsoft'],
+            ['user@live.com', 'Microsoft'],
+            ['user@t-online.de', 'T-Online']
+        ]) {
+            assert.strictEqual(getAppPassword(email, false, gt).provider, provider, `${email} should match ${provider} by domain`);
+        }
     });
 
     await t.test('matches by MX exchange when the domain does not match (iCloud)', () => {
@@ -175,6 +219,251 @@ test('processAutoconfigFile', async t => {
         assert.strictEqual(res.imap.host, 'imap.example.com');
         // No <username> element -> no auth block is added.
         assert.strictEqual(res.imap.auth, undefined);
+    });
+
+    await t.test('a server element with an empty hostname is not a server', async () => {
+        // The entry used to be built anyway, with `host: undefined` - truthy, naming nothing, and
+        // read as an answer by the resolver race and by GET /v1/autoconfig alike.
+        const text = xml(
+            `<incomingServer type="imap">
+        <hostname></hostname>
+        <port>993</port>
+        <socketType>SSL</socketType>
+      </incomingServer>`,
+            `<outgoingServer type="smtp">
+        <hostname>smtp.example.com</hostname>
+        <port>587</port>
+        <socketType>STARTTLS</socketType>
+      </outgoingServer>`
+        );
+
+        const res = await processAutoconfigFile('john@example.com', null, text, 'autoconfig');
+
+        assert.strictEqual(res.imap, false);
+        assert.strictEqual(res.smtp.host, 'smtp.example.com', 'the half that does name a server stands');
+        assert.strictEqual(hasResolvedHost(res), true);
+    });
+
+    await t.test('a hostless server element does not shadow a later one that names a host', async () => {
+        // The selection took the first element of the matching type and only then checked for a
+        // hostname, so a leading empty one hid a usable sibling and the lookup resolved nothing.
+        const text = xml(
+            `<incomingServer type="imap">
+        <hostname></hostname>
+        <port>143</port>
+        <socketType>plain</socketType>
+      </incomingServer>
+      <incomingServer type="imap">
+        <hostname>imap.example.com</hostname>
+        <port>993</port>
+        <socketType>SSL</socketType>
+      </incomingServer>`,
+            `<outgoingServer type="smtp">
+        <hostname></hostname>
+        <port>25</port>
+        <socketType>plain</socketType>
+      </outgoingServer>
+      <outgoingServer type="smtp">
+        <hostname>smtp.example.com</hostname>
+        <port>587</port>
+        <socketType>STARTTLS</socketType>
+      </outgoingServer>`
+        );
+
+        const res = await processAutoconfigFile('john@example.com', null, text, 'autoconfig');
+
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+        assert.strictEqual(res.imap.port, 993);
+        assert.strictEqual(res.smtp.host, 'smtp.example.com');
+        assert.strictEqual(hasResolvedHost(res), true);
+    });
+
+    await t.test('rejects a malformed document (HTML error page)', async () => {
+        await assert.rejects(processAutoconfigFile('john@example.com', null, '<html><body><p>Not found<br></body></html>', 'autoconfig'));
+    });
+
+    await t.test('decodes XML entities in element values', async () => {
+        const text = xml(
+            `<incomingServer type="imap">
+        <hostname>imap.example.com</hostname>
+        <port>993</port>
+        <socketType>SSL</socketType>
+        <username>john&amp;doe@example.com</username>
+      </incomingServer>`,
+            ''
+        );
+        const res = await processAutoconfigFile('john&doe@example.com', null, text, 'autoconfig');
+        assert.strictEqual(res.imap.auth.user, 'john&doe@example.com');
+    });
+});
+
+// The POX autodiscovery envelope, shared by the response-parsing tests and the request-sequence
+// ones, so the two differ only in the <Protocol> children that matter to each.
+const pox = accounts => `<?xml version="1.0" encoding="utf-8"?>
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">
+  <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
+    ${accounts}
+  </Response>
+</Autodiscover>`;
+
+test('processAutodiscoverResponse', async t => {
+    const emailAccount = `<Account>
+      <AccountType>email</AccountType>
+      <Action>settings</Action>
+      <Protocol>
+        <Type>IMAP</Type>
+        <Server>imap.example.com</Server>
+        <Port>993</Port>
+        <LoginName>john@example.com</LoginName>
+        <SSL>on</SSL>
+      </Protocol>
+      <Protocol>
+        <Type>SMTP</Type>
+        <Server>smtp.example.com</Server>
+        <Port>587</Port>
+        <LoginName>john@example.com</LoginName>
+        <SSL>off</SSL>
+      </Protocol>
+    </Account>`;
+
+    await t.test('parses IMAP and SMTP protocol entries of an email account', async () => {
+        const res = await processAutodiscoverResponse(pox(emailAccount), 'autodiscover');
+        assert.deepStrictEqual(res, {
+            imap: { host: 'imap.example.com', port: 993, secure: true, auth: { user: 'john@example.com' } },
+            smtp: { host: 'smtp.example.com', port: 587, secure: false, auth: { user: 'john@example.com' } },
+            _source: 'autodiscover'
+        });
+    });
+
+    await t.test('defaults the source label', async () => {
+        const res = await processAutodiscoverResponse(pox(emailAccount));
+        assert.strictEqual(res._source, 'autodiscover');
+    });
+
+    await t.test('ignores accounts that are not of type email', async () => {
+        const res = await processAutodiscoverResponse(pox(emailAccount.replace(/email/, 'notes')), 'autodiscover');
+        assert.strictEqual(res.imap, false);
+        assert.strictEqual(res.smtp, false);
+    });
+
+    await t.test('returns false entries for an empty response body', async () => {
+        const res = await processAutodiscoverResponse('', 'autodiscover');
+        assert.strictEqual(res.imap, false);
+        assert.strictEqual(res.smtp, false);
+    });
+
+    await t.test('rejects a malformed document', () => {
+        assert.throws(() => processAutodiscoverResponse('<Autodiscover><Response>', 'autodiscover'));
+    });
+
+    await t.test('a hostless block of the same type does not discard the one that names a host', () => {
+        // Exchange emits several <Protocol> blocks per type (internal and external variants, and
+        // Type-only blocks). The parser overwrote on every match, so a hostless sibling further
+        // down demoted a perfectly good entry to false and the whole answer was dropped.
+        const res = processAutodiscoverResponse(
+            pox(`<Account>
+              <AccountType>email</AccountType>
+              <Protocol>
+                <Type>IMAP</Type>
+                <Server>imap.example.com</Server>
+                <Port>993</Port>
+                <SSL>on</SSL>
+              </Protocol>
+              <Protocol><Type>IMAP</Type></Protocol>
+              <Protocol>
+                <Type>SMTP</Type>
+                <Server>smtp.example.com</Server>
+                <Port>587</Port>
+                <SSL>off</SSL>
+              </Protocol>
+              <Protocol><Type>SMTP</Type><Port>25</Port></Protocol>
+            </Account>`),
+            'autodiscover'
+        );
+
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+        assert.strictEqual(res.smtp.host, 'smtp.example.com');
+        assert.strictEqual(hasResolvedHost(res), true);
+    });
+
+    await t.test('reads the TLS mode from <Encryption> when there is no <SSL> (IONOS)', () => {
+        // IONOS answers with <Encryption> only. Reading <SSL> alone left `secure` unset, and the
+        // hosted form defaulted it to false, so IMAP on 993 was attempted without TLS.
+        const res = processAutodiscoverResponse(
+            pox(`<Account>
+              <AccountType>email</AccountType>
+              <Protocol><Type>IMAP</Type><Server>imap.ionos.fr</Server><Port>993</Port><Encryption>SSL</Encryption></Protocol>
+              <Protocol><Type>SMTP</Type><Server>smtp.ionos.fr</Server><Port>587</Port><Encryption>Auto</Encryption></Protocol>
+            </Account>`),
+            'autodiscover'
+        );
+        assert.deepStrictEqual(res.imap, { host: 'imap.ionos.fr', port: 993, secure: true });
+        assert.deepStrictEqual(res.smtp, { host: 'smtp.ionos.fr', port: 587, secure: false });
+    });
+
+    await t.test('maps every <Encryption> value, and it overrides <SSL>', () => {
+        const parse = (encryption, port, ssl) =>
+            processAutodiscoverResponse(
+                pox(`<Account>
+                  <AccountType>email</AccountType>
+                  <Protocol><Type>IMAP</Type><Server>imap.example.com</Server><Port>${port}</Port>${ssl ? `<SSL>${ssl}</SSL>` : ''}<Encryption>${encryption}</Encryption></Protocol>
+                </Account>`)
+            ).imap.secure;
+
+        assert.strictEqual(parse('SSL', 993), true);
+        assert.strictEqual(parse('ssl', 993), true, 'case-insensitive');
+        assert.strictEqual(parse('TLS', 143), false, 'TLS is STARTTLS');
+        assert.strictEqual(parse('None', 143), false);
+        assert.strictEqual(parse('Auto', 993), true, 'Auto on an implicit TLS port');
+        assert.strictEqual(parse('Auto', 143), false, 'Auto on a cleartext port');
+        assert.strictEqual(parse('SSL', 993, 'off'), true, '<Encryption> wins over <SSL>');
+        assert.strictEqual(parse('TLS', 143, 'on'), false, '<Encryption> wins over <SSL>');
+        assert.strictEqual(parse('Bogus', 993, 'on'), true, 'an unknown value falls back to <SSL>');
+        assert.strictEqual(parse('Bogus', 993), undefined, 'nothing to go by leaves it unset');
+    });
+
+    await t.test('a protocol block with no Server names nothing, so it is not an entry', () => {
+        // The parser used to build the entry out of whatever elements were present, which made
+        // this one an object that was truthy and named no server at all.
+        const res = processAutodiscoverResponse(
+            pox(`<Account>
+              <AccountType>email</AccountType>
+              <Protocol><Type>IMAP</Type><Port>993</Port><SSL>on</SSL></Protocol>
+            </Account>`),
+            'autodiscover'
+        );
+        assert.strictEqual(res.imap, false);
+        assert.strictEqual(hasResolvedHost(res), false, 'and it is not an answer');
+    });
+});
+
+test('hasResolvedHost', async t => {
+    // The predicate every resolver result is judged by. A truthy `imap`/`smtp` entry is not the
+    // same thing as a resolved server: an autoconfig file with an empty <hostname> and an
+    // autodiscover <Protocol> without a <Server> both build one that names nothing, and treating
+    // that as an answer both won the resolver race against the branch that had the real settings
+    // and rendered the hosted setup form with empty server fields.
+    await t.test('accepts a result that names an IMAP host', () => {
+        assert.strictEqual(hasResolvedHost({ imap: { host: 'imap.example.com' }, smtp: false }), true);
+    });
+
+    await t.test('accepts a result that names only an SMTP host', () => {
+        assert.strictEqual(hasResolvedHost({ imap: false, smtp: { host: 'smtp.example.com' } }), true);
+    });
+
+    await t.test('rejects entries that carry everything but a host', () => {
+        assert.strictEqual(hasResolvedHost({ imap: { port: 993, secure: true }, smtp: {} }), false);
+    });
+
+    await t.test('rejects an undefined host', () => {
+        // What processAutoconfigFile() builds from an empty <hostname> element
+        assert.strictEqual(hasResolvedHost({ imap: { host: undefined, port: 993, secure: true }, smtp: false }), false);
+    });
+
+    await t.test('rejects a result with no entries at all', () => {
+        assert.strictEqual(hasResolvedHost({ imap: false, smtp: false }), false);
+        assert.strictEqual(hasResolvedHost(false), false);
+        assert.strictEqual(hasResolvedHost(undefined), false);
     });
 });
 
@@ -326,5 +615,878 @@ test('autodetectImapSettings (MX resolver, mocked DNS)', async t => {
         assert.deepStrictEqual(res.imap, { host: 'imap.legacy.gmail.com', port: 143, secure: false });
         // _submission on port 465 -> treated as secure:true
         assert.deepStrictEqual(res.smtp, { host: 'smtp.legacy.gmail.com', port: 465, secure: true });
+    });
+});
+
+// A SOAP GetUserSettings response shaped like the one hosted Exchange returns: namespace prefixes
+// throughout, and the same connection repeated once per client access server.
+const soapResponse = settings => `<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <GetUserSettingsResponseMessage xmlns="http://schemas.microsoft.com/exchange/2010/Autodiscover">
+      <Response>
+        <ErrorCode>NoError</ErrorCode>
+        <UserResponses>
+          <UserResponse>
+            <ErrorCode>NoError</ErrorCode>
+            <UserSettings>${settings}</UserSettings>
+          </UserResponse>
+        </UserResponses>
+      </Response>
+    </GetUserSettingsResponseMessage>
+  </s:Body>
+</s:Envelope>`;
+
+const connectionSetting = (name, connections) => `
+  <UserSetting i:type="ProtocolConnectionCollectionSetting" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+    <Name>${name}</Name>
+    <ProtocolConnections>${connections
+        .map(
+            ([hostname, port, encryption]) =>
+                `<ProtocolConnection><Hostname>${hostname}</Hostname><Port>${port}</Port><EncryptionMethod>${encryption}</EncryptionMethod></ProtocolConnection>`
+        )
+        .join('')}</ProtocolConnections>
+  </UserSetting>`;
+
+// The shape hosted Exchange actually answers with: IMAP on the implicit-TLS and the STARTTLS port,
+// SMTP on the submission port only, every entry repeated.
+const ovhStyleSettings =
+    connectionSetting('ExternalImap4Connections', [
+        ['pro2.mail.ovh.net', 993, 'SSL'],
+        ['pro2.mail.ovh.net', 143, 'TLS'],
+        ['pro2.mail.ovh.net', 993, 'SSL'],
+        ['pro2.mail.ovh.net', 143, 'TLS']
+    ]) +
+    connectionSetting('ExternalSmtpConnections', [
+        ['pro2.mail.ovh.net', 587, 'TLS'],
+        ['pro2.mail.ovh.net', 587, 'TLS']
+    ]);
+
+test('buildAutodiscoverRequest', async t => {
+    await t.test('puts EMailAddress ahead of AcceptableResponseSchema', () => {
+        const body = buildAutodiscoverRequest('user@example.com');
+        // Exchange answers ErrorCode 600 ("Invalid Request") when these arrive the other way round
+        assert.ok(body.indexOf('<EMailAddress>') < body.indexOf('<AcceptableResponseSchema>'), 'the request schema declares a sequence');
+    });
+
+    await t.test('escapes the address', () => {
+        const body = buildAutodiscoverRequest('a<b>@example.com');
+        assert.ok(body.includes('<EMailAddress>a&lt;b&gt;@example.com</EMailAddress>'));
+    });
+});
+
+test('buildAutodiscoverSoapRequest', async t => {
+    await t.test('asks for the external IMAP and SMTP endpoints', () => {
+        const body = buildAutodiscoverSoapRequest('user@example.com');
+        assert.ok(body.includes('<a:Setting>ExternalImap4Connections</a:Setting>'));
+        assert.ok(body.includes('<a:Setting>ExternalSmtpConnections</a:Setting>'));
+        assert.ok(body.includes('<a:Mailbox>user@example.com</a:Mailbox>'));
+    });
+
+    await t.test('escapes the address', () => {
+        assert.ok(buildAutodiscoverSoapRequest('a&b@example.com').includes('<a:Mailbox>a&amp;b@example.com</a:Mailbox>'));
+    });
+});
+
+test('processAutodiscoverSoapResponse', async t => {
+    await t.test('reads IMAP and SMTP out of a hosted Exchange response', () => {
+        const res = processAutodiscoverSoapResponse(soapResponse(ovhStyleSettings));
+        // SSL is implicit TLS, so the 993 entry wins over the 143 STARTTLS one
+        assert.deepStrictEqual(res.imap, { host: 'pro2.mail.ovh.net', port: 993, secure: true });
+        // Only STARTTLS is offered for submission, which is secure:false for our purposes
+        assert.deepStrictEqual(res.smtp, { host: 'pro2.mail.ovh.net', port: 587, secure: false });
+        assert.strictEqual(res._source, 'autodiscover');
+    });
+
+    await t.test('falls back to the STARTTLS entry when no implicit-TLS port is offered', () => {
+        const res = processAutodiscoverSoapResponse(soapResponse(connectionSetting('ExternalImap4Connections', [['mail.example.com', 143, 'TLS']])));
+        assert.deepStrictEqual(res.imap, { host: 'mail.example.com', port: 143, secure: false });
+        assert.strictEqual(res.smtp, false);
+    });
+
+    await t.test('reports false for a setting the server did not list', () => {
+        const res = processAutodiscoverSoapResponse(soapResponse(connectionSetting('ExternalSmtpConnections', [['mail.example.com', 587, 'TLS']])));
+        assert.strictEqual(res.imap, false);
+        assert.deepStrictEqual(res.smtp, { host: 'mail.example.com', port: 587, secure: false });
+    });
+
+    await t.test('ignores an entry with no usable host or port', () => {
+        const res = processAutodiscoverSoapResponse(
+            soapResponse(
+                connectionSetting('ExternalImap4Connections', [
+                    ['', 993, 'SSL'],
+                    ['mail.example.com', 0, 'SSL']
+                ])
+            )
+        );
+        assert.strictEqual(res.imap, false);
+    });
+
+    await t.test('survives an empty settings block', () => {
+        const res = processAutodiscoverSoapResponse(soapResponse(''));
+        assert.deepStrictEqual(res, { imap: false, smtp: false, _source: 'autodiscover' });
+    });
+
+    await t.test('survives a document that is not a settings response at all', () => {
+        const res = processAutodiscoverSoapResponse('<?xml version="1.0"?><nothing/>');
+        assert.deepStrictEqual(res, { imap: false, smtp: false, _source: 'autodiscover' });
+    });
+});
+
+test('runAutodiscovery', async t => {
+    // Records every request and answers from a table keyed by path, so a test states only what the
+    // endpoints return and then asserts what went out.
+    const stubFetch = handlers => {
+        const calls = [];
+        const fetchResource = async (url, opts) => {
+            const path = new URL(url).pathname;
+            calls.push({ url, path, headers: opts.headers });
+            const handler = handlers[path];
+            // Awaited, so a test can hand back a promise and hold an endpoint open
+            const answer = (await (typeof handler === 'function' ? handler(calls.length) : handler)) || { status: 404 };
+            // A 401 carries the Basic challenge a real Exchange sends, unless a test says otherwise
+            const wwwAuthenticate = 'wwwAuthenticate' in answer ? answer.wwwAuthenticate : answer.status === 401 ? 'Basic realm="test", Negotiate, NTLM' : null;
+            return {
+                ok: answer.status >= 200 && answer.status < 300,
+                status: answer.status,
+                // fetch reports where the request ended up, which is what a redirect changes
+                url: answer.url || url,
+                headers: { get: name => (name.toLowerCase() === 'www-authenticate' ? wwwAuthenticate : null) },
+                text: async () => answer.body || ''
+            };
+        };
+        return { calls, fetchResource };
+    };
+
+    const POX = '/autodiscover/autodiscover.xml';
+    const SOAP = '/autodiscover/autodiscover.svc';
+
+    // A POX response carrying real IMAP settings, as a server that answers anonymously would
+    const poxWithImap = pox(`<Account>
+      <AccountType>email</AccountType>
+      <Protocol><Type>IMAP</Type><Server>imap.example.com</Server><Port>993</Port><SSL>on</SSL><LoginName>real-login</LoginName></Protocol>
+      <Protocol><Type>SMTP</Type><Server>smtp.example.com</Server><Port>587</Port><SSL>off</SSL></Protocol>
+    </Account>`);
+
+    // What hosted Exchange answers an authenticated POX request with: webmail only, no IMAP
+    const poxWebOnly = pox(`<Account>
+      <AccountType>email</AccountType>
+      <Protocol><Type>WEB</Type></Protocol>
+    </Account>`);
+
+    const credentials = { user: 'user@example.com', pass: 'secret' };
+
+    await t.test('announces every request as text/xml', async () => {
+        // Exchange answers application/xml with 415 before it ever looks at the body
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 200, body: poxWithImap } });
+        await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', undefined, { fetchResource });
+        assert.strictEqual(calls[0].headers['Content-type'], 'text/xml; charset=utf-8');
+    });
+
+    await t.test('never sends credentials to a server that answers anonymously', async () => {
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 200, body: poxWithImap } });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap, { host: 'imap.example.com', port: 993, secure: true, auth: { user: 'real-login' } });
+        assert.strictEqual(calls.length, 1, 'one request is enough when it is answered');
+        assert.ok(!calls[0].headers.Authorization, 'the password must not be offered before it is asked for');
+    });
+
+    await t.test('asks anonymously first, then repeats the request with credentials', async () => {
+        const { calls, fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : { status: 200, body: poxWithImap }),
+            [SOAP]: { status: 401 }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.smtp, { host: 'smtp.example.com', port: 587, secure: false });
+        assert.ok(!calls[0].headers.Authorization, 'the first request is anonymous');
+        const authorization = calls.find(call => call.headers.Authorization).headers.Authorization;
+        assert.strictEqual(authorization, `Basic ${Buffer.from('user@example.com:secret').toString('base64')}`);
+    });
+
+    await t.test('a protocol block without a Server is not a usable answer', async () => {
+        // The parser builds an entry from whatever elements were there, so this one is truthy and
+        // names no host. Answering the caller with it produced a form with empty server fields.
+        const poxNoServer = pox(`<Account>
+          <AccountType>email</AccountType>
+          <Protocol><Type>IMAP</Type><Port>993</Port><SSL>on</SSL></Protocol>
+        </Account>`);
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 200, body: poxNoServer }, [SOAP]: { status: 401 } });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+        assert.strictEqual(calls.length, 1, 'and it still counts as an anonymous answer, so no password is offered');
+    });
+
+    await t.test('does not offer the password to a host that answered anonymously with nothing usable', async () => {
+        // A 200 is not a request for credentials, however unhelpful its body
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 200, body: poxWebOnly }, [SOAP]: { status: 401 } });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+        assert.strictEqual(calls.length, 1, 'an answer without a challenge ends the lookup');
+    });
+
+    await t.test('ignores a challenge that does not offer Basic', async () => {
+        // Basic is the only scheme implemented, and a server that never offered it would reject it
+        const { calls, fetchResource } = stubFetch({
+            [POX]: { status: 401, wwwAuthenticate: 'Negotiate, NTLM' },
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+        assert.strictEqual(calls.length, 1);
+    });
+
+    await t.test('falls back to the SOAP endpoint when the legacy one carries no IMAP settings', async () => {
+        // The hosted Exchange case: both endpoints challenge, and only SOAP knows about IMAP
+        const { calls, fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : { status: 200, body: poxWebOnly }),
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap, { host: 'pro2.mail.ovh.net', port: 993, secure: true });
+        assert.deepStrictEqual(res.smtp, { host: 'pro2.mail.ovh.net', port: 587, secure: false });
+        assert.ok(
+            calls.some(call => call.path === SOAP && call.headers.Authorization),
+            'the SOAP endpoint refuses anonymous requests too'
+        );
+    });
+
+    await t.test('prefers the legacy endpoint when both answer, because only it names the login', async () => {
+        const { calls, fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : { status: 200, body: poxWithImap }),
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap.auth, { user: 'real-login' });
+        assert.strictEqual(calls.filter(call => call.path === SOAP).length, 1, 'both are asked at once rather than one after the other');
+    });
+
+    await t.test('answers from the endpoint that replied, without waiting for the other one', async () => {
+        // Both requests are in flight together, but collecting them - `[await pox, await soap]` -
+        // awaited both before either was looked at. The resolver runs against a five second budget
+        // shared with four other lookups, so a stalled endpoint could spend it while the settings
+        // sat in a promise that had already resolved.
+        let releaseSoap;
+        const { fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : { status: 200, body: poxWithImap }),
+            [SOAP]: () => new Promise(resolve => (releaseSoap = resolve))
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap, { host: 'imap.example.com', port: 993, secure: true, auth: { user: 'real-login' } });
+        assert.ok(releaseSoap, 'the SOAP endpoint was asked, and had still not answered');
+        releaseSoap({ status: 500 });
+    });
+
+    await t.test('answers from SOAP while the legacy endpoint is still stalled', async () => {
+        // The same the other way round: hosted Exchange keeps its IMAP settings in the SOAP
+        // response, so POX is as able to be the slow one as it is to be the useful one.
+        let releasePox;
+        const { fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : new Promise(resolve => (releasePox = resolve))),
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap, { host: 'pro2.mail.ovh.net', port: 993, secure: true });
+        assert.ok(releasePox, 'the legacy endpoint was asked, and had still not answered');
+        releasePox({ status: 500 });
+    });
+
+    await t.test('gives up without credentials rather than guessing', async () => {
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 401 }, [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) } });
+
+        await assert.rejects(() => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', undefined, { fetchResource }), /Invalid response/);
+        assert.strictEqual(calls.length, 1, 'nothing is asked that cannot be answered without a password');
+    });
+
+    await t.test('does not offer the password to a host that answered something other than a challenge', async () => {
+        // Wildcard DNS makes "something answers at autodiscover.<domain>" common, and a 404 from a
+        // parking host is not a request for credentials
+        const { calls, fetchResource } = stubFetch({ [POX]: { status: 404 }, [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) } });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+        assert.strictEqual(calls.length, 1, 'no credentialed retry against a host that never challenged');
+    });
+
+    await t.test('sends the credentials to the host that issued the challenge, not the one that redirected', async () => {
+        // fetchWithVettedRedirects strips Authorization on a cross-origin hop, so retrying from the
+        // original URL would arrive without the very header the retry exists to carry
+        const { calls, fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401, url: 'https://mail.example.net/autodiscover/autodiscover.xml' } : { status: 401 }),
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+
+        assert.deepStrictEqual(res.imap, { host: 'pro2.mail.ovh.net', port: 993, secure: true });
+        for (let call of calls.slice(1)) {
+            assert.ok(call.url.startsWith('https://mail.example.net/'), `retry went to ${call.url}`);
+        }
+    });
+
+    await t.test('refuses to answer a challenge that arrived over plain http', async () => {
+        // A redirect may lead to http - the anonymous lookup carries nothing worth protecting - so
+        // the challenging host is not necessarily on https, and Basic there is a cleartext password
+        const { calls, fetchResource } = stubFetch({
+            [POX]: { status: 401, url: 'http://downgraded.example.net/autodiscover/autodiscover.xml' },
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+        assert.strictEqual(calls.length, 1, 'no credential is sent anywhere once the challenge came over http');
+    });
+
+    await t.test('gives up when the credentials are refused', async () => {
+        const { fetchResource } = stubFetch({ [POX]: { status: 401 }, [SOAP]: { status: 401 } });
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource }),
+            /Invalid response/
+        );
+    });
+
+    await t.test('survives one endpoint throwing outright', async () => {
+        const { fetchResource } = stubFetch({
+            [POX]: callNr => {
+                if (callNr > 1) {
+                    throw new Error('connection reset');
+                }
+                return { status: 401 };
+            },
+            [SOAP]: { status: 200, body: soapResponse(ovhStyleSettings) }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', credentials, { fetchResource });
+        assert.deepStrictEqual(res.imap, { host: 'pro2.mail.ovh.net', port: 993, secure: true });
+    });
+
+    await t.test('uses the address as the login name when no separate one is configured', async () => {
+        const { calls, fetchResource } = stubFetch({
+            [POX]: callNr => (callNr === 1 ? { status: 401 } : { status: 200, body: poxWithImap }),
+            [SOAP]: { status: 401 }
+        });
+
+        await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', { pass: 'secret' }, { fetchResource });
+
+        const authorization = calls.find(call => call.headers.Authorization).headers.Authorization;
+        assert.strictEqual(authorization, `Basic ${Buffer.from('user@example.com:secret').toString('base64')}`);
+    });
+});
+
+// A minimal Mozilla autoconfig document naming an IMAP server, optionally padded past the size cap
+const autoconfigDoc = (host, padding) => `<?xml version="1.0" encoding="UTF-8"?>
+<clientConfig version="1.1">
+  <!--${padding || ''}-->
+  <emailProvider id="example.com">
+    <incomingServer type="imap"><hostname>${host}</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+  </emailProvider>
+</clientConfig>`;
+
+const noDns = {
+    resolveMx: async () => {
+        throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
+    },
+    resolveSrv: async () => {
+        throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
+    }
+};
+
+// A stand-in response carrying a text body, like the one runAutodiscovery's stubs return
+const textResponse = (status, body) => ({ ok: status >= 200 && status < 300, status, url: '', headers: { get: () => null }, text: async () => body || '' });
+
+test('processAutoconfigFile tolerates a server without port or socketType', async t => {
+    await t.test('a missing <port> and <socketType> do not discard the document', async () => {
+        const text = `<?xml version="1.0"?>
+<clientConfig version="1.1"><emailProvider id="example.com">
+  <incomingServer type="imap"><hostname>imap.example.com</hostname></incomingServer>
+  <outgoingServer type="smtp"><hostname>smtp.example.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+</emailProvider></clientConfig>`;
+        // Used to throw "Cannot read properties of undefined (reading 'filter')"
+        const res = await processAutoconfigFile('user@example.com', 'example.com', text, 'test');
+        assert.deepStrictEqual(res.imap, { host: 'imap.example.com', secure: false });
+        assert.deepStrictEqual(res.smtp, { host: 'smtp.example.com', port: 465, secure: true });
+    });
+});
+
+test('resolveUsingSRV', async t => {
+    await t.test('keeps the IMAP answer when the domain has no _submission record', async () => {
+        const srvDns = {
+            resolveSrv: async name => {
+                if (name === '_imaps._tcp.example.com') {
+                    return [{ name: 'imap.example.com', port: 993, priority: 1, weight: 1 }];
+                }
+                // Every SMTP record is missing; the last lookup used to be the unguarded one
+                throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
+            }
+        };
+        const res = await resolveUsingSRV('user@example.com', { dns: srvDns });
+        assert.deepStrictEqual(res.imap, { host: 'imap.example.com', port: 993, secure: true });
+        assert.strictEqual(res.smtp, false);
+    });
+
+    await t.test('reports nothing rather than throwing when no record exists at all', async () => {
+        const res = await resolveUsingSRV('user@example.com', { dns: noDns });
+        assert.deepStrictEqual(res, { imap: false, smtp: false, _source: 'srv' });
+    });
+
+    await t.test('looks up the IMAP and SMTP records at the same time', async () => {
+        // The two chains used to run one after the other inside a budget shared with four other
+        // resolvers. Every lookup is held until both first lookups have been asked for.
+        const asked = [];
+        let release;
+        const gate = new Promise(resolve => {
+            release = resolve;
+        });
+        const dns = {
+            resolveSrv: async name => {
+                asked.push(name);
+                if (asked.length === 2) {
+                    release();
+                }
+                await gate;
+                if (name === '_imaps._tcp.example.com') {
+                    return [{ name: 'imap.example.com', port: 993, priority: 1, weight: 1 }];
+                }
+                if (name === '_submission._tcp.example.com') {
+                    return [{ name: 'smtp.example.com', port: 587, priority: 1, weight: 1 }];
+                }
+                throw Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
+            }
+        };
+        const res = await resolveUsingSRV('user@example.com', { dns });
+        assert.deepStrictEqual(asked.slice(0, 2).sort(), ['_imaps._tcp.example.com', '_submissions._tcp.example.com']);
+        assert.deepStrictEqual(res.imap, { host: 'imap.example.com', port: 993, secure: true });
+        assert.deepStrictEqual(res.smtp, { host: 'smtp.example.com', port: 587, secure: false });
+    });
+});
+
+test('timedFunction', async t => {
+    await t.test('aborts the lookup it was handed when the budget runs out', async () => {
+        let seenSignal;
+        const started = Date.now();
+        await assert.rejects(
+            timedFunction(
+                signal => {
+                    seenSignal = signal;
+                    return new Promise(() => {});
+                },
+                50,
+                'test'
+            ),
+            err => err._source === 'test' && /timed out/.test(err.message)
+        );
+        assert.ok(Date.now() - started < 1000);
+        assert.strictEqual(seenSignal.aborted, true);
+    });
+
+    await t.test('does not abort a lookup that finished in time', async () => {
+        let seenSignal;
+        const res = await timedFunction(
+            async signal => {
+                seenSignal = signal;
+                return 'done';
+            },
+            1000,
+            'test'
+        );
+        assert.strictEqual(res, 'done');
+        assert.strictEqual(seenSignal.aborted, false);
+    });
+
+    await t.test('still races a plain promise', async () => {
+        assert.strictEqual(await timedFunction(Promise.resolve(1), 1000), 1);
+    });
+});
+
+test('resolver (stand-in DNS and fetch)', async t => {
+    // Answers per URL host, so a test states which lookup returns what
+    const fetchByHost = table => async (url, opts) => {
+        const host = new URL(url).hostname;
+        const handler = table[host];
+        if (!handler) {
+            return textResponse(404);
+        }
+        return await handler(url, opts);
+    };
+
+    await t.test('the first lookup to name a server wins', async () => {
+        const res = await resolver('user@example.com', gt, null, {
+            dns: noDns,
+            timeout: 2000,
+            fetchResource: fetchByHost({
+                // Answers first, but names nothing: a loss, not a win
+                'example.com': async () => textResponse(200, '<clientConfig version="1.1"></clientConfig>'),
+                'autoconfig.example.com': async () => {
+                    await new Promise(resolve => setTimeout(resolve, 20));
+                    return textResponse(200, autoconfigDoc('imap.autoconfig.example.com'));
+                },
+                'autoconfig.thunderbird.net': async () => {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    return textResponse(200, autoconfigDoc('imap.mozilla.example.com'));
+                }
+            })
+        });
+        assert.strictEqual(res.imap.host, 'imap.autoconfig.example.com');
+        assert.strictEqual(res._source, 'autoconfig');
+    });
+
+    await t.test('reports the last failure once every lookup came back empty', async () => {
+        await assert.rejects(
+            resolver('user@example.com', gt, null, { dns: noDns, timeout: 2000, fetchResource: fetchByHost({}) }),
+            err => err._is_last === true
+        );
+    });
+
+    await t.test('a lookup that outlives its budget loses to one that answers', async () => {
+        const res = await resolver('user@example.com', gt, null, {
+            dns: noDns,
+            timeout: 100,
+            fetchResource: fetchByHost({
+                'autoconfig.example.com': () => new Promise(() => {}),
+                'autoconfig.thunderbird.net': async () => textResponse(200, autoconfigDoc('imap.mozilla.example.com'))
+            })
+        });
+        assert.strictEqual(res.imap.host, 'imap.mozilla.example.com');
+    });
+
+    await t.test('an oversize document is refused', async () => {
+        const padding = 'x'.repeat(MAX_AUTODISCOVERY_BODY);
+        await assert.rejects(
+            resolver('user@example.com', gt, null, {
+                dns: noDns,
+                timeout: 2000,
+                fetchResource: fetchByHost({ 'autoconfig.example.com': async () => textResponse(200, autoconfigDoc('imap.example.com', padding)) })
+            }),
+            err => err._is_last === true
+        );
+
+        // The same document without the padding resolves, so it is the size that was refused
+        const res = await resolver('user@example.com', gt, null, {
+            dns: noDns,
+            timeout: 2000,
+            fetchResource: fetchByHost({ 'autoconfig.example.com': async () => textResponse(200, autoconfigDoc('imap.example.com')) })
+        });
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+    });
+});
+
+test('resolver cuts off hosts that never stop sending', async t => {
+    // Every lookup is sent to one local server, whatever host it was meant for, through the real
+    // fetch, so the abort and the body cap act on actual sockets
+    async function streamingServer(t, writeChunk) {
+        const closed = [];
+        const server = http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/xml' });
+            res.write('<?xml version="1.0"?><clientConfig><!--');
+            const timer = setInterval(() => res.write(writeChunk), 10);
+            res.on('close', () => {
+                clearInterval(timer);
+                closed.push(Date.now());
+            });
+        });
+        await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+        t.after(() => {
+            server.closeAllConnections();
+            server.close();
+        });
+        const base = `http://127.0.0.1:${server.address().port}`;
+        let opened = 0;
+        const fetchResource = (url, opts) => {
+            opened++;
+            return fetchCmd(`${base}${new URL(url).pathname}`, Object.assign({}, opts, { redirect: 'manual' }));
+        };
+        return { closed, fetchResource, opened: () => opened };
+    }
+
+    const waitFor = async (check, timeout) => {
+        const until = Date.now() + timeout;
+        while (!check() && Date.now() < until) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return check();
+    };
+
+    await t.test('a slow endless body is aborted when the budget runs out', async () => {
+        const { closed, fetchResource, opened } = await streamingServer(t, 'x');
+        const started = Date.now();
+
+        await assert.rejects(resolver('user@example.com', gt, null, { dns: noDns, timeout: 300, fetchResource }), err => err._is_last === true);
+        assert.ok(Date.now() - started < 2000, 'the race gave up within the budget');
+        assert.ok(opened() >= 4, 'the HTTP lookups reached the server');
+
+        // Before the abort existed, the race was decided but every response kept streaming
+        assert.ok(await waitFor(() => closed.length === opened(), 2000), `every response was cut off (${closed.length}/${opened()})`);
+        assert.ok(Math.max(...closed) - started < 2500);
+    });
+
+    await t.test('a fast endless body stops at the size cap, well before the budget', async () => {
+        const { closed, fetchResource, opened } = await streamingServer(t, 'x'.repeat(64 * 1024));
+        const started = Date.now();
+
+        await assert.rejects(resolver('user@example.com', gt, null, { dns: noDns, timeout: 10000, fetchResource }), err => err._is_last === true);
+        // Refused on size, not on the ten second budget
+        assert.ok(Date.now() - started < 5000);
+        assert.ok(await waitFor(() => closed.length === opened(), 2000), `every response was cut off (${closed.length}/${opened()})`);
+    });
+});
+
+// Three steps of Microsoft's documented autodiscovery sequence used to be missing, and a provider can
+// publish only the ones that were missing: IONOS/1&1 points autodiscover.<domain> at a redirector that
+// listens on port 80 only, so the single https POST could not connect and the whole Exchange branch
+// failed for every domain on that provider.
+test('autodiscovery reaches the endpoints the sequence names', async t => {
+    const POX = '/autodiscover/autodiscover.xml';
+    const SOAP = '/autodiscover/autodiscover.svc';
+
+    const poxWithImap = pox(`<Account>
+      <AccountType>email</AccountType>
+      <Protocol><Type>IMAP</Type><Server>imap.example.com</Server><Port>993</Port><SSL>on</SSL></Protocol>
+    </Account>`);
+
+    const poxWebOnly = pox(`<Account>
+      <AccountType>email</AccountType>
+      <Protocol><Type>WEB</Type></Protocol>
+    </Account>`);
+
+    // Keyed by `METHOD origin+path` rather than by path alone, because which ORIGIN is asked is the
+    // whole question here. `redirectsTo` is what fetch reports after following a redirect: the final
+    // URL, which is all the http GET reads.
+    const stubFetch = handlers => {
+        const calls = [];
+        const fetchResource = async (url, opts) => {
+            const method = (opts.method || 'get').toLowerCase();
+            const key = `${method} ${url}`;
+            calls.push(key);
+            const answer = (await (typeof handlers[key] === 'function' ? handlers[key]() : handlers[key])) || { status: 404 };
+            if (answer.error) {
+                throw Object.assign(new Error(answer.error), { code: answer.code });
+            }
+            return {
+                ok: answer.status >= 200 && answer.status < 300,
+                status: answer.status,
+                url: answer.redirectsTo || url,
+                headers: { get: () => (answer.status === 401 ? 'Basic realm="test"' : null) },
+                text: async () => answer.body || ''
+            };
+        };
+        return { calls, fetchResource };
+    };
+
+    // No SRV record, so the subdomain is the candidate the old code built on its own
+    const noSrvDns = { resolveSrv: async () => [] };
+
+    await t.test('poxRedirectUrl reads only a response that says it is a redirect', () => {
+        const redirecting = pox(
+            '<Account><Action>redirectUrl</Action><RedirectUrl>https://real.example.net/autodiscover/autodiscover.xml</RedirectUrl></Account>'
+        );
+        assert.strictEqual(poxRedirectUrl(redirecting), 'https://real.example.net/autodiscover/autodiscover.xml');
+
+        // A stray RedirectUrl without the action is not a redirect
+        assert.strictEqual(poxRedirectUrl(pox('<Account><RedirectUrl>https://real.example.net/x</RedirectUrl></Account>')), false);
+        // A RedirectAddr names another ADDRESS, and following it would offer that mailbox's host the
+        // password supplied for this one
+        assert.strictEqual(poxRedirectUrl(pox('<Account><Action>redirectAddr</Action><RedirectAddr>other@example.net</RedirectAddr></Account>')), false);
+        assert.strictEqual(poxRedirectUrl(poxWithImap), false);
+        assert.strictEqual(poxRedirectUrl('not xml at all'), false);
+    });
+
+    await t.test('the plain-http GET names the endpoint its redirect points at', async () => {
+        const { calls, fetchResource } = stubFetch({
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': {
+                status: 200,
+                redirectsTo: 'https://autodiscover.1and1.info/Autodiscover/Autodiscover.xml'
+            }
+        });
+
+        assert.strictEqual(await autodiscoverRedirectOrigin('example.com', { fetchResource }), 'https://autodiscover.1and1.info');
+        assert.deepStrictEqual(calls, ['get http://autodiscover.example.com/autodiscover/autodiscover.xml']);
+    });
+
+    await t.test('a plain http-to-https upgrade on the same host names nothing new', async () => {
+        // That origin is already one of the raced candidates, so returning it would only duplicate work
+        const { fetchResource } = stubFetch({
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': {
+                status: 200,
+                redirectsTo: 'https://autodiscover.example.com/autodiscover/autodiscover.xml'
+            }
+        });
+
+        assert.strictEqual(await autodiscoverRedirectOrigin('example.com', { fetchResource }), false);
+    });
+
+    await t.test('a redirect that lands on http names nothing, so no password can follow it', async () => {
+        const { fetchResource } = stubFetch({
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': {
+                status: 200,
+                redirectsTo: 'http://cleartext.example.net/autodiscover/autodiscover.xml'
+            }
+        });
+
+        assert.strictEqual(await autodiscoverRedirectOrigin('example.com', { fetchResource }), false);
+    });
+
+    await t.test('a refused http GET is a loss rather than a throw', async () => {
+        const { fetchResource } = stubFetch({
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': { error: 'connect ECONNREFUSED', code: 'ECONNREFUSED' }
+        });
+
+        assert.strictEqual(await autodiscoverRedirectOrigin('example.com', { fetchResource }), false);
+    });
+
+    await t.test('the IONOS shape resolves: https refused, the http redirect answers', async () => {
+        // Exactly what cabinet-courtillat.fr publishes - the subdomain is a CNAME to a redirector on
+        // port 80, so the only request the resolver used to make could not connect
+        const { calls, fetchResource } = stubFetch({
+            [`post https://autodiscover.example.com${POX}`]: { error: 'connect ECONNREFUSED 195.20.225.174:443', code: 'ECONNREFUSED' },
+            [`post https://example.com${POX}`]: { error: 'connect ECONNREFUSED', code: 'ECONNREFUSED' },
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': {
+                status: 200,
+                redirectsTo: 'https://autodiscover.1and1.info/Autodiscover/Autodiscover.xml'
+            },
+            [`post https://autodiscover.1and1.info${POX}`]: { status: 200, body: poxWithImap }
+        });
+
+        const res = await resolveUsingAutodiscovery('user@example.com', { fetchResource, dns: noSrvDns }, undefined);
+
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+        assert.ok(calls.includes('get http://autodiscover.example.com/autodiscover/autodiscover.xml'), 'the http GET is made');
+        assert.ok(calls.includes(`post https://autodiscover.1and1.info${POX}`), 'the endpoint the redirect named is asked');
+    });
+
+    await t.test('the root domain is tried as well as the subdomain', async () => {
+        // Microsoft lists https://<domain>/autodiscover/autodiscover.xml first, and only the
+        // subdomain was ever built
+        const { calls, fetchResource } = stubFetch({
+            [`post https://autodiscover.example.com${POX}`]: { status: 404 },
+            [`post https://example.com${POX}`]: { status: 200, body: poxWithImap },
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': { status: 404 }
+        });
+
+        const res = await resolveUsingAutodiscovery('user@example.com', { fetchResource, dns: noSrvDns }, undefined);
+
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+        assert.ok(calls.includes(`post https://example.com${POX}`), 'the root domain endpoint is asked');
+    });
+
+    await t.test('an in-response redirect is followed anonymously, never with the password', async () => {
+        // The origin comes out of the body of a server that answered 200 without asking for anything.
+        // Letting it collect the password would make the host the address domain points at the one
+        // that decides where that password goes.
+        const redirecting = pox(
+            '<Account><Action>redirectUrl</Action><RedirectUrl>https://real.example.net/autodiscover/autodiscover.xml</RedirectUrl></Account>'
+        );
+        const seen = [];
+        const fetchResource = async (url, opts) => {
+            seen.push({ url, authorization: (opts.headers || {}).Authorization });
+            if (url.startsWith('https://autodiscover.example.com')) {
+                return { ok: true, status: 200, url, headers: { get: () => null }, text: async () => redirecting };
+            }
+            // The endpoint the redirect named asks for a password, and does not get one
+            return { ok: false, status: 401, url, headers: { get: () => 'Basic realm="test"' }, text: async () => '' };
+        };
+
+        await assert.rejects(
+            () => runAutodiscovery('https://autodiscover.example.com', 'user@example.com', { user: 'user@example.com', pass: 'secret' }, { fetchResource }),
+            /Invalid response/
+        );
+
+        assert.ok(
+            seen.some(call => call.url.startsWith('https://real.example.net')),
+            'the named endpoint is asked'
+        );
+        for (const call of seen) {
+            assert.ok(!call.authorization, `${call.url} must carry no Authorization header`);
+        }
+    });
+
+    await t.test('an in-response redirect is followed to the endpoint it names', async () => {
+        const redirecting = pox(`<Account>
+          <Action>redirectUrl</Action>
+          <RedirectUrl>https://real.example.net/autodiscover/autodiscover.xml</RedirectUrl>
+        </Account>`);
+
+        const { calls, fetchResource } = stubFetch({
+            [`post https://autodiscover.example.com${POX}`]: { status: 200, body: redirecting },
+            [`post https://real.example.net${POX}`]: { status: 200, body: poxWithImap }
+        });
+
+        const res = await runAutodiscovery('https://autodiscover.example.com', 'user@example.com', undefined, { fetchResource });
+
+        assert.strictEqual(res.imap.host, 'imap.example.com');
+        assert.deepStrictEqual(calls, [`post https://autodiscover.example.com${POX}`, `post https://real.example.net${POX}`]);
+    });
+
+    await t.test('a redirect loop is bounded rather than followed forever', async () => {
+        const to = url => pox(`<Account><Action>redirectUrl</Action><RedirectUrl>${url}</RedirectUrl></Account>`);
+        const { calls, fetchResource } = stubFetch({
+            [`post https://a.example.com${POX}`]: { status: 200, body: to(`https://b.example.com${POX}`) },
+            [`post https://b.example.com${POX}`]: { status: 200, body: to(`https://a.example.com${POX}`) }
+        });
+
+        await assert.rejects(() => runAutodiscovery('https://a.example.com', 'user@example.com', undefined, { fetchResource }), /Invalid response/);
+        // The first request plus MAX_AUTODISCOVER_REDIRECTS hops, and no more
+        assert.strictEqual(calls.length, MAX_AUTODISCOVER_REDIRECTS + 1);
+    });
+
+    await t.test('an answer naming no server is still a loss, whichever candidate gave it', async () => {
+        const { fetchResource } = stubFetch({
+            [`post https://autodiscover.example.com${POX}`]: { status: 200, body: poxWebOnly },
+            [`post https://example.com${POX}`]: { status: 200, body: poxWebOnly },
+            'get http://autodiscover.example.com/autodiscover/autodiscover.xml': { status: 404 },
+            [`post https://autodiscover.example.com${SOAP}`]: { status: 404 }
+        });
+
+        await assert.rejects(() => resolveUsingAutodiscovery('user@example.com', { fetchResource, dns: noSrvDns }, undefined), /Invalid response/);
+    });
+
+    await t.test('no credential is ever attached to the http GET', async () => {
+        const seen = [];
+        const fetchResource = async (url, opts) => {
+            seen.push({ url, headers: opts.headers || {} });
+            if (url.startsWith('http://')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    url: 'https://autodiscover.1and1.info/Autodiscover/Autodiscover.xml',
+                    headers: { get: () => null },
+                    text: async () => ''
+                };
+            }
+            return { ok: false, status: 404, url, headers: { get: () => null }, text: async () => '' };
+        };
+
+        await assert.rejects(
+            () => resolveUsingAutodiscovery('user@example.com', { fetchResource, dns: noSrvDns }, { user: 'user@example.com', pass: 'secret' }),
+            /Invalid response/
+        );
+
+        for (const call of seen.filter(entry => entry.url.startsWith('http://'))) {
+            assert.ok(!call.headers.Authorization, `${call.url} must carry no Authorization header`);
+        }
     });
 });

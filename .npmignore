@@ -6,6 +6,15 @@ CLAUDE.md
 
 # Test files
 test/
+scripts/mutation-test.js
+playwright.config.js
+playwright-report/
+test-results/
+blob-report/
+
+# Repository tooling - CI workflows and git hooks are not needed to run the package
+.github/
+.githooks/
 
 # Distribution builds
 dist/
@@ -13,8 +22,8 @@ ee-dist/
 
 # Development configuration
 config/development*
+.env*
 .okta.env
-system.env
 keylog.txt
 
 # Temporary files
@@ -25,3 +34,22 @@ manual-test/
 # Build artifacts
 swagger.json
 yarn.lock
+
+# README artwork - served from GitHub, not needed by the package
+screenshots/
+
+# Profiling and crash artifacts - never publish these, they capture process memory
+*.heapsnapshot
+*.cpuprofile
+*.heapprofile
+core.*
+
+# Local logs
+*.log
+
+# Deployment tooling and the test configuration - the package is the application, not the host
+# setup, and config/test.toml ships a prepared API token with its plaintext in a comment
+install.sh
+setup-production.sh
+systemd/
+config/test.toml

@@ -1,168 +1,758 @@
 {{> tokens_header}}
 
-<nav aria-label="breadcrumb" class="mt-4 mb-4">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="/admin/tokens">Access tokens</a></li>
+{{!-- the account level renders only for account-scoped tokens (ui/breadcrumb skips empty levels) --}}
+{{> ui/breadcrumb parentHref="/admin/tokens" parentLabel="Access Tokens" midHref=(when account accountTokensLink) midLabel=account.name current="New" class="mt-6 mb-6"}}
 
-        {{#if account}}
-        <li class="breadcrumb-item"><a href="{{accountTokensLink}}">{{account.name}}</a></li>
-        {{/if}}
+{{!-- A token is never invalidated once minted, so one handed to a caller that reached this page
+     without authenticating would keep working - POST /admin/tokens/new refuses for that reason. The
+     form used to render anyway, so the only way to discover it was to fill it in and lose the work to
+     a 403. Same condition as the gate, so the two cannot disagree. --}}
+{{#unless canProvision}}
+{{#> ui/stat-card variant="error" title="Set an admin password first" icon="icon-[tabler--shield-lock]" class="mb-6"}}
 
-        <li class="breadcrumb-item active" aria-current="page">New</li>
-    </ol>
-</nav>
+<p class="mb-4">Set an admin password and sign in to create access tokens. Tokens created here remain valid until you delete them.</p>
+<div>
+    {{> ui/btn href="/admin/account/password" variant="primary" icon="icon-[tabler--arrow-right]" label="Set admin password"}}
+</div>
 
+{{/ui/stat-card}}
+{{else}}
 <form method="post" id="token-form" action="/admin/tokens/new">
-    <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
-    <input type="hidden" id="account" name="account" value="{{values.account}}" />
+    <input type="hidden" name="crumb" value="{{crumb}}" />
 
-    <div class="card mb-4">
+    <div class="card bg-base-100 shadow-md mb-6">
 
-        <div class="card-body">
+        <div class="card-body space-y-4">
 
-            <div class="form-group">
-                <label for="description">Description</label>
+            {{> ui/form-field id="description" label="Description" value=values.description error=errors.description required=true hint="Describe the app or task that will use this token."}}
 
-                <input type="text" class="form-control" id="description" name="description"
-                    value="{{values.description}}" required />
+            {{!-- A search box rather than a select or free text: an instance can hold far more
+                  accounts than a list could usefully carry, and an account id is the one thing
+                  about an account nobody remembers. The ID is still resolved on submit, so a value
+                  naming a deleted account is refused rather than minting a token bound to
+                  nothing. --}}
+            {{> ui/account-picker id="account" label="Account (optional)" value=values.account selected=selectedAccount error=errors.account
+                placeholder="Leave empty to allow all accounts"
+                hint="Limit this token to one account. Leave blank to allow access to all accounts within the selected scopes and permissions."}}
 
-                {{#if errors.description}}
-                <span class="invalid-feedback">{{errors.description}}</span>
-                {{/if}}
+            <div>
+                <h6 class="mb-1 font-bold">Allowed scopes</h6>
+                <p class="text-base-content/60 text-sm mb-3">
+                    Choose which EmailEngine interfaces this token can access. Scopes cannot be changed after creation.
+                </p>
 
-                <small class="form-text text-muted">This description is shown when listing active tokens.</small>
+                {{!-- One line of plain words per row. The bracketed slug beside each was the only
+                      description a reader got, and a slug is an identifier rather than an
+                      explanation - "MCP" in particular says nothing about what the token would then
+                      be able to reach, or that it is not REST API access. --}}
+                <ul class="divide-y divide-base-content/10 rounded-box border border-base-content/10">
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm or-else-all scope-entry"
+                                data-target="scope-list" id="scopesAll" data-scope="*" name="scopesAll" {{#if
+                                values.scopesAll}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesAll">All scopes</label>
+                            <div class="text-base-content/60 code-link">["*"]</div>
+                        </div>
+                        <p class="helper-text ms-7">All interfaces below, including any added in future releases.</p>
+                    </li>
+
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesAPI"
+                                name="scopesAPI" data-scope="api" {{#if values.scopesAPI}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesAPI">API</label>
+                            <div class="text-base-content/60 code-link">["api"]</div>
+                        </div>
+                        <p class="helper-text ms-7">The REST API under <code>/v1</code>.</p>
+                    </li>
+
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesSMTP"
+                                name="scopesSMTP" data-scope="smtp" {{#if values.scopesSMTP}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesSMTP">SMTP</label>
+                            <div class="text-base-content/60 code-link">["smtp"]</div>
+                        </div>
+                        <p class="helper-text ms-7">Submit mail through EmailEngine's own SMTP server.</p>
+                    </li>
+
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesImapProxy"
+                                name="scopesImapProxy" data-scope="imap-proxy" {{#if values.scopesImapProxy}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesImapProxy">IMAP Proxy</label>
+                            <div class="text-base-content/60 code-link">["imap-proxy"]</div>
+                        </div>
+                        <p class="helper-text ms-7">Open connected mailboxes with an ordinary IMAP client.</p>
+                    </li>
+
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesMetrics"
+                                name="scopesMetrics" data-scope="metrics" {{#if values.scopesMetrics}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesMetrics">Metrics</label>
+                            <div class="text-base-content/60 code-link">["metrics"]</div>
+                        </div>
+                        <p class="helper-text ms-7">Read the Prometheus metrics endpoint and nothing else.</p>
+                    </li>
+
+                    {{!-- Two MCP scopes, management first: the endpoint is one door with two tool
+                          sets behind it, and each scope opens one of them. Both rows carry the Beta
+                          badge the MCP config page carries. --}}
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesMcpManage"
+                                name="scopesMcpManage" data-scope="mcp-manage" {{#if values.scopesMcpManage}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesMcpManage">MCP management
+                                {{> ui/badge label="Beta" variant="info" soft=true class="badge-sm align-middle" icon="" elId=""}}</label>
+                            <div class="text-base-content/60 code-link">["mcp-manage"]</div>
+                        </div>
+                        <p class="helper-text ms-7">Let an AI agent manage this instance through the MCP tools at
+                            <code>/mcp</code>: accounts, settings, OAuth2 applications, gateways, tokens and the license.
+                            This scope does not grant REST API access.</p>
+                    </li>
+
+                    <li class="p-4">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="checkbox checkbox-sm scope-entry scope-list" id="scopesMcp"
+                                name="scopesMcp" data-scope="mcp" {{#if values.scopesMcp}}checked{{/if}} />
+                            <label class="label-text grow p-0" for="scopesMcp">MCP mail
+                                {{> ui/badge label="Beta" variant="info" soft=true class="badge-sm align-middle" icon="" elId=""}}</label>
+                            <div class="text-base-content/60 code-link">["mcp"]</div>
+                        </div>
+                        <p class="helper-text ms-7">Let an AI agent work with mailbox contents through the MCP tools at
+                            <code>/mcp</code>: list, read, organize and send mail. This scope does not grant REST API access.</p>
+                        {{!-- The endpoint is off by default, so an operator can otherwise mint a
+                              credential for something that is not serving and only find out in the
+                              client. Both halves of the gate are folded into mcpReady. Revealed by
+                              ticking the box rather than standing on the page: MCP being off is not
+                              news to someone provisioning a plain API token, and the default
+                              selection ("All scopes") technically carries the mcp scope too. --}}
+                        {{#unless mcpReady}}
+                        <p id="mcpDisabledHint" class="helper-text ms-7 text-warning hidden">The MCP endpoint is not
+                            enabled on this instance. <a href="/admin/config/mcp" class="link">Enable MCP</a>
+                            before using this token with an MCP client.</p>
+                        {{/unless}}
+                    </li>
+                </ul>
             </div>
-
-            <h6>Allowed scopes</h6>
-
-            <ul class="list-group">
-                <li class="list-group-item">
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input or-else-all scope-entry" data-target="scope-list"
-                            id="scopesAll" data-scope="*" name="scopesAll" {{#if values.scopesAll}}checked{{/if}} />
-                        <div class="text-muted float-right code-link">["*"]</div>
-                        <label class="form-check-label" for="scopesAll">All
-                            scopes</label>
-                    </div>
-                </li>
-
-                <li class="list-group-item">
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input scope-entry scope-list" id="scopesAPI"
-                            name="scopesAPI" data-scope="api" {{#if values.scopesAPI}}checked{{/if}} />
-                        <div class="text-muted float-right code-link">["api"]</div>
-                        <label class="form-check-label" for="scopesAPI">API</label>
-                    </div>
-                </li>
-
-                <li class="list-group-item">
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input scope-entry scope-list" id="scopesSMTP"
-                            name="scopesSMTP" data-scope="smtp" {{#if values.scopesSMTP}}checked{{/if}} />
-                        <div class="text-muted float-right code-link">["smtp"]</div>
-                        <label class="form-check-label" for="scopesSMTP">SMTP</label>
-                    </div>
-                </li>
-
-                <li class="list-group-item">
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input scope-entry scope-list" id="scopesImapProxy"
-                            name="scopesImapProxy" data-scope="imap-proxy" {{#if
-                            values.scopesImapProxy}}checked{{/if}} />
-                        <div class="text-muted float-right code-link">["imap-proxy"]</div>
-                        <label class="form-check-label" for="scopesImapProxy">IMAP Proxy</label>
-                    </div>
-                </li>
-
-                <li class="list-group-item">
-                    <div class="form-check">
-                        <input type="checkbox" class="form-check-input scope-entry scope-list" id="scopesMetrics"
-                            name="scopesMetrics" data-scope="metrics" {{#if values.scopesMetrics}}checked{{/if}} />
-                        <div class="text-muted float-right code-link">["metrics"]</div>
-                        <label class="form-check-label" for="scopesMetrics">Metrics</label>
-                    </div>
-                </li>
-            </ul>
 
         </div>
     </div>
 
-    <div class="mb-4">
-        <button type="submit" class="btn btn-primary btn-icon-split">
-            <span class="icon text-white-50">
-                <i class="fas fa-key"></i>
-            </span>
-            <span class="text">Generate a token</span>
-        </button>
+    {{!-- Its own card rather than a row nested under "API", which is where this used to live. Both
+          per-request surfaces carry a narrowing - the REST API resolves it per endpoint, the MCP
+          endpoint per tool call - so an editor anchored to the API checkbox opened underneath an
+          unticked box whenever MCP alone was selected, titled for a surface the token would not even
+          have. What ties it to the scopes now is #accessAppliesTo, which names the ticked scopes it
+          affects; that is stricter than an indent, which could only ever point at one of them.
+
+          The record itself stays single: one `permissions` object narrows whatever surface the
+          request arrives on. That is why this is one editor with two modes rather than a tab per
+          scope - separate panes would promise two records that cannot exist. --}}
+    <div id="accessCard" class="hidden" data-surfaces="{{permissionSurfacesJson}}" data-mcp-sections="{{json mcpSections}}">
+        {{#> ui/card bodyClass="space-y-4"}}
+
+        <div>
+            <h6 id="accessCardTitle" class="mb-1 font-bold">Access level</h6>
+            <p id="accessAppliesTo" class="text-base-content/60 text-sm"></p>
+        </div>
+
+        {{!-- MCP-only mode. One level per MCP scope, shown while that scope is ticked above: the
+              same sections and levels the OAuth consent prompt and the MCP config page offer, from
+              the same table through the same partial, because the same credential minted from
+              three places must not mean three different things. A 72-cell matrix is not how
+              anyone provisions an agent, so it is the opt-in behind the levels rather than the way
+              in - and unlike the API editor there is no "restrict?" toggle: the narrowest level is
+              the default, because an agent credential that starts unrestricted is the wrong way
+              round. --}}
+        {{!-- Labelled by the card heading rather than carrying a legend of its own, which would
+              repeat "Access level" directly under itself --}}
+        <fieldset id="mcpLevelBlock" class="hidden space-y-4" aria-labelledby="accessCardTitle">
+            {{!-- One block per section, shown while that section's scope is ticked above; the radio
+                  group is named mcpLevel_<key>, which is what the script and ui.js read back --}}
+            {{#each mcpSections}}
+            <div class="space-y-2 mcp-section-block" data-mcp-scope="{{scope}}">
+                <div class="label-text font-medium">{{label}}
+                    <span class="text-base-content/60 code-link font-normal">["{{scope}}"]</span></div>
+                {{> mcp_access_levels section=this name=(concat "mcpLevel_" @key) idPrefix=(concat "mcpLevel_" @key) selected=levels.[0].value}}
+            </div>
+            {{/each}}
+
+            {{> ui/checkbox id="mcpCustom" label="Custom permissions" noName=true
+                hint="Choose the exact actions and sections yourself, starting from the levels selected above."}}
+
+            {{!-- At the decision point, as on the MCP config page: the level chosen here is what
+                  decides whether instructions hidden inside received mail can act --}}
+            <p class="text-base-content/60 text-sm">The connected client may send email content to its AI model. Instructions in received emails can influence
+                the agent. Grant permission to send or delete email only when the agent needs it.</p>
+        </fieldset>
+
+        {{!-- API mode. Unrestricted by default, because an API token is the general-purpose
+              credential and narrowing it is the exception. --}}
+        <div id="apiLimitBlock" class="hidden">
+            <p class="text-base-content/60 text-sm mb-3">
+                Limit this token to the actions its app or service needs, such as reading email or sending messages.
+                Without restrictions, it can use all operations allowed by its scopes and account selection.
+            </p>
+            {{> ui/checkbox id="permissionsEnabled" label="Restrict what this token can do" checked=values.permissionsEnabled error=errors.permissions noName=true}}
+        </div>
+
+        {{!-- The whole point of the two axes is what they produce together, and a reader should not
+              have to multiply four boxes by thirteen to find out. Saying what the token CANNOT do
+              matters as much: that is the reassurance someone wants when handing out a restricted
+              credential. Outside #permissionSection because the MCP levels need it too - picking
+              "Mail agent" should say what that is, not only reveal a matrix. --}}
+        <div id="permissionOutcome" class="rounded-box border border-base-content/10 bg-base-200/40 p-4 text-sm space-y-1 hidden">
+            <div id="permissionOutcomeText" class="space-y-1"></div>
+            {{!-- Its own element rather than more appended lines: the count is the same one the
+                  MCP config generator and the consent prompt show, and it is painted by the
+                  shared helper that owns the rule. --}}
+            {{> mcp_tool_count id="mcpToolCount" class="pt-1"}}
+        </div>
+
+        {{!-- Filled in by the script below whenever a scope or an axis changes. Holding a scope the
+              permissions make unusable is legitimate, so this warns rather than refuses - but it
+              should never be a surprise. What each surface requires is handed over as data, derived
+              from the tables that enforce it, so this cannot describe rules that have since
+              changed. --}}
+        <div id="permissionScopeWarning" class="alert alert-soft alert-warning text-sm hidden"></div>
+
+        <div id="permissionSection" class="space-y-5 hidden">
+
+            <div id="permissionPresetRow">
+                <h6 class="mb-1 font-bold">Pick a preset</h6>
+                <p class="text-base-content/60 text-sm mb-2">
+                    Start with a common set of permissions, then adjust the actions and sections below.
+                </p>
+                <div class="flex flex-wrap gap-2">
+                    {{#each permissionPresets}}
+                    <button type="button" class="btn btn-sm btn-soft permission-preset" data-actions="{{actionList}}"
+                        data-groups="{{groupList}}" title="{{title}}">{{label}}</button>
+                    {{/each}}
+                </div>
+            </div>
+
+            <div>
+                <h6 class="mb-2 font-bold">What it can do</h6>
+                <ul class="divide-y divide-base-content/10 rounded-box border border-base-content/10">
+                    {{#each permissionActions}}
+                    <li class="flex items-center gap-2 p-4" data-axis-row="action:{{value}}">
+                        {{> ui/checkbox id=inputId label=label checked=checked noName=true dataValue=value class="permission-axis permission-action"}}
+                        <div class="text-base-content/60 code-link ms-auto self-start">["{{value}}"]</div>
+                    </li>
+                    {{/each}}
+                </ul>
+            </div>
+
+            <div>
+                <h6 class="mb-2 font-bold">What it can reach</h6>
+                <div class="space-y-3">
+                    {{#each permissionGroupClusters}}
+                    <div data-cluster="{{label}}">
+                        <div class="text-base-content/60 text-xs uppercase tracking-wide mb-1">{{label}}</div>
+                        <ul class="divide-y divide-base-content/10 rounded-box border border-base-content/10">
+                            {{#each groups}}
+                            <li class="flex items-center gap-2 p-4" data-axis-row="group:{{value}}">
+                                {{> ui/checkbox id=inputId label=label checked=checked hint=description noName=true dataValue=value class="permission-axis permission-group"}}
+                                <div class="text-base-content/60 code-link ms-auto self-start">["{{value}}"]</div>
+                            </li>
+                            {{/each}}
+                        </ul>
+                    </div>
+                    {{/each}}
+                </div>
+
+                {{!-- Only rendered in MCP-only mode, where two thirds of the sections above would be
+                      inert: ticking "Webhook routes" for a token that can only reach /mcp changes
+                      nothing at all, so those rows are taken out rather than left as decisions with
+                      no effect. --}}
+                <div id="permissionMcpScopeNote" class="mt-3 text-base-content/60 text-sm hidden">Only the sections the
+                    MCP endpoint can reach are listed. The rest exist on the REST API, which a token scoped to MCP
+                    cannot call at all.</div>
+
+                {{!-- Rendered as a visibly refused option rather than omitted: leaving it out
+                      entirely reads as an oversight, and the reason is the point. --}}
+                <div class="mt-3 alert alert-soft alert-warning text-sm">
+                    <span class="icon-[tabler--lock] size-5 shrink-0"></span>
+                    <span>
+                        Some endpoints are never available to a restricted token, whatever you select here:
+                        creating access tokens, reading an account's live OAuth2 credential, and the settings
+                        that would let a token widen itself ({{privilegedSettingsSummary}}). A token that
+                        could reach those could grant itself more.
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        {{/ui/card}}
+    </div>
+
+    <div class="mb-6">
+        {{> ui/btn label="Create access token" type="submit" icon="icon-[tabler--key]"}}
     </div>
 </form>
 
-<div class="modal fade" id="showToken" data-backdrop="static" data-keyboard="false" tabindex="-1"
-    aria-labelledby="showTokenLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="showTokenLabel">Access tokens</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
-            </div>
-            <div class="modal-body">
-                <div id="showTokenLoader">
-
-                    <div class="progress">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
-                            aria-valuenow="100" aria-valuemin="0" aria-valuemax="100" style="width: 100%"></div>
-                    </div>
-
-                </div>
-                <div id="showTokenContent" class="d-none">
-
-                    <div>Access token:</div>
-                    <div>
-
-                        <div class="input-group">
-                            <input type="text" id="showTokenValue" class="form-control bg-light border-0 small"
-                                aria-label="Search" aria-describedby="basic-addon2" readonly>
-                            <div class="input-group-append">
-                                <button class="btn btn-primary copy-btn" type="button" data-clipboard-action="copy"
-                                    data-clipboard-target="#showTokenValue" title="Copy to clipboard"
-                                    data-toggle="tooltip" data-placement="top">
-                                    <i class="fas fa-copy fa-sm"></i>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-                <div id="showTokenError" class="d-none alert alert-danger" style="white-space: pre-line;"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-dismiss="modal">Done</button>
-            </div>
-        </div>
+{{!-- Wider than the default: the token is 64 characters and this is the only time it is shown, so
+      it has to be readable in full rather than scrolled through a 32-character window. --}}
+{{#> ui/modal id="showToken" title="Your access token" static=true dialogClass="max-w-2xl"}}
+<div class="modal-body">
+    <div id="showTokenLoader" class="py-2 text-center">
+        <span class="loading loading-spinner loading-sm align-middle"></span> Generating token&hellip;
     </div>
-</div>
+    <div id="showTokenContent" class="hidden">
 
-<script>
+        <div class="mb-2">Copy and store this token securely. It will only be shown once.</div>
+        {{!-- w-full because ui/copy-field's join wrapper is inline-flex, so the `grow` on the input
+              has nothing to grow inside and the field kept its intrinsic width. text-sm so all 64
+              characters fit: this is the only time the value is ever shown, and a token truncated at
+              32 characters cannot be checked against what was copied. --}}
+        {{> ui/copy-field id="showTokenValue" ariaLabel="Access token" join=true class="w-full" inputClass="font-mono text-sm bg-base-200 border-0 autoselect"}}
+
+    </div>
+    <div id="showTokenError" class="hidden alert alert-soft alert-error whitespace-pre-line"></div>
+</div>
+<div class="modal-footer">
+    {{> ui/btn label="Done" variant="neutral" style="soft" overlay="#showToken"}}
+</div>
+{{/ui/modal}}
+
+<script data-cfasync="false" nonce="{{cspNonce}}">
     document.addEventListener('DOMContentLoaded', () => {
 
         let showTokenValueElm = document.getElementById('showTokenValue');
 
-        showTokenValueElm.addEventListener('click', () => {
-            showTokenValueElm.focus();
-            showTokenValueElm.select();
-        })
+        // Read by the tool count as well as by the submit handler: binding a token to an account
+        // changes which MCP tools it is offered, so the field is an input to the editor and not
+        // only a payload field.
+        let accountElm = document.getElementById('account');
+
+        let accessCardElm = document.getElementById('accessCard');
+        let accessAppliesToElm = document.getElementById('accessAppliesTo');
+        let mcpLevelBlockElm = document.getElementById('mcpLevelBlock');
+        let apiLimitBlockElm = document.getElementById('apiLimitBlock');
+        let permissionsEnabledElm = document.getElementById('permissionsEnabled');
+        let permissionSectionElm = document.getElementById('permissionSection');
+        let permissionPresetRowElm = document.getElementById('permissionPresetRow');
+        let permissionOutcomeElm = document.getElementById('permissionOutcome');
+        let permissionOutcomeTextElm = document.getElementById('permissionOutcomeText');
+        let mcpToolCountElm = document.getElementById('mcpToolCount');
+        let permissionWarningElm = document.getElementById('permissionScopeWarning');
+        let permissionMcpNoteElm = document.getElementById('permissionMcpScopeNote');
+
+        // Everything this editor reasons about is handed over as data on one element: what each
+        // surface requires, what each MCP tool dispatches under, and what each named access level
+        // mints. All three are derived server-side from the tables that enforce them rather than
+        // restated here, so a change to the rules cannot leave the page describing the old ones.
+        let surfaceRequirements = {};
+        for (let entry of JSON.parse(accessCardElm.dataset.surfaces || '[]')) {
+            surfaceRequirements[entry.scope] = {
+                label: entry.label,
+                // 'all': checked once at login, every grant required. 'any': checked per
+                // request, usable while a single grant pair stays allowed.
+                mode: entry.mode,
+                actions: entry.actionList.split(',').filter(value => value),
+                groups: entry.groupList.split(',').filter(value => value),
+                grants: entry.grantList.split(',').filter(value => value).map(pair => pair.split(':'))
+            };
+        }
+
+        // The two MCP access sections and what each level mints, from the same table the consent
+        // prompt and the MCP config page mint from
+        let mcpSections = JSON.parse(accessCardElm.dataset.mcpSections || '{}');
+        let mcpCustomElm = document.getElementById('mcpCustom');
+
+        let mcpScopes = Object.values(mcpSections).map(section => section.scope);
+
+        let scopeElms = Array.from(document.querySelectorAll('.scope-entry'));
+        let selectedScopes = () => scopeElms.filter(elm => elm.checked && !elm.disabled).map(elm => elm.dataset.scope);
+        let selectedMcpScopes = () => selectedScopes().filter(scope => mcpScopes.includes(scope));
+
+        // What the ticked MCP scopes can reach at all: the union of their surface tables. Read per
+        // call because it follows the scopes - a token holding only the management scope has no
+        // business ticking Messages in the custom editor.
+        let mcpCeilingFor = scopes => {
+            let ceiling = { actions: [], groups: [] };
+            for (let scope of scopes) {
+                let need = surfaceRequirements[scope];
+                if (!need) {
+                    continue;
+                }
+                ceiling.actions = ceiling.actions.concat(need.actions.filter(value => !ceiling.actions.includes(value)));
+                ceiling.groups = ceiling.groups.concat(need.groups.filter(value => !ceiling.groups.includes(value)));
+            }
+            return ceiling;
+        };
+
+        // Permissions are resolved per endpoint on the REST API and per tool call on the MCP
+        // endpoint, so both of those scopes can carry a narrowing. The login-time scopes (SMTP,
+        // IMAP proxy, Metrics) are checked once against everything their surface can do, so for
+        // them any restriction either changes nothing or leaves the token unable to do the one
+        // thing it was issued for. Scopes are fixed once the token exists, so the card is absent
+        // rather than disabled when no per-request scope is ticked.
+        //
+        // "All scopes" only disables the individual boxes, it does not tick them, so the API row can
+        // be greyed while this is open. That reads correctly: API access is granted by "All", and
+        // this is how to narrow it.
+        let hasApiScope = () => selectedScopes().some(scope => ['*', 'api'].includes(scope));
+        let hasMcpScope = () => selectedScopes().some(scope => scope === '*' || mcpScopes.includes(scope));
+        let narrowableScope = () => hasApiScope() || hasMcpScope();
+
+        // The two editor modes. A token that reaches the MCP endpoint and not the REST API is a
+        // different thing from an API token - it is an agent connector, provisioned by picking a
+        // named level, the way the OAuth consent prompt and the MCP config page already do it. Any
+        // selection that includes API access falls back to the matrix instead, because one
+        // permissions record covers both surfaces and the API side needs all thirteen sections.
+        let mcpLevelMode = () => hasMcpScope() && !hasApiScope();
+
+        // The level per section, read through the shared helper: a section whose scope is not
+        // ticked has no radio group on screen and so comes back declined - the scope checkbox is
+        // this form's way of switching a section off
+        let selectedMcpLevels = () => {
+            let ticked = selectedMcpScopes();
+            let choice = uiMcpLevelChoice(mcpSections, 'mcpLevel_');
+            for (let key of Object.keys(mcpSections)) {
+                if (!ticked.includes(mcpSections[key].scope)) {
+                    choice[key] = 'none';
+                }
+            }
+            return choice;
+        };
+
+        // Sections the MCP surface can never reach are disabled while the level editor is showing,
+        // so every read of the axes skips them. Ticking "Webhook routes" for a token that can only
+        // call MCP tools grants nothing, and a control with no effect is worse than an absent one.
+        let axisElms = selector => Array.from(document.querySelectorAll(selector)).filter(elm => !elm.disabled);
+        let tickedValues = selector => axisElms(selector).filter(elm => elm.checked).map(elm => elm.dataset.value);
+
+        let labelFor = elm => document.querySelector('label[for="' + elm.id + '"]').textContent.trim();
+
+        // Slug to label, read off the rendered rows so the sentence below cannot name an axis by a
+        // second, hand-written label. Built once: it does not depend on what is ticked.
+        let axisLabels = { action: {}, group: {} };
+        for (let elm of document.querySelectorAll('.permission-axis')) {
+            axisLabels[elm.classList.contains('permission-action') ? 'action' : 'group'][elm.dataset.value] = labelFor(elm);
+        }
+        let allActions = Object.keys(axisLabels.action);
+        let labelsFor = (axis, values) => values.map(value => axisLabels[axis][value] || value);
+
+        let asList = values => (values.length > 1 ? values.slice(0, -1).join(', ') + ' and ' + values[values.length - 1] : values[0] || '');
+
+        // The one record the whole page reads: the outcome sentence, the scope warning, the tool
+        // count and the submit payload all resolve it rather than each reading the DOM their own
+        // way. A named MCP level answers from the access table itself, not from the axes it would
+        // tick, so a level mints here exactly what it mints on the consent prompt.
+        //
+        // `unrestricted` is the absence of a permissions record, which is a different answer from
+        // an empty one: it means the scopes are the only bound.
+        let effectiveRecord = () => {
+            if (mcpLevelMode()) {
+                if (!mcpCustomElm.checked) {
+                    // The pair list the selected levels mint, through the shared helper, so a level
+                    // mints here exactly what it mints on the consent prompt
+                    return uiMcpLevelRecord(mcpSections, selectedMcpLevels());
+                }
+            } else if (!permissionsEnabledElm.checked) {
+                return { actions: allActions, groups: Object.keys(axisLabels.group), unrestricted: true };
+            }
+
+            return {
+                actions: tickedValues('.permission-action'),
+                groups: tickedValues('.permission-group'),
+                // The scope bound applies to a custom record too: the count must not promise a
+                // management tool to a token that only holds the mail scope
+                surfaces: mcpLevelMode() ? selectedMcpScopes() : undefined,
+                unrestricted: false
+            };
+        };
+
+        // Applies a permission record to the axes. Shared by the API presets and by the switch into
+        // "Custom permissions", so the boxes a preset shows are the boxes that preset mints.
+        let applyRecord = (actions, groups) => {
+            for (let elm of document.querySelectorAll('.permission-action')) {
+                elm.checked = actions.includes(elm.dataset.value);
+            }
+            for (let elm of document.querySelectorAll('.permission-group')) {
+                elm.checked = groups.includes(elm.dataset.value);
+            }
+        };
+
+        let syncAxisAvailability = () => {
+            let restrictToMcp = mcpLevelMode();
+            let ceiling = mcpCeilingFor(selectedMcpScopes());
+
+            for (let elm of document.querySelectorAll('.permission-axis')) {
+                let axis = elm.classList.contains('permission-action') ? 'actions' : 'groups';
+                let reachable = !restrictToMcp || ceiling[axis].includes(elm.dataset.value);
+
+                // Disabled rather than unticked: flipping the scopes back has to restore the
+                // selection rather than quietly lose it, and a disabled box is skipped by every
+                // read, so an out-of-reach section cannot ride into the posted record.
+                elm.disabled = !reachable;
+                let row = elm.closest('[data-axis-row]');
+                if (row) {
+                    row.classList.toggle('hidden', !reachable);
+                }
+            }
+
+            // A cluster whose every section is out of reach is a heading over nothing
+            for (let cluster of document.querySelectorAll('[data-cluster]')) {
+                let visible = Array.from(cluster.querySelectorAll('[data-axis-row]')).some(row => !row.classList.contains('hidden'));
+                cluster.classList.toggle('hidden', !visible);
+            }
+
+            permissionMcpNoteElm.classList.toggle('hidden', !restrictToMcp);
+        };
+
+        // What the current selection produces, in words. Without it a reader has to cross four boxes
+        // with thirteen to work out what they just built - and the half that reassures, what the
+        // token CANNOT do, is not visible anywhere at all.
+        let syncPermissionOutcome = () => {
+            let visible = narrowableScope() && (mcpLevelMode() || permissionsEnabledElm.checked);
+
+            permissionOutcomeTextElm.replaceChildren();
+            permissionOutcomeElm.classList.toggle('hidden', !visible);
+            if (!visible) {
+                window.uiMcpToolCount(mcpToolCountElm, null);
+                return;
+            }
+
+            let record = effectiveRecord();
+
+            // The same count the MCP config generator and the consent prompt show, painted by the
+            // shared helper rather than restated here - it owns both filters, the permission record
+            // and the account binding. Null when the token does not carry the surface at all, so a
+            // stale count cannot survive a scope change.
+            window.uiMcpToolCount(mcpToolCountElm, hasMcpScope() ? Object.assign({ account: accountElm.value }, record) : null);
+
+            let rest = document.createElement('div');
+            rest.className = 'text-base-content/60';
+            rest.textContent = 'It cannot reach anything else, create tokens or read stored credentials.';
+
+            if (record.grants) {
+                // A level per section, each read out in the words of the table it came from
+                if (!record.grants.length) {
+                    let line = document.createElement('div');
+                    line.className = 'text-warning';
+                    line.textContent = 'No access level is selected, so this token would not be able to do anything.';
+                    permissionOutcomeTextElm.append(line);
+                    return;
+                }
+                let levels = selectedMcpLevels();
+                for (let key of Object.keys(mcpSections)) {
+                    let level = mcpSections[key].levels.find(entry => entry.value === levels[key]);
+                    if (!level) {
+                        continue;
+                    }
+                    let line = document.createElement('div');
+                    let label = document.createElement('strong');
+                    label.textContent = mcpSections[key].label + ' (' + level.label + '): ';
+                    line.append(label, document.createTextNode('can ' + level.actions + ' across ' + level.groups + '.'));
+                    permissionOutcomeTextElm.append(line);
+                }
+                permissionOutcomeTextElm.append(rest);
+                return;
+            }
+
+            if (!record.unrestricted && (!record.actions.length || !record.groups.length)) {
+                let line = document.createElement('div');
+                line.className = 'text-warning';
+                line.textContent = 'Nothing is selected yet, so this token would not be able to do anything.';
+                permissionOutcomeTextElm.append(line);
+                return;
+            }
+
+            let can = document.createElement('div');
+            let canLabel = document.createElement('strong');
+            canLabel.textContent = 'This token can ';
+            can.append(
+                canLabel,
+                document.createTextNode(asList(labelsFor('action', record.actions)).toLowerCase() + ' in ' + asList(labelsFor('group', record.groups)) + '.')
+            );
+            permissionOutcomeTextElm.append(can);
+
+            let deniedActions = allActions.filter(value => !record.actions.includes(value));
+            if (deniedActions.length) {
+                let cannot = document.createElement('div');
+                cannot.className = 'text-base-content/60';
+                cannot.textContent = 'It cannot ' + asList(labelsFor('action', deniedActions)).toLowerCase() + ', anywhere.';
+                permissionOutcomeTextElm.append(cannot);
+            }
+
+            permissionOutcomeTextElm.append(rest);
+        };
+
+        let syncPermissionWarning = () => {
+            let record = effectiveRecord();
+
+            if (record.unrestricted || !narrowableScope()) {
+                permissionWarningElm.classList.add('hidden');
+                return;
+            }
+
+            let scopes = selectedScopes();
+
+            // "All scopes" carries every surface with it
+            if (scopes.includes('*')) {
+                scopes = Object.keys(surfaceRequirements);
+            }
+
+            let covers = ([action, group]) => uiMcpRecordAllows(record, action, group);
+
+            let blocked = scopes
+                .filter(scope => surfaceRequirements[scope])
+                .filter(scope => {
+                    let need = surfaceRequirements[scope];
+                    if (need.mode === 'any') {
+                        // Per-request surface: usable while any one (action, group) pair survives
+                        return !need.grants.some(covers);
+                    }
+                    // Login-time surface: every pair it exercises has to survive
+                    return !need.grants.every(covers);
+                })
+                .map(scope => surfaceRequirements[scope].label);
+
+            if (!blocked.length) {
+                permissionWarningElm.classList.add('hidden');
+                return;
+            }
+
+            permissionWarningElm.textContent =
+                'These permissions stop the token doing something its scopes allow: it will not be able to ' +
+                blocked.join(', or ') +
+                '. Untick that scope, or allow what it needs.';
+            permissionWarningElm.classList.remove('hidden');
+        };
+
+        // Names the scopes this editor actually affects. The old nesting asserted that relationship
+        // with an indent under the API checkbox, which stopped being true the moment a second scope
+        // carried a narrowing - and read as a lie whenever that checkbox was unticked.
+        let syncAccessHeader = () => {
+            let surfaces = [];
+            if (hasApiScope()) {
+                surfaces.push('REST API requests');
+            }
+            if (hasMcpScope()) {
+                surfaces.push('MCP tool calls');
+            }
+
+            accessAppliesToElm.textContent =
+                surfaces.length > 1
+                    ? 'Applies to ' + surfaces.join(' and ') + '. One set of limits covers both surfaces.'
+                    : 'Applies to ' + surfaces[0] + '.';
+        };
+
+        let syncAccessCard = () => {
+            let visible = narrowableScope();
+
+            accessCardElm.classList.toggle('hidden', !visible);
+            if (!visible) {
+                return;
+            }
+
+            let levelMode = mcpLevelMode();
+
+            syncAccessHeader();
+            mcpLevelBlockElm.classList.toggle('hidden', !levelMode);
+            apiLimitBlockElm.classList.toggle('hidden', levelMode);
+            syncAxisAvailability();
+
+            // A section is shown while its scope is ticked: the scope checkbox is how this form
+            // declines a section, so an unticked scope must not leave a level on screen
+            let ticked = selectedMcpScopes();
+            for (let block of document.querySelectorAll('.mcp-section-block')) {
+                block.classList.toggle('hidden', !ticked.includes(block.dataset.mcpScope));
+            }
+
+            // The matrix is the detail view behind either mode: the "Custom permissions" opt-in on
+            // one side, the restriction toggle on the other. The API presets are shapes for the
+            // REST API, so they stay out of the way in level mode, where the named levels above
+            // are the presets.
+            permissionSectionElm.classList.toggle('hidden', levelMode ? !mcpCustomElm.checked : !permissionsEnabledElm.checked);
+            permissionPresetRowElm.classList.toggle('hidden', levelMode);
+        };
+
+        // Only rendered when the endpoint is off, and only shown once the box that needs it is
+        // ticked - the default selection carries the mcp scope with everything else, and warning
+        // about a disabled endpoint on a page nobody opened for MCP is noise.
+        let mcpDisabledHintElm = document.getElementById('mcpDisabledHint');
+        let scopesMcpElms = [document.getElementById('scopesMcpManage'), document.getElementById('scopesMcp')];
+
+        let syncAll = () => {
+            syncAccessCard();
+            syncPermissionWarning();
+            syncPermissionOutcome();
+
+            if (mcpDisabledHintElm) {
+                mcpDisabledHintElm.classList.toggle('hidden', !scopesMcpElms.some(elm => elm.checked && !elm.disabled));
+            }
+        };
+
+        permissionsEnabledElm.addEventListener('change', () => {
+            // Enabling with nothing ticked would post two empty allowlists, which grant nothing. Start
+            // from everything selected so the first state is "no narrowing yet" and each untick is a
+            // deliberate subtraction.
+            if (permissionsEnabledElm.checked && !document.querySelector('.permission-axis:checked')) {
+                for (let elm of document.querySelectorAll('.permission-axis')) {
+                    elm.checked = true;
+                }
+            }
+            syncAll();
+        });
+
+        // Custom starts from the levels selected above, which is what its hint promises: the axes
+        // are seeded from the pairs those levels mint, which is the two-axis record closest to them
+        mcpCustomElm.addEventListener('change', () => {
+            if (mcpCustomElm.checked) {
+                let record = uiMcpLevelRecord(mcpSections, selectedMcpLevels());
+                let actions = [];
+                let groups = [];
+                for (let grant of record.grants) {
+                    if (!actions.includes(grant.action)) {
+                        actions.push(grant.action);
+                    }
+                    if (!groups.includes(grant.group)) {
+                        groups.push(grant.group);
+                    }
+                }
+                applyRecord(actions, groups);
+            }
+            syncAll();
+        });
+
+        for (let elm of document.querySelectorAll('input[name^="mcpLevel_"]')) {
+            elm.addEventListener('change', syncAll);
+        }
+
+        for (let elm of document.querySelectorAll('.permission-axis, .scope-entry')) {
+            elm.addEventListener('change', syncAll);
+        }
+
+        // Per keystroke, because what the binding costs an agent should be visible while the field
+        // is being filled in rather than only after it loses focus
+        accountElm.addEventListener('input', syncAll);
+
+        for (let button of document.querySelectorAll('.permission-preset')) {
+            button.addEventListener('click', () => {
+                applyRecord((button.dataset.actions || '').split(',').filter(value => value), (button.dataset.groups || '').split(',').filter(value => value));
+                syncAll();
+            });
+        }
+
+        syncAll();
 
         document.getElementById('token-form').addEventListener('submit', e => {
             e.preventDefault()
 
-            let crumb = document.getElementById('crumb').value;
             let description = document.getElementById('description').value.trim();
             document.getElementById('description').value = description
 
+            // Trimmed so the redirect below filters the listing on the same value that was posted
+            let account = accountElm.value.trim();
+            accountElm.value = account
+
             let scopes = [];
-            let scopeElms = document.querySelectorAll('.scope-entry');
             for (let elm of scopeElms) {
                 if (elm.checked && !elm.disabled) {
                     scopes.push(elm.dataset.scope);
@@ -175,56 +765,84 @@
 
             let wasShown = false;
 
-            $('#showToken').on('hidden.bs.modal', function (event) {
-                document.getElementById('showTokenLoader').classList.remove('d-none');
-                document.getElementById('showTokenContent').classList.add('d-none');
-                document.getElementById('showTokenError').classList.add('d-none');
+            document.getElementById('showToken').addEventListener('close.overlay', () => {
+                document.getElementById('showTokenLoader').classList.remove('hidden');
+                document.getElementById('showTokenContent').classList.add('hidden');
+                document.getElementById('showTokenError').classList.add('hidden');
                 showTokenValueElm.value = '';
 
                 if (wasShown) {
-                    let account = document.getElementById('account').value || '';
                     location.assign("/admin/tokens" + (account ? '?account=' + encodeURIComponent(account) : ''));
                 }
-            });
+            }, { once: true });
 
-            document.getElementById('showTokenLoader').classList.remove('d-none');
-            document.getElementById('showTokenContent').classList.add('d-none');
-            document.getElementById('showTokenError').classList.add('d-none');
-            $('#showToken').modal('show');
+            document.getElementById('showTokenLoader').classList.remove('hidden');
+            document.getElementById('showTokenContent').classList.add('hidden');
+            document.getElementById('showTokenError').classList.add('hidden');
+            uiModal.open('#showToken');
 
-            fetch('/admin/tokens/new', {
-                method: 'post',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                    crumb: document.getElementById('crumb').value,
-                    description,
-                    scopes,
-                    account: document.getElementById('account').value || ''
-                })
-            }).then(res => {
-                if (!res.ok) {
-                    throw new Error(`HTTP error! status: ${res.status}`);
-                }
-                return res.json()
+            // Omitting the field is what "not narrowed" means on the record, so an unchecked toggle
+            // must not post an empty object. That is a different answer, and the API refuses it. An
+            // MCP token minted by level always carries its pair list explicitly, so what the operator
+            // saw is exactly what the credential holds.
+            let record = effectiveRecord();
+            let permissions = record.unrestricted ? null : record.grants ? { grants: record.grants } : { actions: record.actions, groups: record.groups };
+
+            let refuse = message => {
+                document.getElementById('showTokenLoader').classList.add('hidden');
+                document.getElementById('showTokenContent').classList.add('hidden');
+                document.getElementById('showTokenError').classList.remove('hidden');
+                document.getElementById('showTokenError').textContent = message;
+                uiModal.open('#showToken');
+            };
+
+            // The section table failed to load, so the levels on screen cannot be resolved to the
+            // record they promise. Refused rather than posted, as the MCP config page's generator
+            // refuses: what would go out is a record that grants nothing, which the API refuses
+            // too, but with an answer that names the wrong cause.
+            if (mcpLevelMode() && !mcpCustomElm.checked && !Object.keys(mcpSections).length) {
+                refuse('The access levels failed to load, so the selected level cannot be applied. Reload the page and try again.');
+                return;
+            }
+
+            // Said here rather than left to the schema. tokenPermissionsSchema refuses an empty axis
+            // too, but a joi rejection reaches this page as a bare "HTTP error! status: 400", which
+            // tells the reader nothing about the box they left unticked.
+            if (permissions && permissions.grants && !permissions.grants.length) {
+                refuse('Select an access level for at least one MCP scope. A token that grants nothing cannot make any request.');
+                return;
+            }
+            if (permissions && permissions.actions && (!permissions.actions.length || !permissions.groups.length)) {
+                let missing = !permissions.actions.length ? 'action' : 'section';
+                refuse(`Select at least one ${missing}. A restriction that allows nothing would create a token that cannot make any request.`);
+                return;
+            }
+
+            uiPostJson('/admin/tokens/new', {
+                description,
+                scopes,
+                permissions,
+                account
             }).then(data => {
 
                 if (!data.success) {
                     throw new Error(`${data.error}\n${data.message}`);
                 }
 
-                document.getElementById('showTokenLoader').classList.add('d-none');
-                document.getElementById('showTokenContent').classList.remove('d-none');
-                document.getElementById('showTokenError').classList.add('d-none');
+                document.getElementById('showTokenLoader').classList.add('hidden');
+                document.getElementById('showTokenContent').classList.remove('hidden');
+                document.getElementById('showTokenError').classList.add('hidden');
                 showTokenValueElm.value = data.token;
 
                 wasShown = true
             }).catch(err => {
-                document.getElementById('showTokenLoader').classList.add('d-none');
-                document.getElementById('showTokenContent').classList.add('d-none');
-                document.getElementById('showTokenError').classList.remove('d-none');
+                document.getElementById('showTokenLoader').classList.add('hidden');
+                document.getElementById('showTokenContent').classList.add('hidden');
+                document.getElementById('showTokenError').classList.remove('hidden');
 
                 document.getElementById('showTokenError').textContent = err.message;
             });
         });
     })
 </script>
+{{/unless}}

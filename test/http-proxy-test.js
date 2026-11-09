@@ -4,6 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert').strict;
 const http = require('node:http');
 const net = require('node:net');
+const path = require('node:path');
+const { Worker } = require('node:worker_threads');
+const exitWhenStandalone = require('./helpers/exit-standalone');
 
 // --- Mock setup: must happen before any production imports ---
 
@@ -13,6 +16,7 @@ function createMockRedis() {
     return {
         status: 'ready',
         hget: async (key, field) => (mockRedisData[key] && mockRedisData[key][field]) || null,
+        hmget: async (key, fields) => fields.map(field => (mockRedisData[key] && mockRedisData[key][field]) || null),
         hset: async (key, field, value) => {
             if (!mockRedisData[key]) mockRedisData[key] = {};
             mockRedisData[key][field] = value;
@@ -27,28 +31,28 @@ function createMockRedis() {
         },
         multi: () => ({
             exec: async () => [],
-            hmset: function () {
+            hmset() {
                 return this;
             },
-            hset: function () {
+            hset() {
                 return this;
             },
-            hdel: function () {
+            hdel() {
                 return this;
             },
-            del: function () {
+            del() {
                 return this;
             },
-            expire: function () {
+            expire() {
                 return this;
             },
-            srem: function () {
+            srem() {
                 return this;
             },
-            zadd: function () {
+            zadd() {
                 return this;
             },
-            hincrby: function () {
+            hincrby() {
                 return this;
             }
         }),
@@ -62,11 +66,11 @@ function createMockRedis() {
         scan: async () => ['0', []],
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         defineCommand: () => {},
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -93,9 +97,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -113,7 +115,9 @@ require.cache[getSecretPath] = {
 };
 
 // Now safe to import production modules
-const { httpAgent, reloadHttpProxyAgent, createSocksAgent } = require('../lib/tools');
+const { httpAgent, reloadHttpProxyAgent, maybeReloadHttpProxyAgent, resolveHttpProxy, createSocksAgent } = require('../lib/tools');
+const { makeTransport: makeSentryTransport } = require('../lib/sentry');
+const { startCapturingServer, stopServer } = require('./helpers/capture-http-server');
 const { REDIS_PREFIX } = require('../lib/consts');
 
 // Helper: set mock setting value (JSON-stringified, no encryption)
@@ -147,44 +151,50 @@ async function startTargetServer() {
     };
 }
 
-// Helper: create an HTTP CONNECT proxy server
-async function startProxyServer() {
+// Helper: create a minimal SOCKS5 server (no authentication, CONNECT only) so the SOCKS path of the
+// proxy agent is exercised end to end rather than duck-typed
+async function startSocksServer() {
     let connectCount = 0;
-    let httpCount = 0;
+    const sockets = new Set();
 
-    const server = http.createServer((req, res) => {
-        // Handle plain HTTP requests (non-CONNECT)
-        httpCount++;
-        const targetUrl = new URL(req.url);
-        const proxyReq = http.request(
-            {
-                hostname: targetUrl.hostname,
-                port: targetUrl.port,
-                path: targetUrl.pathname + targetUrl.search,
-                method: req.method,
-                headers: req.headers
-            },
-            proxyRes => {
-                res.writeHead(proxyRes.statusCode, proxyRes.headers);
-                proxyRes.pipe(res);
-            }
-        );
-        req.pipe(proxyReq);
-    });
+    const server = net.createServer(client => {
+        sockets.add(client);
+        client.on('close', () => sockets.delete(client));
+        client.on('error', () => client.destroy());
 
-    server.on('connect', (req, clientSocket, head) => {
-        connectCount++;
-        const [hostname, port] = req.url.split(':');
-        const targetSocket = net.connect(Number(port), hostname, () => {
-            clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-            if (head.length) {
-                targetSocket.write(head);
-            }
-            targetSocket.pipe(clientSocket);
-            clientSocket.pipe(targetSocket);
+        // greeting: VER NMETHODS METHODS -> VER METHOD(no auth)
+        client.once('data', () => {
+            client.write(Buffer.from([0x05, 0x00]));
+
+            // request: VER CMD RSV ATYP DST.ADDR DST.PORT
+            client.once('data', req => {
+                let host;
+                let offset;
+                if (req[3] === 0x01) {
+                    host = Array.from(req.subarray(4, 8)).join('.');
+                    offset = 8;
+                } else if (req[3] === 0x03) {
+                    let len = req[4];
+                    host = req.subarray(5, 5 + len).toString();
+                    offset = 5 + len;
+                } else {
+                    client.end(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                    return;
+                }
+                let port = req.readUInt16BE(offset);
+                connectCount++;
+
+                const upstream = net.connect(port, host, () => {
+                    sockets.add(upstream);
+                    client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                    upstream.pipe(client);
+                    client.pipe(upstream);
+                });
+                upstream.on('close', () => sockets.delete(upstream));
+                upstream.on('error', () => client.destroy());
+                client.on('close', () => upstream.destroy());
+            });
         });
-        targetSocket.on('error', () => clientSocket.destroy());
-        clientSocket.on('error', () => targetSocket.destroy());
     });
 
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -193,21 +203,25 @@ async function startProxyServer() {
     return {
         server,
         port,
-        url: `http://127.0.0.1:${port}`,
+        url: `socks5://127.0.0.1:${port}`,
         getConnectCount: () => connectCount,
-        getHttpCount: () => httpCount
+        async stop() {
+            for (let socket of sockets) {
+                socket.destroy();
+            }
+            await new Promise(resolve => server.close(resolve));
+        }
     };
 }
 
-async function stopServer(server) {
-    await new Promise(resolve => server.close(resolve));
-}
+// An HTTP proxy that handles both CONNECT tunnels and plain absolute-URI requests
+const { startProxyServer } = require('./helpers/http-proxy-server');
 
 const { fetch: fetchCmd } = require('undici');
 
 test('HTTP proxy agent management', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     t.beforeEach(() => {
@@ -215,6 +229,278 @@ test('HTTP proxy agent management', async t => {
         // Clean up env vars
         delete process.env.EENGINE_HTTP_PROXY_ENABLED;
         delete process.env.EENGINE_HTTP_PROXY_URL;
+    });
+
+    await t.test('resolveHttpProxy - dedicated HTTP proxy, then the global proxy, then direct', () => {
+        // the environment reader is injected so these cases never touch process.env
+        const withEnv = vars => key => vars[key];
+        const env = withEnv({});
+        const global = { proxyEnabled: true, proxyUrl: 'socks5://global.example.com:1080' };
+        const dedicated = { httpProxyEnabled: true, httpProxyUrl: 'http://http.example.com:3128' };
+
+        assert.strictEqual(resolveHttpProxy({}, env), null);
+        assert.strictEqual(resolveHttpProxy(undefined, env), null);
+        assert.strictEqual(resolveHttpProxy({ proxyUrl: global.proxyUrl }, env), null, 'a URL without the enable flag is ignored');
+        assert.strictEqual(resolveHttpProxy({ proxyEnabled: true, proxyUrl: '' }, env), null, 'an enable flag without a URL is ignored');
+
+        assert.deepStrictEqual(resolveHttpProxy(global, env), { url: global.proxyUrl, source: 'proxyUrl' }, 'the global proxy covers HTTP');
+        assert.deepStrictEqual(resolveHttpProxy(Object.assign({}, global, dedicated), env), { url: dedicated.httpProxyUrl, source: 'httpProxyUrl' });
+        assert.deepStrictEqual(
+            resolveHttpProxy(Object.assign({}, global, dedicated, { httpProxyUrl: '' }), env),
+            { url: global.proxyUrl, source: 'proxyUrl' },
+            'an enabled HTTP proxy without a URL falls back to the global proxy'
+        );
+        assert.deepStrictEqual(
+            resolveHttpProxy(Object.assign({}, global, dedicated, { httpProxyEnabled: false }), env),
+            { url: global.proxyUrl, source: 'proxyUrl' },
+            'a disabled HTTP proxy falls back to the global proxy'
+        );
+
+        // environment overrides
+        assert.deepStrictEqual(
+            resolveHttpProxy(global, withEnv({ EENGINE_HTTP_PROXY_ENABLED: 'true', EENGINE_HTTP_PROXY_URL: 'http://env.example.com:3128' })),
+            { url: 'http://env.example.com:3128', source: 'httpProxyUrl' }
+        );
+        assert.deepStrictEqual(
+            resolveHttpProxy(dedicated, withEnv({ EENGINE_HTTP_PROXY_URL: 'http://env.example.com:3128' })),
+            { url: 'http://env.example.com:3128', source: 'httpProxyUrl' },
+            'the env URL replaces the stored one'
+        );
+        assert.deepStrictEqual(
+            resolveHttpProxy(global, withEnv({ EENGINE_HTTP_PROXY_ENABLED: 'yes' })),
+            { url: global.proxyUrl, source: 'proxyUrl' },
+            'enabled in the environment with no URL anywhere still falls back to the global proxy'
+        );
+        assert.strictEqual(
+            resolveHttpProxy(Object.assign({}, global, dedicated), withEnv({ EENGINE_HTTP_PROXY_ENABLED: 'false' })),
+            null,
+            'an explicit false in the environment turns HTTP proxying off, global proxy included'
+        );
+    });
+
+    await t.test('Global proxy covers HTTP - requests go through the IMAP/SMTP proxy when no HTTP proxy is set', async () => {
+        const target = await startTargetServer();
+        const proxy = await startProxyServer();
+        try {
+            setMockSetting('proxyEnabled', true);
+            setMockSetting('proxyUrl', proxy.url);
+            setMockSetting('httpProxyEnabled', false);
+            setMockSetting('httpProxyUrl', '');
+            await reloadHttpProxyAgent();
+
+            const res = await fetchCmd(`${target.baseUrl}/global`, { dispatcher: httpAgent.retry });
+            assert.ok(res.ok);
+            await res.text();
+
+            assert.strictEqual(proxy.getConnectCount(), 1, 'the request should have been tunnelled through the global proxy');
+            assert.strictEqual(target.getCount(), 1);
+            assert.strictEqual(httpAgent.webhook, httpAgent.fetch, 'behind the global proxy the webhook dispatcher shares the general one too');
+        } finally {
+            await stopServer(target.server);
+            await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('Dedicated HTTP proxy wins over the global proxy', async () => {
+        const target = await startTargetServer();
+        const globalProxy = await startProxyServer();
+        const httpProxy = await startProxyServer();
+        try {
+            setMockSetting('proxyEnabled', true);
+            setMockSetting('proxyUrl', globalProxy.url);
+            setMockSetting('httpProxyEnabled', true);
+            setMockSetting('httpProxyUrl', httpProxy.url);
+            await reloadHttpProxyAgent();
+
+            const res = await fetchCmd(`${target.baseUrl}/dedicated`, { dispatcher: httpAgent.retry });
+            assert.ok(res.ok);
+            await res.text();
+
+            assert.strictEqual(httpProxy.getConnectCount(), 1, 'the dedicated HTTP proxy should carry the request');
+            assert.strictEqual(globalProxy.getConnectCount(), 0, 'the global proxy should not see HTTP traffic');
+        } finally {
+            await stopServer(target.server);
+            await stopServer(globalProxy.server);
+            await stopServer(httpProxy.server);
+        }
+    });
+
+    await t.test('Global proxy URL without the enable flag - requests stay direct', async () => {
+        const target = await startTargetServer();
+        const proxy = await startProxyServer();
+        try {
+            setMockSetting('proxyEnabled', false);
+            setMockSetting('proxyUrl', proxy.url);
+            await reloadHttpProxyAgent();
+
+            const res = await fetchCmd(`${target.baseUrl}/direct`, { dispatcher: httpAgent.retry });
+            assert.ok(res.ok);
+            await res.text();
+
+            assert.strictEqual(proxy.getConnectCount(), 0);
+            assert.strictEqual(target.getCount(), 1);
+        } finally {
+            await stopServer(target.server);
+            await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('SOCKS5 global proxy - requests are tunnelled through it', async () => {
+        const target = await startTargetServer();
+        const socks = await startSocksServer();
+        try {
+            setMockSetting('proxyEnabled', true);
+            setMockSetting('proxyUrl', socks.url);
+            await reloadHttpProxyAgent();
+
+            const res = await fetchCmd(`${target.baseUrl}/socks`, { dispatcher: httpAgent.retry });
+            assert.ok(res.ok);
+            const body = await res.json();
+            assert.strictEqual(body.ok, true);
+
+            assert.strictEqual(socks.getConnectCount(), 1, 'the SOCKS server should have opened the tunnel');
+            assert.strictEqual(target.getCount(), 1);
+        } finally {
+            await stopServer(target.server);
+            await socks.stop();
+        }
+    });
+
+    await t.test('maybeReloadHttpProxyAgent - re-reads the settings for proxy keys only', async () => {
+        setMockSetting('proxyEnabled', false);
+        await reloadHttpProxyAgent();
+
+        let before = httpAgent.fetch;
+        assert.strictEqual(await maybeReloadHttpProxyAgent({ webhooks: 'https://example.com/hook' }), false);
+        assert.strictEqual(await maybeReloadHttpProxyAgent(null), false);
+        assert.strictEqual(httpAgent.fetch, before, 'an unrelated settings change should not touch the agent');
+
+        // the broadcast carries the saved keys, the values come from the settings store
+        setMockSetting('proxyEnabled', true);
+        setMockSetting('proxyUrl', 'http://proxy.example.com:3128');
+        await maybeReloadHttpProxyAgent({ webhooks: 'https://example.com/hook' });
+        assert.strictEqual(httpAgent.fetch, before, 'a broadcast without a proxy key should not re-read the settings');
+
+        let enabled = true;
+        for (let key of ['proxyEnabled', 'proxyUrl', 'httpProxyEnabled', 'httpProxyUrl']) {
+            setMockSetting('proxyEnabled', enabled);
+            before = httpAgent.fetch;
+            await maybeReloadHttpProxyAgent({ [key]: 'changed' });
+            assert.notStrictEqual(httpAgent.fetch, before, `a ${key} change should apply the stored settings`);
+            assert.strictEqual(httpAgent.proxyUrl, enabled ? 'http://proxy.example.com:3128' : null);
+            enabled = !enabled;
+        }
+    });
+
+    await t.test('Unchanged proxy settings - a reload keeps the warm agents', async () => {
+        setMockSetting('proxyEnabled', true);
+        setMockSetting('proxyUrl', 'http://proxy.example.com:3128');
+        await reloadHttpProxyAgent();
+
+        const { fetch, retry, webhook } = httpAgent;
+        assert.strictEqual(httpAgent.proxyUrl, 'http://proxy.example.com:3128');
+
+        // the network form posts every proxy key on every save, changed or not
+        await reloadHttpProxyAgent();
+        await maybeReloadHttpProxyAgent({ proxyEnabled: true, proxyUrl: 'http://proxy.example.com:3128', smtpEhloName: 'mail.example.com' });
+
+        assert.strictEqual(httpAgent.fetch, fetch, 'the fetch agent should be kept');
+        assert.strictEqual(httpAgent.retry, retry, 'the retry agent should be kept');
+        assert.strictEqual(httpAgent.webhook, webhook, 'the webhook dispatcher should be kept');
+    });
+
+    await t.test('Worker boot - dispatchers are built from workerData before any worker code runs', async () => {
+        const target = await startTargetServer();
+        const proxy = await startProxyServer();
+        const worker = new Worker(path.join(__dirname, 'helpers', 'http-proxy-worker.js'), {
+            workerData: { httpProxyUrl: proxy.url, targetUrl: `${target.baseUrl}/worker-boot` }
+        });
+        try {
+            const report = await new Promise((resolve, reject) => {
+                worker.once('message', resolve);
+                worker.once('error', reject);
+                worker.once('exit', code => reject(new Error(`worker exited with code ${code} before reporting`)));
+            });
+
+            assert.strictEqual(report.proxyUrl, proxy.url, 'the worker should know which proxy its dispatchers were built for');
+            assert.strictEqual(report.ok, true, report.error);
+            assert.strictEqual(proxy.getConnectCount(), 1, 'the first request of the worker should already go through the proxy');
+            assert.strictEqual(target.getCount(), 1);
+        } finally {
+            await worker.terminate();
+            await stopServer(target.server);
+            await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('Live dispatcher - forwards to the current agent across reloads', async () => {
+        const target = await startTargetServer();
+        const proxy = await startProxyServer();
+        try {
+            const live = httpAgent.live;
+
+            setMockSetting('proxyEnabled', false);
+            await reloadHttpProxyAgent();
+
+            let res = await fetchCmd(`${target.baseUrl}/live-direct`, { dispatcher: live });
+            assert.ok(res.ok);
+            await res.text();
+            assert.strictEqual(proxy.getConnectCount(), 0);
+
+            setMockSetting('proxyEnabled', true);
+            setMockSetting('proxyUrl', proxy.url);
+            await reloadHttpProxyAgent();
+
+            res = await fetchCmd(`${target.baseUrl}/live-proxied`, { dispatcher: live });
+            assert.ok(res.ok);
+            await res.text();
+            assert.strictEqual(proxy.getConnectCount(), 1, 'the same dispatcher object should now go through the proxy');
+
+            assert.strictEqual(httpAgent.live, live, 'the live dispatcher is never replaced');
+            assert.strictEqual(target.getCount(), 2);
+        } finally {
+            await stopServer(target.server);
+            await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('Sentry transport - error reports go through the proxy', async () => {
+        const target = await startCapturingServer(res => {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Sentry-Rate-Limits': '60:error:organization' });
+            res.end('{}');
+        });
+        const proxy = await startProxyServer();
+        try {
+            setMockSetting('proxyEnabled', true);
+            setMockSetting('proxyUrl', proxy.url);
+            await reloadHttpProxyAgent();
+
+            const transport = makeSentryTransport({
+                url: `${target.baseUrl}/api/1/envelope/`,
+                headers: { 'X-Sentry-Auth': 'Sentry sentry_key=test' },
+                recordDroppedEvent() {}
+            });
+
+            const envelope = [
+                { event_id: 'a'.repeat(32), sent_at: new Date().toISOString() },
+                [[{ type: 'event' }, { event_id: 'a'.repeat(32), message: 'proxied report' }]]
+            ];
+            const result = await transport.send(envelope);
+
+            assert.strictEqual(result.statusCode, 200);
+            assert.strictEqual(result.headers['x-sentry-rate-limits'], '60:error:organization');
+            assert.strictEqual(proxy.getConnectCount(), 1, 'the report should have been tunnelled through the proxy');
+
+            const requests = target.getRequests();
+            assert.strictEqual(requests.length, 1);
+            assert.strictEqual(requests[0].method, 'POST');
+            assert.strictEqual(requests[0].path, '/api/1/envelope/');
+            assert.strictEqual(requests[0].headers['x-sentry-auth'], 'Sentry sentry_key=test');
+            assert.ok(requests[0].body.includes('proxied report'), 'the envelope body should reach the endpoint');
+        } finally {
+            await stopServer(target.server);
+            await stopServer(proxy.server);
+        }
     });
 
     await t.test('Default agent (no proxy) - requests reach target directly', async () => {
@@ -287,12 +573,43 @@ test('HTTP proxy agent management', async t => {
         }
     });
 
-    await t.test('Shared object reference - httpAgent identity is stable across reloads', async () => {
+    await t.test('Webhook dispatcher - dedicated without a proxy, shared behind one', async () => {
+        // Webhook deliveries go through their own dispatcher so the egress policy is applied by
+        // the lookup the socket actually uses. Behind a proxy the target is resolved at the proxy,
+        // so there is nothing local to bind and the shared dispatcher is used instead.
+        setMockSetting('httpProxyEnabled', false);
+        await reloadHttpProxyAgent();
+
+        assert.ok(httpAgent.webhook, 'webhook dispatcher should exist');
+        assert.notStrictEqual(httpAgent.webhook, httpAgent.fetch, 'webhook deliveries should not share the general dispatcher');
+
+        const proxy = await startProxyServer();
+        try {
+            setMockSetting('httpProxyEnabled', true);
+            setMockSetting('httpProxyUrl', proxy.url);
+            await reloadHttpProxyAgent();
+
+            assert.strictEqual(httpAgent.webhook, httpAgent.fetch, 'behind a proxy the webhook dispatcher should fall back to the shared one');
+
+            setMockSetting('httpProxyEnabled', false);
+            await reloadHttpProxyAgent();
+
+            assert.notStrictEqual(httpAgent.webhook, httpAgent.fetch, 'dropping the proxy should restore the dedicated dispatcher');
+        } finally {
+            await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('Shared object reference - httpAgent identity is stable while its agents are swapped', async () => {
         const agentRef = httpAgent;
+
+        setMockSetting('httpProxyEnabled', false);
+        await reloadHttpProxyAgent();
         const oldFetch = httpAgent.fetch;
         const oldRetry = httpAgent.retry;
 
-        setMockSetting('httpProxyEnabled', false);
+        setMockSetting('httpProxyEnabled', true);
+        setMockSetting('httpProxyUrl', 'http://proxy.example.com:3128');
         await reloadHttpProxyAgent();
 
         // Object reference is the same
@@ -356,6 +673,103 @@ test('HTTP proxy agent management', async t => {
             delete process.env.EENGINE_HTTP_PROXY_URL;
             await stopServer(target.server);
             await stopServer(proxy.server);
+        }
+    });
+
+    await t.test('SOCKS agent - a TLS handshake that never completes times out and closes the tunnel', async () => {
+        // A target that accepts the tunnelled connection and never answers the ClientHello
+        const held = new Set();
+        let closedByClient = 0;
+        const blackhole = net.createServer(socket => {
+            held.add(socket);
+            // read (and drop) the ClientHello so the peer closing is noticed
+            socket.resume();
+            socket.on('error', () => {});
+            socket.on('close', () => {
+                closedByClient++;
+                held.delete(socket);
+            });
+        });
+        await new Promise(resolve => blackhole.listen(0, '127.0.0.1', resolve));
+        const socks = await startSocksServer();
+
+        const agent = createSocksAgent(socks.url, { connectTimeout: 300, headersTimeout: 10000, bodyTimeout: 10000 });
+        try {
+            const started = Date.now();
+            await assert.rejects(
+                () => fetchCmd(`https://127.0.0.1:${blackhole.address().port}/`, { dispatcher: agent }),
+                err => {
+                    const cause = err.cause || err;
+                    assert.strictEqual(cause.code, 'ETIMEDOUT');
+                    return true;
+                }
+            );
+            assert.ok(Date.now() - started < 5000, 'the handshake wait is bounded by connectTimeout');
+
+            // Both halves of the tunnel are destroyed, so the target sees its connection close
+            for (let i = 0; i < 50 && !closedByClient; i++) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.strictEqual(closedByClient, 1, 'the tunnelled connection should be closed');
+        } finally {
+            await agent.close().catch(() => {});
+            for (let socket of held) {
+                socket.destroy();
+            }
+            await new Promise(resolve => blackhole.close(resolve));
+            await socks.stop();
+        }
+    });
+
+    await t.test('the shared retry dispatcher gives up after two retries', async () => {
+        // Callers are API requests and worker RPCs on a 10 s budget; five retries used to outlast it
+        let requests = 0;
+        const target = http.createServer((req, res) => {
+            requests++;
+            res.writeHead(429, { 'Content-Type': 'text/plain' });
+            res.end('slow down');
+        });
+        await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+        try {
+            setMockSetting('httpProxyEnabled', false);
+            setMockSetting('proxyEnabled', false);
+            await reloadHttpProxyAgent();
+
+            // undici reports the exhausted retries as a failed fetch carrying the last status
+            await assert.rejects(fetchCmd(`http://127.0.0.1:${target.address().port}/`, { dispatcher: httpAgent.retry }), err => {
+                assert.strictEqual(err.cause && err.cause.statusCode, 429);
+                return true;
+            });
+            assert.strictEqual(requests, 3, 'one request plus two retries');
+        } finally {
+            await stopServer(target);
+        }
+    });
+
+    await t.test('the shared retry dispatcher caps a long Retry-After at five seconds', async () => {
+        let requests = 0;
+        const target = http.createServer((req, res) => {
+            requests++;
+            if (requests === 1) {
+                res.writeHead(429, { 'Retry-After': '120' });
+                return res.end();
+            }
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('ok');
+        });
+        await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+        try {
+            setMockSetting('httpProxyEnabled', false);
+            setMockSetting('proxyEnabled', false);
+            await reloadHttpProxyAgent();
+
+            const started = Date.now();
+            const res = await fetchCmd(`http://127.0.0.1:${target.address().port}/`, { dispatcher: httpAgent.retry });
+            assert.strictEqual(await res.text(), 'ok');
+            const elapsed = Date.now() - started;
+            assert.ok(elapsed < 8000, `the retry waited ${elapsed}ms, not the 120 s the server asked for`);
+        } finally {
+            await stopServer(target);
         }
     });
 

@@ -5,27 +5,18 @@ const { parentPort } = require('worker_threads');
 const packageData = require('../package.json');
 const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
-const fs = require('fs');
-const zlib = require('zlib');
-const { pipeline } = require('stream');
 
-const {
-    REDIS_PREFIX,
-    EXPORT_COMPLETED_NOTIFY,
-    EXPORT_FAILED_NOTIFY,
-    DEFAULT_EXPORT_MAX_MESSAGE_SIZE,
-    DEFAULT_EXPORT_MAX_MESSAGES,
-    DEFAULT_EXPORT_MAX_SIZE
-} = require('../lib/consts');
-const { getDuration, readEnvValue, threadStats, maybeReloadHttpProxyAgent } = require('../lib/tools');
+const { REDIS_PREFIX, EXPORT_COMPLETED_NOTIFY, EXPORT_FAILED_NOTIFY, EXPORT_LOCK_DURATION, EXPORT_STALLED_INTERVAL } = require('../lib/consts');
+const { getDuration, readEnvValue, threadStats } = require('../lib/tools');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 const settings = require('../lib/settings');
-const { Export, isTransientError, isSkippableError, isFolderMissingError, isRetryableError } = require('../lib/export');
+const { Export, parseActiveEntry, getExportKey, ACTIVE_EXPORTS_KEY } = require('../lib/export');
+const { createExportJobs } = require('../lib/export-worker');
 
 const { initSentry } = require('../lib/sentry');
 initSentry('export');
 
-const { redis, queueConf } = require('../lib/db');
+const { redis, queueConf, logBullErrors } = require('../lib/db');
 const { Worker } = require('bullmq');
 const { Account } = require('../lib/account');
 const getSecret = require('../lib/get-secret');
@@ -44,51 +35,9 @@ const EXPORT_TIMEOUT = getDuration(readEnvValue('EENGINE_EXPORT_TIMEOUT')) || DE
 
 const EXPORT_QC = (readEnvValue('EENGINE_EXPORT_QC') && Number(readEnvValue('EENGINE_EXPORT_QC'))) || config.queues.export || 1;
 
-const BATCH_SIZE = 100;
-const LIST_PAGE_SIZE = 1000;
-const FOLDER_INDEX_MAX_RETRIES = 3;
-const FOLDER_INDEX_RETRY_DELAY_MS = 1000;
-
-const IMAP_MESSAGE_MAX_RETRIES = 3;
-const IMAP_MESSAGE_RETRY_BASE_DELAY = 2000;
-const ACCOUNT_CHECK_INTERVAL = 60 * 1000;
-const LOCK_EXTENSION_INTERVAL = 5 * 60 * 1000;
-
-let callQueue = new Map();
-let mids = 0;
-
-async function call(message, transferList) {
-    return new Promise((resolve, reject) => {
-        let mid = `${Date.now()}:${++mids}`;
-
-        let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
-        let timer = setTimeout(() => {
-            callQueue.delete(mid);
-            let err = new Error('Timeout waiting for command response [T6]');
-            err.statusCode = 504;
-            err.code = 'Timeout';
-            err.ttl = ttl;
-            reject(err);
-        }, ttl);
-
-        callQueue.set(mid, { resolve, reject, timer });
-
-        try {
-            parentPort.postMessage(
-                {
-                    cmd: 'call',
-                    mid,
-                    message
-                },
-                transferList
-            );
-        } catch (err) {
-            clearTimeout(timer);
-            callQueue.delete(mid);
-            return reject(err);
-        }
-    });
-}
+const { createRpcClient, respond, isCall } = require('../lib/worker-rpc');
+const rpc = createRpcClient({ port: parentPort, defaultTimeout: EENGINE_TIMEOUT, timeoutTag: 'T6' });
+const call = rpc.call;
 
 async function metrics(logger, key, method, ...args) {
     try {
@@ -115,618 +64,23 @@ async function notify(account, event, data) {
         data
     };
 
-    await Webhooks.pushToQueue(event, await Webhooks.formatPayload(event, payload));
+    await Webhooks.enqueue(event, payload);
 }
 
-// Returns a throttled callback that extends both the BullMQ job lock and the export's Redis key
-// expiry on the LOCK_EXTENSION_INTERVAL cadence. Long-running indexing/exporting loops call it
-// freely; the lock/expiry are refreshed at most once per interval. Without this the lock could lapse
-// (stalling and reprocessing the job) and the export keys could expire mid-run.
-function createLeaseExtender(job, account, exportId) {
-    let lastExtension = Date.now();
-    return async function maybeExtendLease() {
-        if (Date.now() - lastExtension <= LOCK_EXTENSION_INTERVAL) {
-            return;
-        }
-        await Promise.all([
-            job.extendLock(job.token, 10 * 60 * 1000).catch(err => {
-                logger.warn({ msg: 'Failed to extend job lock', account, exportId, err });
-            }),
-            Export.extendExpiry(account, exportId).catch(err => {
-                logger.warn({ msg: 'Failed to extend export expiry', account, exportId, err });
-            })
-        ]);
-        lastExtension = Date.now();
-    };
-}
-
-async function indexMessages(job, exportData) {
-    const { account, exportId } = job.data;
-    const folders = JSON.parse(exportData.folders || '[]');
-    const startDate = new Date(Number(exportData.startDate));
-    const endDate = new Date(Number(exportData.endDate));
-    const indexingStartTime = new Date();
-
-    const accountData = await redis.hgetall(`${REDIS_PREFIX}iad:${account}`);
-    if (!accountData || !accountData.account) {
-        const err = new Error('Account not found or has been deleted');
-        err.code = 'AccountNotFound';
-        err.statusCode = 404;
-        throw err;
-    }
-
-    const accountObject = new Account({
-        account,
-        redis,
-        call,
-        secret: await getSecret(),
-        timeout: EXPORT_TIMEOUT
-    });
-
-    let mailboxes;
-    try {
-        mailboxes = await accountObject.listMailboxes();
-    } catch (err) {
-        throw new Error(`Failed to list mailboxes: ${err.message}`, { cause: err });
-    }
-
-    const foldersToProcess = resolveFolders(folders, mailboxes);
-
-    await Export.update(account, exportId, { foldersTotal: foldersToProcess.length });
-
-    const maxMessages = Number(await settings.get('exportMaxMessages')) || DEFAULT_EXPORT_MAX_MESSAGES;
-
-    logger.info({ msg: 'Starting export indexing', account, exportId, foldersToProcess: foldersToProcess.length, maxMessages: maxMessages || 'unlimited' });
-
-    let totalIndexed = 0;
-    let truncated = false;
-    const maybeExtendLease = createLeaseExtender(job, account, exportId);
-
-    for (let i = 0; i < foldersToProcess.length; i++) {
-        await maybeExtendLease();
-
-        if (await Export.isCancelled(account, exportId)) {
-            const err = new Error('Export cancelled by user');
-            err.code = 'ExportCancelled';
-            throw err;
-        }
-
-        const folderPath = foldersToProcess[i];
-        let attempt = 0;
-
-        while (true) {
-            try {
-                const remaining = maxMessages ? maxMessages - totalIndexed : 0;
-                const queued = await indexFolder(accountObject, account, exportId, folderPath, startDate, endDate, indexingStartTime, remaining);
-                totalIndexed += queued;
-
-                logger.trace({
-                    msg: 'Folder indexed',
-                    account,
-                    exportId,
-                    folder: folderPath,
-                    foldersScanned: i + 1,
-                    foldersTotal: foldersToProcess.length,
-                    totalIndexed
-                });
-
-                break;
-            } catch (err) {
-                attempt++;
-                // A folder that was deleted mid-export is handled inside indexFolder (treated as empty),
-                // so any error reaching here is a real failure. Only transient errors are worth retrying;
-                // a permanent error (deleted account, auth failure, unexpected server response) is not
-                // specific to this folder and would repeat for the rest, so fail the whole export. Silently
-                // skipping folders and marking an incomplete export "completed" hides data loss from the caller.
-                if (!isTransientError(err) || attempt >= FOLDER_INDEX_MAX_RETRIES) {
-                    logger.error({
-                        msg: 'Failed to index folder, failing export',
-                        account,
-                        exportId,
-                        folder: folderPath,
-                        attempts: attempt,
-                        err
-                    });
-                    err.message = `Failed to index folder "${folderPath}": ${err.message}`;
-                    throw err;
-                }
-
-                const delay = FOLDER_INDEX_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-                logger.warn({
-                    msg: 'Folder indexing failed, retrying',
-                    account,
-                    exportId,
-                    folder: folderPath,
-                    attempt,
-                    maxRetries: FOLDER_INDEX_MAX_RETRIES,
-                    delayMs: delay,
-                    err
-                });
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
-        }
-
-        // The folder indexed successfully (failures throw above); count it toward progress.
-        await Export.update(account, exportId, { foldersScanned: i + 1 });
-
-        if (maxMessages && totalIndexed >= maxMessages) {
-            truncated = true;
-            logger.warn({
-                msg: 'Export indexing truncated: message limit reached',
-                account,
-                exportId,
-                totalIndexed,
-                limit: maxMessages
-            });
-            break;
-        }
-    }
-
-    if (truncated) {
-        await Export.update(account, exportId, { truncated: '1' });
-    }
-}
-
-function resolveFolders(folders, mailboxes) {
-    const resolveFolder = folder => {
-        if (folder.startsWith('\\')) {
-            const match = mailboxes.find(mb => mb.specialUse === folder);
-            return match ? match.path : null;
-        }
-        return folder;
-    };
-
-    if (!folders || folders.length === 0) {
-        // If \All folder exists (Gmail/Outlook), use it; otherwise export all except Junk and Trash
-        const allMailFolder = mailboxes.find(mb => mb.specialUse === '\\All');
-        if (allMailFolder) {
-            return [allMailFolder.path];
-        }
-        return mailboxes.filter(mb => !['\\Junk', '\\Trash'].includes(mb.specialUse)).map(mb => mb.path);
-    }
-
-    return folders.map(resolveFolder).filter(Boolean);
-}
-
-async function indexFolder(accountObject, account, exportId, folderPath, startDate, endDate, indexingStartTime, maxMessages) {
-    let cursor = null;
-    let queued = 0;
-
-    while (true) {
-        const searchCriteria = { since: startDate };
-        if (endDate < indexingStartTime) {
-            searchCriteria.before = endDate;
-        }
-
-        const listOptions = {
-            path: folderPath,
-            pageSize: LIST_PAGE_SIZE,
-            search: searchCriteria,
-            metadataOnly: true,
-            cursor
-        };
-
-        let result;
-        try {
-            result = await accountObject.listMessages(listOptions);
-        } catch (err) {
-            // Other errors (e.g. a deleted account) propagate
-            if (isFolderMissingError(err)) {
-                // The folder disappeared mid-export - treat it as empty instead of failing the export
-                logger.warn({ msg: 'Export folder was not found, skipping', account, exportId, folder: folderPath, err });
-                return queued;
-            }
-            throw err;
-        }
-
-        for (const msg of result.messages || []) {
-            if (maxMessages && queued >= maxMessages) {
-                return queued;
-            }
-            await Export.queueMessage(account, exportId, {
-                folder: folderPath,
-                messageId: msg.id || msg.emailId,
-                uid: msg.uid,
-                size: msg.size || 0,
-                date: msg.date ? new Date(msg.date).getTime() : Date.now()
-            });
-            queued++;
-        }
-
-        if (maxMessages && queued >= maxMessages) {
-            return queued;
-        }
-
-        cursor = result.nextPageCursor;
-        if (!cursor) {
-            break;
-        }
-    }
-
-    return queued;
-}
-
-async function exportMessages(job, exportData) {
-    const { account, exportId } = job.data;
-    const { filePath } = exportData;
-    const includeAttachments = exportData.includeAttachments === '1';
-    const textType = exportData.textType || '*';
-    const rawMaxBytes = Number(exportData.maxBytes);
-    // Preserve an explicit 0 ("unlimited" per the API contract); only fall back when unset/invalid.
-    const maxBytes = Number.isFinite(rawMaxBytes) ? rawMaxBytes : 5 * 1024 * 1024;
-    const maxMessageSize = (await settings.get('exportMaxMessageSize')) || DEFAULT_EXPORT_MAX_MESSAGE_SIZE;
-    const maxExportSize = Number(await settings.get('exportMaxSize')) || DEFAULT_EXPORT_MAX_SIZE;
-    const isEncrypted = exportData.isEncrypted === '1';
-
-    const accountObject = new Account({
-        account,
-        redis,
-        call,
-        secret: await getSecret(),
-        timeout: EXPORT_TIMEOUT
-    });
-
-    const gzipStream = zlib.createGzip();
-    const fileStream = fs.createWriteStream(filePath, { mode: 0o600 });
-
-    let encryptStream = null;
-    let streamError = null;
-
-    const secret = isEncrypted ? await getSecret() : null;
-
-    const streams = [gzipStream];
-    if (secret) {
-        const { createEncryptStream } = require('../lib/stream-encrypt');
-        encryptStream = await createEncryptStream(secret);
-        streams.push(encryptStream);
-    }
-    streams.push(fileStream);
-
-    pipeline(...streams, err => {
-        if (err && !streamError) {
-            streamError = err;
-        }
-    });
-
-    function writeWithBackpressure(data) {
-        if (streamError) {
-            return Promise.reject(streamError);
-        }
-
-        if (gzipStream.write(data)) {
-            return Promise.resolve();
-        }
-
-        return new Promise((resolve, reject) => {
-            const cleanup = () => {
-                gzipStream.removeListener('drain', onDrain);
-                gzipStream.removeListener('error', onError);
-            };
-            const onDrain = () => {
-                cleanup();
-                resolve();
-            };
-            const onError = err => {
-                cleanup();
-                reject(err);
-            };
-            gzipStream.once('drain', onDrain);
-            gzipStream.once('error', onError);
-        });
-    }
-
-    let processed = 0;
-    let totalBytesWritten = 0;
-    let processingError = null;
-    let sizeLimitReached = false;
-
-    let lastAccountCheck = Date.now();
-    // Refreshes the job lock and export key expiry on a fixed cadence; called from the main loop and
-    // from inside the retry backoff so a batch stuck retrying does not let the lock lapse.
-    const maybeExtendLease = createLeaseExtender(job, account, exportId);
-
-    const accountData = await accountObject.loadAccountData(account);
-    const isApiAccount = await accountObject.isApiClient(accountData);
-    const MESSAGE_FETCH_BATCH_SIZE = 10; // Batch size for parallel message fetching
-    const MAX_BATCH_RETRIES = 5; // Max retries for rate-limited or transient per-message errors within a batch
-    const BATCH_RETRY_BASE_DELAY = 5000; // Base delay for batch retry backoff (5 seconds)
-
-    async function processMessage(message, entry) {
-        message.path = entry.folder;
-
-        if (includeAttachments && message.attachments && message.attachments.length) {
-            for (const attachment of message.attachments) {
-                try {
-                    if (attachment.size && attachment.size > maxMessageSize) {
-                        attachment.contentError = `Attachment too large (${attachment.size} bytes, limit ${maxMessageSize})`;
-                        continue;
-                    }
-
-                    const stream = await accountObject.getAttachment(attachment.id);
-                    const chunks = [];
-                    let totalSize = 0;
-
-                    for await (const chunk of stream) {
-                        totalSize += chunk.length;
-                        if (totalSize > maxMessageSize) {
-                            if (typeof stream.destroy === 'function') {
-                                stream.destroy();
-                                await new Promise(resolve => {
-                                    const CLEANUP_TIMEOUT_MS = 1000;
-                                    stream.once('close', resolve);
-                                    setTimeout(resolve, CLEANUP_TIMEOUT_MS);
-                                });
-                            }
-                            throw new Error(`Attachment exceeds size limit (>${maxMessageSize} bytes)`);
-                        }
-                        chunks.push(chunk);
-                    }
-
-                    attachment.content = Buffer.concat(chunks).toString('base64');
-                } catch (attachErr) {
-                    attachment.contentError = attachErr.message;
-                }
-            }
-        }
-
-        const line = JSON.stringify(message) + '\n';
-        await writeWithBackpressure(line);
-        totalBytesWritten += Buffer.byteLength(line);
-
-        await Export.incrementExported(account, exportId, Buffer.byteLength(line));
-        processed++;
-    }
-
-    try {
-        while (true) {
-            if (streamError) {
-                throw streamError;
-            }
-
-            if (sizeLimitReached) {
-                break;
-            }
-
-            await maybeExtendLease();
-
-            if (await Export.isCancelled(account, exportId)) {
-                const err = new Error('Export cancelled by user');
-                err.code = 'ExportCancelled';
-                throw err;
-            }
-
-            if (Date.now() - lastAccountCheck > ACCOUNT_CHECK_INTERVAL) {
-                const accountCheck = await redis.hgetall(`${REDIS_PREFIX}iad:${account}`);
-                if (!accountCheck || !accountCheck.account) {
-                    const err = new Error('Account was deleted during export');
-                    err.code = 'AccountDeleted';
-                    throw err;
-                }
-                lastAccountCheck = Date.now();
-            }
-
-            const batch = await Export.getNextBatch(account, exportId, BATCH_SIZE);
-            if (batch.length === 0) {
-                break;
-            }
-
-            const entriesToFetch = [];
-            for (const entry of batch) {
-                if (includeAttachments && entry.size > maxMessageSize) {
-                    await Export.incrementSkipped(account, exportId);
-                } else {
-                    entriesToFetch.push(entry);
-                }
-            }
-
-            if (entriesToFetch.length === 0) {
-                continue;
-            }
-
-            if (isApiAccount && entriesToFetch.length > 1) {
-                for (let i = 0; i < entriesToFetch.length; i += MESSAGE_FETCH_BATCH_SIZE) {
-                    if (streamError) {
-                        throw streamError;
-                    }
-                    if (sizeLimitReached) {
-                        break;
-                    }
-
-                    let fetchBatch = entriesToFetch.slice(i, i + MESSAGE_FETCH_BATCH_SIZE);
-                    let batchRetry = 0;
-
-                    while (fetchBatch.length > 0) {
-                        const messageIds = fetchBatch.map(e => e.messageId);
-                        const messageResults = await accountObject.getMessages(messageIds, { textType, maxBytes });
-
-                        const resultMap = new Map();
-                        for (const result of messageResults) {
-                            resultMap.set(result.messageId, result);
-                        }
-
-                        const retryEntries = [];
-
-                        for (const entry of fetchBatch) {
-                            const result = resultMap.get(entry.messageId);
-
-                            if (result && result.error) {
-                                const err = result.error;
-                                // A single transient blip (rate limit, dropped batch response, network/5xx)
-                                // must not fail an entire multi-message export; only give up once the retry
-                                // budget is exhausted. See isRetryableError for the full classification.
-                                const isRetryable = isRetryableError(err);
-
-                                if (isSkippableError(err)) {
-                                    logger.warn({
-                                        msg: 'Skipping message during export',
-                                        account,
-                                        exportId,
-                                        messageId: entry.messageId,
-                                        folder: entry.folder,
-                                        reason: err.message || err.code
-                                    });
-                                    await Export.incrementSkipped(account, exportId);
-                                } else if (isRetryable && batchRetry < MAX_BATCH_RETRIES) {
-                                    retryEntries.push(entry);
-                                } else {
-                                    const error = new Error(err.message);
-                                    error.code = err.code;
-                                    error.statusCode = err.statusCode;
-                                    throw error;
-                                }
-                            } else if (result && result.data) {
-                                await processMessage(result.data, entry);
-                                if (maxExportSize && totalBytesWritten >= maxExportSize) {
-                                    sizeLimitReached = true;
-                                    break;
-                                }
-                            } else {
-                                logger.warn({
-                                    msg: 'Skipping message during export',
-                                    account,
-                                    exportId,
-                                    messageId: entry.messageId,
-                                    folder: entry.folder,
-                                    reason: 'Message not found in batch results'
-                                });
-                                await Export.incrementSkipped(account, exportId);
-                            }
-                        }
-
-                        if (sizeLimitReached) {
-                            break;
-                        }
-
-                        if (retryEntries.length > 0) {
-                            batchRetry++;
-                            const delay = BATCH_RETRY_BASE_DELAY * Math.pow(2, batchRetry - 1) + Math.random() * 1000;
-                            logger.warn({
-                                msg: 'Retrying failed messages during export batch',
-                                account,
-                                exportId,
-                                retryCount: retryEntries.length,
-                                attempt: batchRetry,
-                                maxAttempts: MAX_BATCH_RETRIES,
-                                delayMs: Math.round(delay)
-                            });
-                            await new Promise(resolve => setTimeout(resolve, delay));
-                            await maybeExtendLease();
-                            fetchBatch = retryEntries;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                for (const entry of entriesToFetch) {
-                    if (streamError) {
-                        throw streamError;
-                    }
-
-                    let message = null;
-                    let fetchError = null;
-
-                    for (let attempt = 1; attempt <= IMAP_MESSAGE_MAX_RETRIES; attempt++) {
-                        try {
-                            message = await accountObject.getMessage(entry.messageId, { textType, maxBytes });
-                            break; // Success - exit retry loop
-                        } catch (err) {
-                            if (isSkippableError(err)) {
-                                fetchError = err;
-                                break;
-                            }
-
-                            if (isTransientError(err) && attempt < IMAP_MESSAGE_MAX_RETRIES) {
-                                const delay = IMAP_MESSAGE_RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
-                                logger.warn({
-                                    msg: 'Message fetch failed, retrying',
-                                    account,
-                                    exportId,
-                                    messageId: entry.messageId,
-                                    folder: entry.folder,
-                                    attempt,
-                                    maxAttempts: IMAP_MESSAGE_MAX_RETRIES,
-                                    delayMs: delay,
-                                    errorCode: err.code,
-                                    errorMessage: err.message
-                                });
-                                await new Promise(resolve => setTimeout(resolve, delay));
-                                continue;
-                            }
-
-                            fetchError = err;
-                            break;
-                        }
-                    }
-
-                    if (message) {
-                        await processMessage(message, entry);
-                        if (maxExportSize && totalBytesWritten >= maxExportSize) {
-                            sizeLimitReached = true;
-                            break;
-                        }
-                    } else if (fetchError && isSkippableError(fetchError)) {
-                        logger.warn({
-                            msg: 'Skipping message during export',
-                            account,
-                            exportId,
-                            messageId: entry.messageId,
-                            folder: entry.folder,
-                            reason: fetchError.message || fetchError.code
-                        });
-                        await Export.incrementSkipped(account, exportId);
-                    } else if (fetchError) {
-                        throw fetchError;
-                    }
-                }
-            }
-
-            logger.trace({ msg: 'Export batch processed', account, exportId, messagesExported: processed });
-        }
-    } catch (err) {
-        processingError = err;
-    }
-
-    if (sizeLimitReached) {
-        logger.warn({
-            msg: 'Export truncated: size limit reached',
+const { indexMessages, exportMessages } = createExportJobs({
+    redis,
+    settings,
+    getSecret,
+    logger,
+    createAccount: async account =>
+        new Account({
             account,
-            exportId,
-            totalBytesWritten,
-            limit: maxExportSize,
-            messagesExported: processed
-        });
-        await Export.update(account, exportId, { truncated: '1' });
-    }
-
-    const FINALIZATION_TIMEOUT = 30000;
-    await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            gzipStream.destroy();
-            if (encryptStream) encryptStream.destroy();
-            fileStream.destroy();
-            reject(streamError || new Error('Stream finalization timed out'));
-        }, FINALIZATION_TIMEOUT);
-        gzipStream.end();
-        fileStream.once('finish', () => {
-            clearTimeout(timeout);
-            resolve();
-        });
-        fileStream.once('error', err => {
-            clearTimeout(timeout);
-            reject(streamError || err);
-        });
-    });
-
-    if (processingError) {
-        throw processingError;
-    }
-    if (streamError) {
-        throw streamError;
-    }
-
-    logger.info({ msg: 'Export messages completed', account, exportId, messagesExported: processed, bytesWritten: totalBytesWritten });
-}
+            redis,
+            call,
+            secret: await getSecret(),
+            timeout: EXPORT_TIMEOUT
+        })
+});
 
 const exportWorker = new Worker(
     'export',
@@ -774,13 +128,17 @@ const exportWorker = new Worker(
 
             logger.info({ msg: 'Export job completed', account, exportId, duration: Date.now() - startTime });
         } catch (err) {
-            logger.error({ msg: 'Export job failed', account, exportId, err });
+            // a user-requested cancellation or a deleted account is not an operational failure
+            let failLevel = err.code === 'ExportCancelled' ? 'info' : err.code === 'AccountDeleted' ? 'warn' : 'error';
+            logger[failLevel]({ msg: 'Export job failed', account, exportId, err });
+
+            // Tells the 'failed' handler that this failure has already been reported with full
+            // context. Failures that never reach this catch (see that handler) have not been.
+            job.__failureLogged = true;
 
             const exportData = await redis.hgetall(`${REDIS_PREFIX}exp:${account}:${exportId}`).catch(() => ({}));
 
-            if (exportData.filePath) {
-                await fs.promises.unlink(exportData.filePath).catch(() => {});
-            }
+            await Export.removeFile(exportId, exportData);
 
             if (err.code === 'ExportCancelled') {
                 await Export.deleteFully(account, exportId);
@@ -809,8 +167,12 @@ const exportWorker = new Worker(
     },
     {
         concurrency: EXPORT_QC,
-        lockDuration: 10 * 60 * 1000,
-        stalledInterval: 2 * 60 * 1000,
+        // BullMQ renews the lock every lockDuration / 2 while the job runs. The lock is also what
+        // keeps a sibling worker's startup recovery off a running export (removeAbandonedJob() in
+        // lib/export.js), and how long an export of a worker that died waits before the stalled
+        // check runs it again, so it is kept short: about three minutes from a crash to a restart
+        lockDuration: EXPORT_LOCK_DURATION,
+        stalledInterval: EXPORT_STALLED_INTERVAL,
         maxStalledCount: 5,
         // Do not start consuming jobs at construction. Startup recovery (markInterruptedAsFailed +
         // cleanup) must finish first, otherwise the worker can pick up a queued export and start
@@ -821,31 +183,47 @@ const exportWorker = new Worker(
     }
 );
 
+logBullErrors(exportWorker, 'worker:export');
+
 exportWorker.on('completed', async job => {
     metrics(logger, 'queuesProcessed', 'inc', { queue: 'export', status: 'completed' });
-    logger.info({ msg: 'Export queue entry completed', queue: job.queue.name, job: job.id, account: job.data.account, exportId: job.data.exportId });
+    logger.debug({ msg: 'Export queue entry completed', queue: job.queue.name, job: job.id, account: job.data.account, exportId: job.data.exportId });
 });
 
 exportWorker.on('failed', async (job, err) => {
     metrics(logger, 'queuesProcessed', 'inc', { queue: 'export', status: 'failed' });
     if (!job) {
-        logger.error({ msg: 'Export queue entry failed', err: err.message });
+        logger.error({ msg: 'Export queue entry failed', err });
         return;
     }
-    logger.error({
+    // A stalled job (worker killed mid-export, lock lost) is failed by BullMQ through its
+    // deferred-failure path, which skips the processor entirely - so its catch never logged the
+    // failure and never ran Export.fail(). That leaves a dead export recoverable only by the
+    // startup pass, and this event is the sole record of it. Anything the processor did report is
+    // demoted to debug to avoid logging the same failure twice.
+    let level = job.__failureLogged ? 'debug' : 'error';
+    logger[level]({
         msg: 'Export queue entry failed',
         queue: job.queue.name,
         job: job.id,
         account: job.data.account,
         exportId: job.data.exportId,
-        failedReason: job.failedReason
+        failedReason: job.failedReason,
+        reachedProcessor: !!job.__failureLogged
     });
 });
 
-function onCommand(command) {
+async function onCommand(command) {
     if (command.cmd === 'resource-usage') {
         return threadStats.usage();
     }
+
+    // Shutdown drain, forwarded by server.js because signals only reach the main thread
+    if (command.cmd === 'close') {
+        await exportWorker.close();
+        return true;
+    }
+
     logger.debug({ msg: 'Unhandled command', command });
     return 999;
 }
@@ -868,9 +246,13 @@ function onCommand(command) {
     }
 
     // Now that interrupted exports have been reconciled and orphaned files cleaned, start consuming
-    // jobs. Mirrors BullMQ's own autorun: a fatal run() failure is surfaced as an 'error' event,
-    // which (no listener) crashes the worker thread so the main process can restart it.
-    exportWorker.run().catch(error => exportWorker.emit('error', error));
+    // jobs. A fatal run() failure leaves a thread that keeps sending heartbeats while consuming
+    // nothing, so it exits instead and the main process respawns it. (Re-emitting it as an 'error'
+    // event did not crash anything: BullMQ catches an unlistened 'error' and prints it.)
+    exportWorker.run().catch(err => {
+        logger.fatal({ msg: 'Export queue processing stopped, exiting worker', err });
+        logger.flush(() => process.exit(1));
+    });
 
     setInterval(() => {
         try {
@@ -883,16 +265,19 @@ function onCommand(command) {
     setInterval(
         async () => {
             try {
-                const activeExports = await redis.smembers(`${REDIS_PREFIX}exp:active`);
+                // The set key, the entry encoding and the export key all come from lib/export.js.
+                // Hand-building them here meant this cleanup and the limiter that writes the
+                // entries could drift apart: entries added under one encoding and removed under
+                // another leave the active set growing forever, and once it reaches the global
+                // limit every export in the deployment is refused with 429.
+                const activeExports = await redis.smembers(ACTIVE_EXPORTS_KEY);
                 for (const entry of activeExports) {
-                    const separatorIndex = entry.lastIndexOf(':exp_');
-                    if (separatorIndex === -1) continue;
-                    const entryAccount = entry.substring(0, separatorIndex);
-                    const entryExportId = entry.substring(separatorIndex + 1);
-                    const exists = await redis.exists(`${REDIS_PREFIX}exp:${entryAccount}:${entryExportId}`);
+                    const parsed = parseActiveEntry(entry);
+                    if (!parsed) continue;
+                    const exists = await redis.exists(getExportKey(parsed.account, parsed.exportId));
                     if (!exists) {
-                        await redis.srem(`${REDIS_PREFIX}exp:active`, entry);
-                        logger.info({ msg: 'Cleaned stale active set entry', account: entryAccount, exportId: entryExportId });
+                        await redis.srem(ACTIVE_EXPORTS_KEY, entry);
+                        logger.info({ msg: 'Cleaned stale active set entry', account: parsed.account, exportId: parsed.exportId });
                     }
                 }
             } catch (err) {
@@ -922,30 +307,13 @@ function onCommand(command) {
 })();
 
 parentPort.on('message', message => {
-    if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
-        const { resolve, reject, timer } = callQueue.get(message.mid);
-        clearTimeout(timer);
-        callQueue.delete(message.mid);
-
-        if (message.error) {
-            const err = new Error(message.error);
-            if (message.code) err.code = message.code;
-            if (message.statusCode) err.statusCode = message.statusCode;
-            if (message.info) err.info = message.info;
-            return reject(err);
-        }
-        return resolve(message.response);
+    if (rpc.handleResponse(message)) {
+        return;
     }
 
-    if (message && message.cmd === 'call' && message.mid) {
-        Promise.resolve(onCommand(message.message))
-            .then(response => parentPort.postMessage({ cmd: 'resp', mid: message.mid, response }))
-            .catch(err => parentPort.postMessage({ cmd: 'resp', mid: message.mid, error: err.message, code: err.code, statusCode: err.statusCode }));
-    }
-
-    if (message && message.cmd === 'settings') {
-        maybeReloadHttpProxyAgent(message.data);
+    if (isCall(message)) {
+        return respond(parentPort, message, onCommand, { logger });
     }
 });
 
-logger.info({ msg: 'Started export worker thread', version: packageData.version });
+logger.info({ msg: 'Started Export worker thread', version: packageData.version });

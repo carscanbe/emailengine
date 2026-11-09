@@ -3,13 +3,107 @@
 const test = require('node:test');
 const assert = require('node:assert').strict;
 const os = require('os');
+const crypto = require('crypto');
+const http = require('http');
 
 const tools = require('../lib/tools');
+const settings = require('../lib/settings');
+const { credentialErrorStatus, isTransientCredentialError } = require('../lib/email-client/credential-errors');
+const exitWhenStandalone = require('./helpers/exit-standalone');
+
+// The operator's authentication server answers for every account on the instance, and its status
+// decides two different things: whether the failure is the service's or the credential's, and -
+// if the status were left on err.statusCode - what EmailEngine answers the caller it is serving.
+// The second one is not the auth server's to decide, so the status rides in a request record.
+test('resolveCredentials() reports an authentication server failure', async t => {
+    let responseStatus = 503;
+    const requestPaths = [];
+
+    const server = http.createServer((req, res) => {
+        requestPaths.push(req.url);
+        res.writeHead(responseStatus, { 'Content-Type': 'application/json' });
+        res.end('{}');
+    });
+
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+    const authServerUrl = `http://127.0.0.1:${server.address().port}/creds`;
+    const realSettingsGet = settings.get;
+    settings.get = async key => (key === 'authServer' ? authServerUrl : realSettingsGet.call(settings, key));
+
+    t.after(async () => {
+        settings.get = realSettingsGet;
+        await new Promise(resolve => server.close(resolve));
+    });
+
+    const failure = async () => {
+        try {
+            await tools.resolveCredentials('test-account', 'imap');
+        } catch (err) {
+            return err;
+        }
+        throw new Error('resolveCredentials() resolved a failed response');
+    };
+
+    await t.test('keeps the status off err.statusCode', async () => {
+        responseStatus = 404;
+        const err = await failure();
+
+        assert.strictEqual(err.code, 'HTTPRequestError');
+        assert.strictEqual(err.statusCode, undefined, 'the auth server does not get to answer for the request being served');
+        assert.strictEqual(err.authRequest.status, 404);
+    });
+
+    await t.test('names the server it asked, without the account it asked about', async () => {
+        responseStatus = 500;
+        const err = await failure();
+
+        assert.strictEqual(err.authRequest.url, `http://127.0.0.1:${server.address().port}`);
+        assert.ok(/account=test-account/.test(requestPaths[requestPaths.length - 1]), 'the account rides in the query');
+        assert.ok(!/account=/.test(err.authRequest.url), 'and stays out of the record');
+    });
+
+    await t.test('and the record is what the credential classifier reads', async () => {
+        responseStatus = 503;
+        const unavailable = await failure();
+        assert.strictEqual(credentialErrorStatus(unavailable), 503);
+        assert.strictEqual(isTransientCredentialError(unavailable), true, 'a bad minute must not park every account on the instance');
+
+        responseStatus = 401;
+        const refused = await failure();
+        assert.strictEqual(credentialErrorStatus(refused), 401);
+        assert.strictEqual(isTransientCredentialError(refused), false, 'a refused account is still an authentication failure');
+    });
+});
 
 test('Tools utility tests', async t => {
     t.after(() => {
         // Force exit after tests to prevent hanging on Redis connections from loaded modules
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
+    });
+
+    await t.test('convertDataUrisToAttachments() turns inline images into cid attachments', () => {
+        const data = { html: '<p><img src="data:image/png;base64,iVBORw0KGgo=" alt="x"><img src="https://example.com/a.png"></p>' };
+        tools.convertDataUrisToAttachments(data);
+        assert.equal(data.attachments.length, 1);
+        assert.equal(data.attachments[0].path, 'data:image/png;base64,iVBORw0KGgo=');
+        assert.match(data.html, /src="cid:[^"]+@emailengine"/);
+        assert.match(data.html, /src="https:\/\/example\.com\/a\.png"/);
+    });
+
+    await t.test('convertDataUrisToAttachments() stays linear on a run of unclosed image tags', () => {
+        // `<img[^>]*` used to scan to the end of the body from every tag (80 KB took half a
+        // second; the 5 MB schema cap would have been minutes on the API worker)
+        const time = n => {
+            const data = { html: '<img '.repeat(n) + '<img src="data:image/png;base64,iVBORw0KGgo=">' };
+            const start = process.hrtime.bigint();
+            tools.convertDataUrisToAttachments(data);
+            return Number(process.hrtime.bigint() - start) / 1e6;
+        };
+        const small = time(20000);
+        const large = time(40000);
+        assert.ok(large < 500, `${large.toFixed(1)} ms for 40000 unclosed image tags`);
+        assert.ok(large <= Math.max(small * 3, 50), `${small.toFixed(1)} ms -> ${large.toFixed(1)} ms when doubled`);
     });
 
     // getDuration tests
@@ -126,6 +220,20 @@ test('Tools utility tests', async t => {
         assert.strictEqual(tools.getWorkerCount(NaN), 0);
     });
 
+    await t.test('workerPoolSize() reads the environment, then the configuration file', async () => {
+        const cpuCount = os.cpus().length;
+        assert.strictEqual(tools.workerPoolSize('cpus', 2), cpuCount, 'the queue worker counts accept cpus too');
+        assert.strictEqual(tools.workerPoolSize('3', 2), 3);
+        assert.strictEqual(tools.workerPoolSize(undefined, 2), 2);
+        assert.strictEqual(tools.workerPoolSize('invalid', 2), 2, 'an unreadable value falls back to the configuration file');
+        assert.strictEqual(tools.workerPoolSize('0', 2), 2);
+        assert.strictEqual(tools.workerPoolSize(undefined, 'cpus'), cpuCount);
+        assert.strictEqual(tools.workerPoolSize(undefined, undefined), 1);
+        assert.strictEqual(tools.workerPoolSize('2.7', 1), 2, 'a fraction is rounded down');
+        assert.strictEqual(tools.workerPoolSize(undefined, undefined, 4), 4, 'a pool can name its own default');
+        assert.strictEqual(tools.workerPoolSize('invalid', 'invalid', 4), 4);
+    });
+
     // selectRendezvousNode tests
     await t.test('selectRendezvousNode() returns consistent results for same key', async () => {
         const workers = [{ threadId: 1 }, { threadId: 2 }, { threadId: 3 }];
@@ -149,6 +257,22 @@ test('Tools utility tests', async t => {
         assert.ok(selections.size > 1, 'Should distribute across multiple workers');
     });
 
+    // An upgrade must not move accounts between workers or source addresses. The scores are
+    // murmurhash3 values pinned in test/murmurhash3-test.js
+    await t.test('selectRendezvousNode() picks the same worker for a known account', () => {
+        const workers = [{ threadId: 1 }, { threadId: 2 }, { threadId: 3 }, { threadId: 4 }];
+        assert.strictEqual(tools.selectRendezvousNode('account-1', workers).threadId, 3);
+    });
+
+    await t.test('selectRendezvousAddress() picks the same local address for a known account', () => {
+        assert.strictEqual(tools.selectRendezvousAddress('abc123def456ghi7', ['127.0.0.1', '192.168.1.10', '2001:db8::1']), '2001:db8::1');
+        assert.strictEqual(tools.selectRendezvousAddress('abc123def456ghi7', ['127.0.0.1', '192.168.1.10']), '192.168.1.10');
+    });
+
+    await t.test('getRendezvousScore() hashes the shard id and the key joined by a NUL', () => {
+        assert.strictEqual(tools.getRendezvousScore('account-1', 2), 3899279571);
+    });
+
     await t.test('getRendezvousScore() returns consistent hash', async () => {
         const score1 = tools.getRendezvousScore('key', 'shard1');
         const score2 = tools.getRendezvousScore('key', 'shard1');
@@ -157,6 +281,48 @@ test('Tools utility tests', async t => {
     });
 
     // getSignedFormDataSync tests
+    await t.test('formatOAuthRequestBody() and formatOAuthResponse() mask the secrets a token exchange carries', () => {
+        // a string body and a URLSearchParams body alike, and the masking is not switchable
+        const secret = 'client-secret-0123456789abcdef';
+        const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: 'app', client_secret: secret, refresh_token: 'rt-0123456789abcdef' });
+        for (const input of [body.toString(), body]) {
+            const masked = tools.formatOAuthRequestBody(input);
+            assert.strictEqual(masked.grant_type, 'refresh_token');
+            assert.strictEqual(masked.client_id, 'app');
+            assert.doesNotMatch(masked.client_secret, /0123456789abcdef/);
+            assert.match(masked.client_secret, /^client-s\.\.\. \(\d+B\)$/);
+            assert.doesNotMatch(masked.refresh_token, /0123456789abcdef/);
+        }
+
+        // a signed JWT assertion keeps its readable part
+        const assertion = tools.formatOAuthRequestBody(
+            new URLSearchParams({ assertion: 'eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJhIn0.signature-0123456789abcdef' })
+        ).assertion;
+        assert.match(assertion, /^eyJhbGciOiJSUzI1NiJ9\./);
+        assert.doesNotMatch(assertion, /0123456789abcdef/);
+
+        const response = { token_type: 'Bearer', access_token: 'at-0123456789abcdef', refresh_token: 'rt-0123456789abcdef', expires_in: 3600 };
+        const masked = tools.formatOAuthResponse(response);
+        assert.strictEqual(masked.token_type, 'Bearer');
+        assert.strictEqual(masked.expires_in, 3600);
+        assert.doesNotMatch(masked.access_token, /0123456789abcdef/);
+        assert.doesNotMatch(masked.refresh_token, /0123456789abcdef/);
+        assert.strictEqual(response.access_token, 'at-0123456789abcdef', 'the response itself is left alone');
+        assert.strictEqual(tools.formatOAuthResponse(null), null);
+        assert.strictEqual(tools.formatOAuthResponse('text'), 'text');
+    });
+
+    await t.test('deriveSigningKey() follows the secret it was derived from', () => {
+        const { FORM, TRACKING } = tools.SIGNING_PURPOSE;
+        const first = tools.deriveSigningKey('secret-one', FORM);
+        assert.notDeepStrictEqual(tools.deriveSigningKey('secret-one', TRACKING), first, 'a key per purpose');
+        const second = tools.deriveSigningKey('secret-two', FORM);
+        assert.notDeepStrictEqual(second, first, 'a new secret is a new key, not the cached one');
+        assert.deepStrictEqual(tools.deriveSigningKey('secret-one', FORM), first, 'and the old secret derives the old key again');
+        assert.throws(() => tools.deriveSigningKey('secret-one', 'webhook'), /Unknown signing purpose/);
+        assert.throws(() => tools.deriveSigningKey('secret-one'), /Unknown signing purpose/);
+    });
+
     await t.test('getSignedFormDataSync() creates signed data', async () => {
         const secret = 'test-secret';
         const opts = { account: 'test-account', name: 'Test User' };
@@ -191,13 +357,15 @@ test('Tools utility tests', async t => {
 
     await t.test('getSignedFormDataSync() data can be decoded', async () => {
         const secret = 'test-secret';
-        const opts = { account: 'my-account', name: 'John Doe' };
+        const opts = { account: 'my-account', name: 'John Doe', expectedEmail: 'owner@example.com' };
 
         const result = tools.getSignedFormDataSync(secret, opts);
         const decoded = JSON.parse(Buffer.from(result.data, 'base64url').toString());
 
         assert.strictEqual(decoded.account, 'my-account');
         assert.strictEqual(decoded.name, 'John Doe');
+        // The identity pin has to survive into the blob, otherwise the hosted form has nothing to enforce.
+        assert.strictEqual(decoded.expectedEmail, 'owner@example.com');
     });
 
     await t.test('getSignedFormDataSync() filters empty values', async () => {
@@ -245,6 +413,40 @@ test('Tools utility tests', async t => {
         assert.strictEqual(tools.getBoolean('Y'), true);
         assert.strictEqual(tools.getBoolean('n'), false);
         assert.strictEqual(tools.getBoolean('no'), false);
+    });
+
+    await t.test('getBoolean() parses "on"/"enabled"', async () => {
+        // OIDC_FORCED=on, EENGINE_SMTP_ENABLED=on and friends used to read as false, while joi and
+        // resolveHttpProxy() already took `on` as true
+        assert.strictEqual(tools.getBoolean('on'), true);
+        assert.strictEqual(tools.getBoolean('ON'), true);
+        assert.strictEqual(tools.getBoolean(' on '), true);
+        assert.strictEqual(tools.getBoolean('enabled'), true);
+        assert.strictEqual(tools.getBoolean('off'), false);
+        assert.strictEqual(tools.getBoolean('disabled'), false);
+        assert.strictEqual(tools.getBoolean('once'), false);
+    });
+
+    await t.test('getRedisStats() totals command stats from zero', async () => {
+        const redisStub = {
+            async info(section) {
+                return section === 'commandstats'
+                    ? 'cmdstat_get:calls=3,usec=30,usec_per_call=10.00,rejected_calls=1,failed_calls=0\r\ncmdstat_set:calls=2,usec=10,usec_per_call=5.00,rejected_calls=0,failed_calls=2'
+                    : 'redis_version:7.2.0';
+            },
+            async slowlog() {
+                return 0;
+            }
+        };
+        const stats = await tools.getRedisStats(redisStub);
+        assert.deepStrictEqual(stats.cmdstat_total, { calls: 5, usec: 40, rejected_calls: 1, failed_calls: 2 });
+    });
+
+    await t.test('mergeObjects() treats arrays as values, not records', async () => {
+        // A partial update carrying a narrower scope list must not get the stored tail back
+        const destination = { scope: ['a'], auth: { user: 'u' } };
+        tools.mergeObjects(destination, { scope: ['a', 'b', 'c'], auth: { user: 'x', pass: 'p' }, provider: 'gmail' });
+        assert.deepStrictEqual(destination, { scope: ['a'], auth: { user: 'u', pass: 'p' }, provider: 'gmail' });
     });
 
     await t.test('getBoolean() parses numeric strings', async () => {
@@ -299,17 +501,32 @@ test('Tools utility tests', async t => {
         assert.strictEqual(tools.setBit(buffer, 1, 0, true), false);
     });
 
-    // escapeRegExp tests
-    await t.test('escapeRegExp() escapes special characters', async () => {
-        assert.strictEqual(tools.escapeRegExp('test.string'), 'test\\.string');
-        assert.strictEqual(tools.escapeRegExp('a*b+c?'), 'a\\*b\\+c\\?');
-        assert.strictEqual(tools.escapeRegExp('[a-z]'), '\\[a-z\\]');
-        assert.strictEqual(tools.escapeRegExp('$100'), '\\$100');
+    await t.test('escapeRedisGlob() escapes glob metacharacters', async () => {
+        assert.strictEqual(tools.escapeRedisGlob('user123'), 'user123');
+        assert.strictEqual(tools.escapeRedisGlob('acc@ex.com'), 'acc@ex.com');
+        assert.strictEqual(tools.escapeRedisGlob('*'), '\\*');
+        assert.strictEqual(tools.escapeRedisGlob('a*b?c'), 'a\\*b\\?c');
+        assert.strictEqual(tools.escapeRedisGlob('x[y]'), 'x\\[y\\]');
+        assert.strictEqual(tools.escapeRedisGlob('a\\b'), 'a\\\\b');
     });
 
-    await t.test('escapeRegExp() leaves normal strings unchanged', async () => {
-        assert.strictEqual(tools.escapeRegExp('hello'), 'hello');
-        assert.strictEqual(tools.escapeRegExp('test123'), 'test123');
+    await t.test('escapeRedisGlob() coerces null/undefined to empty string', async () => {
+        assert.strictEqual(tools.escapeRedisGlob(null), '');
+        assert.strictEqual(tools.escapeRedisGlob(undefined), '');
+    });
+
+    await t.test('constantTimeEqual() matches equal values and rejects any difference', async () => {
+        assert.strictEqual(tools.constantTimeEqual('s3cr3t-abc', 's3cr3t-abc'), true);
+        assert.strictEqual(tools.constantTimeEqual('', ''), true);
+        assert.strictEqual(tools.constantTimeEqual('s3cr3t-abc', 's3cr3t-abd'), false);
+        // unequal lengths must return false, never throw
+        assert.strictEqual(tools.constantTimeEqual('abc', 'abcdef'), false);
+    });
+
+    await t.test('constantTimeEqual() treats null/undefined as non-matching', async () => {
+        assert.strictEqual(tools.constantTimeEqual(null, 'x'), false);
+        assert.strictEqual(tools.constantTimeEqual('x', undefined), false);
+        assert.strictEqual(tools.constantTimeEqual(null, null), false);
     });
 
     // filterEmptyObjectValues tests
@@ -424,5 +641,531 @@ test('Tools utility tests', async t => {
     await t.test('prepareUrl() handles no query params', async () => {
         const result = tools.prepareUrl('/path', 'https://example.com');
         assert.strictEqual(result, 'https://example.com/path');
+    });
+
+    await t.test('readEnvList() parses, trims and drops blanks', async () => {
+        process.env.EENGINE_TEST_ENV_LIST = ' 10.0.0.1 , , 192.168.0.0/16 ';
+        try {
+            assert.deepStrictEqual(tools.readEnvList('EENGINE_TEST_ENV_LIST'), ['10.0.0.1', '192.168.0.0/16']);
+        } finally {
+            delete process.env.EENGINE_TEST_ENV_LIST;
+        }
+    });
+
+    await t.test('readEnvList() distinguishes unset from present-but-empty', async () => {
+        // An empty value yields [], which is TRUTHY. Callers that gate a security warning or an
+        // allowlist on this must check the length, not the value; see the X-Forwarded-For warning
+        // in workers/api.js and resolveClientIp() in lib/utils/network.js
+        assert.strictEqual(tools.readEnvList('EENGINE_TEST_ENV_LIST_UNSET'), null);
+
+        process.env.EENGINE_TEST_ENV_LIST = '  ,  ';
+        try {
+            assert.deepStrictEqual(tools.readEnvList('EENGINE_TEST_ENV_LIST'), []);
+        } finally {
+            delete process.env.EENGINE_TEST_ENV_LIST;
+        }
+    });
+
+    // The fallback credential predicates for shouldUseAuthServer(). They must only report
+    // credentials the non-auth-server code paths can actually consume, or a stale useAuthServer
+    // flag would be ignored in favor of credentials that cannot work.
+    await t.test('hasStoredOAuth2Tokens() only counts top-level tokens', async () => {
+        assert.strictEqual(tools.hasStoredOAuth2Tokens({ refreshToken: 'r' }), true);
+        assert.strictEqual(tools.hasStoredOAuth2Tokens({ accessToken: 'a' }), true);
+        assert.strictEqual(tools.hasStoredOAuth2Tokens({ auth: { user: 'u@example.com' } }), false);
+        // The renew and cached-token paths never read tokens nested under `auth`
+        assert.strictEqual(tools.hasStoredOAuth2Tokens({ auth: { user: 'u@example.com', accessToken: 'a' } }), false);
+    });
+
+    await t.test('hasStoredServerCredentials() requires a user and a password or token', async () => {
+        assert.strictEqual(tools.hasStoredServerCredentials({ auth: { user: 'u', pass: 'p' } }), true);
+        assert.strictEqual(tools.hasStoredServerCredentials({ auth: { user: 'u', accessToken: 'a' } }), true);
+        assert.strictEqual(tools.hasStoredServerCredentials({ auth: { user: 'u' } }), false);
+        assert.strictEqual(tools.hasStoredServerCredentials({ auth: false }), false);
+        assert.strictEqual(tools.hasStoredServerCredentials({}), false);
+    });
+
+    // The signed subscription-management URL, shared by the mailer's List-Unsubscribe header
+    // and the suppression-list admin UI
+    await t.test('buildUnsubscribeUrl() signs the unsubscribe payload', async () => {
+        const secret = 'unsub test secret';
+
+        const url = new URL(
+            tools.buildUnsubscribeUrl(secret, 'https://ee.example.com', {
+                account: 'acc1',
+                list: 'newsletter',
+                recipient: 'User@Example.com',
+                messageId: '<msg1@example.com>'
+            })
+        );
+
+        assert.strictEqual(url.origin, 'https://ee.example.com');
+        assert.strictEqual(url.pathname, '/unsubscribe');
+
+        const raw = Buffer.from(url.searchParams.get('data'), 'base64url').toString();
+        const payload = JSON.parse(raw);
+        assert.deepStrictEqual(payload, { act: 'unsub', acc: 'acc1', list: 'newsletter', rcpt: 'User@Example.com', msg: '<msg1@example.com>' });
+
+        // the signature must verify with the same HMAC the unsubscribe page checks: the key is the
+        // one derived from the service secret for the unsubscribe purpose, not the secret itself
+        const unsubscribeKey = crypto.createHmac('sha256', secret).update('emailengine:signing:unsubscribe:v1').digest();
+        const expected = crypto.createHmac('sha256', unsubscribeKey).update(raw).digest('base64url');
+        assert.strictEqual(url.searchParams.get('sig'), expected);
+        assert.notStrictEqual(url.searchParams.get('sig'), crypto.createHmac('sha256', secret).update(raw).digest('base64url'));
+    });
+
+    await t.test('buildUnsubscribeUrl() stays host-relative without a base URL and omits a missing message ID', async () => {
+        const link = tools.buildUnsubscribeUrl('unsub test secret', null, {
+            account: 'acc1',
+            list: 'newsletter',
+            recipient: 'user@example.com'
+        });
+
+        // no placeholder host may leak into the link
+        assert.ok(link.startsWith('/unsubscribe?data='), 'link is host-relative');
+
+        const url = new URL(link, 'http://localhost');
+        const payload = JSON.parse(Buffer.from(url.searchParams.get('data'), 'base64url').toString());
+        assert.deepStrictEqual(payload, { act: 'unsub', acc: 'acc1', list: 'newsletter', rcpt: 'user@example.com' });
+    });
+
+    await t.test('collectCidReferences() finds ids in quoted and unquoted attributes', async () => {
+        const cids = tools.collectCidReferences(
+            '<img src="cid:part1@example.com"><img src=\'cid:part2@example.com\'><img src=cid:part3@example.com alt=x><img src=cid:part4@example.com>'
+        );
+        assert.ok(cids.has('part1@example.com'));
+        assert.ok(cids.has('part2@example.com'));
+        assert.ok(cids.has('part3@example.com'));
+        assert.ok(cids.has('part4@example.com'));
+    });
+
+    await t.test('collectCidReferences() resolves CSS url(cid:...) references', async () => {
+        const cids = tools.collectCidReferences('<div style="background: url(cid:bg1@example.com)">x</div>');
+        assert.ok(cids.has('bg1@example.com'));
+    });
+
+    await t.test('collectCidReferences() matches whole reference tokens only', async () => {
+        const cids = tools.collectCidReferences('<img src="cid:part1.extended@example.com">');
+        // a content id that is only a prefix of the referenced id must not match
+        assert.ok(!cids.has('part1'));
+        assert.ok(!cids.has('part1.extended'));
+        assert.ok(cids.has('part1.extended@example.com'));
+    });
+
+    await t.test('collectCidReferences() ignores ids that appear outside cid: links', async () => {
+        const cids = tools.collectCidReferences('<p>the id part1@example.com is mentioned in text</p>');
+        assert.strictEqual(cids.size, 0);
+    });
+
+    await t.test('collectCidReferences() never contains the empty id', async () => {
+        const cids = tools.collectCidReferences('<img src="cid:"><a href="x">cid:</a>');
+        assert.ok(!cids.has(''));
+    });
+
+    await t.test('embedCidImages() rewrites image attributes in every attribute syntax', async () => {
+        const lookup = cid => (cid === 'a@x' ? { contentType: 'image/png', content: 'QUJD' } : null);
+        const html = tools.embedCidImages(
+            '<img src="cid:a@x"><img src=\'cid:a@x\'><img src=cid:a@x alt=x><img title="t"src="cid:a@x"><td background="cid:a@x">',
+            lookup
+        );
+        assert.strictEqual((html.match(/data:image\/png;base64,QUJD/g) || []).length, 5);
+        assert.ok(!html.includes('cid:'));
+    });
+
+    // Each reference used to become a full copy, so a few hundred bytes of HTML naming one inline
+    // image many times grew into a payload of many megabytes
+    await t.test('embedCidImages() embeds every image once and repeats only within a budget', async () => {
+        const content = 'A'.repeat(1024 * 1024);
+        const lookup = cid => (cid === 'big@x' ? { contentType: 'image/png', content } : { contentType: 'image/png', content: 'QQ==' });
+        const html = tools.embedCidImages('<img src="cid:big@x">'.repeat(40) + '<img src="cid:small@x">'.repeat(3), lookup);
+        const big = (html.match(/data:image\/png;base64,A+/g) || []).length;
+        assert.ok(big >= 1 && big <= 3, `the large image is repeated within the budget only (${big})`);
+        assert.ok(html.length < 4 * 1024 * 1024);
+        assert.ok(html.includes('cid:big@x'), 'repeats past the budget keep their reference');
+        assert.strictEqual((html.match(/data:image\/png;base64,QQ==/g) || []).length, 3, 'small repeats still embed');
+    });
+
+    await t.test('embedCidImages() rewrites every candidate of a srcset', async () => {
+        const lookup = cid => ({ contentType: 'image/png', content: cid === 'a@x' ? 'QQ==' : 'Qg==' });
+        const html = tools.embedCidImages('<img srcset="cid:a@x 1x, cid:b@x 2x" src="cid:a@x">', lookup);
+        assert.strictEqual(html, '<img srcset="data:image/png;base64,QQ== 1x, data:image/png;base64,Qg== 2x" src="data:image/png;base64,QQ==">');
+    });
+
+    await t.test('embedCidImages() leaves links and text alone, so a sender never gets a data: link', async () => {
+        const lookup = () => ({ contentType: 'text/html', content: 'PHA+PC9wPg==' });
+        const html = '<a href="cid:doc@x" target="_blank">open</a><p>see cid:doc@x</p><div style="background: url(cid:doc@x)">x</div>';
+        assert.strictEqual(tools.embedCidImages(html, lookup), html);
+    });
+
+    await t.test('embedCidImages() keeps references it has no content for', async () => {
+        const html = '<img src="cid:missing@x">';
+        assert.strictEqual(
+            tools.embedCidImages(html, () => null),
+            html
+        );
+        assert.strictEqual(
+            tools.embedCidImages(html, () => ({ contentType: 'image/png', content: '' })),
+            html
+        );
+    });
+
+    await t.test('embedCidImages() only trusts a plain type/subtype content type', async () => {
+        const html = tools.embedCidImages('<img src="cid:a@x">', () => ({ contentType: 'image/png"onerror="alert(1)', content: 'QUJD' }));
+        assert.strictEqual(html, '<img src="data:application/octet-stream;base64,QUJD">');
+    });
+
+    await t.test('collectCidReferences() returns an empty set for non-string or empty input', async () => {
+        assert.strictEqual(tools.collectCidReferences(undefined).size, 0);
+        assert.strictEqual(tools.collectCidReferences(false).size, 0);
+        assert.strictEqual(tools.collectCidReferences('').size, 0);
+        assert.strictEqual(tools.collectCidReferences(Buffer.from('<img src="cid:x@y">')).size, 0);
+    });
+
+    await t.test('collectCidReferences() handles a multi-megabyte body dense with partial matches', async () => {
+        // the shape from the DELLI report: a large body full of similar cid:
+        // references - the per-attachment indexOf scans this helper replaced
+        // took seconds of blocking CPU on the same input
+        let chunk = [];
+        for (let i = 0; i < 100; i++) {
+            chunk.push(`<img src="cid:part.${i.toString().padStart(8, '0')}.eeeeeeeeeeeeeeee@example.com">`);
+        }
+        let block = chunk.join('');
+        let html = block.repeat(Math.ceil((6 * 1024 * 1024) / block.length));
+
+        const cids = tools.collectCidReferences(html);
+        assert.strictEqual(cids.size, 100);
+        assert.ok(cids.has('part.00000000.eeeeeeeeeeeeeeee@example.com'));
+        assert.ok(cids.has('part.00000099.eeeeeeeeeeeeeeee@example.com'));
+        assert.ok(!cids.has('part.00000000.ffffffffffffffff@example.com'));
+    });
+
+    await t.test('truncateTextContents() caps each text type and reports truncation', async () => {
+        const textContents = { plain: 'aaaaaaaaaa', html: 'bbb' };
+        assert.strictEqual(tools.truncateTextContents(textContents, 5), true);
+        assert.strictEqual(textContents.plain, 'aaaaa');
+        assert.strictEqual(textContents.html, 'bbb');
+    });
+
+    await t.test('truncateTextContents() leaves content under the limit alone', async () => {
+        const textContents = { plain: 'aaa', html: 'bbb' };
+        assert.strictEqual(tools.truncateTextContents(textContents, 5), false);
+        assert.deepStrictEqual(textContents, { plain: 'aaa', html: 'bbb' });
+    });
+
+    await t.test('truncateTextContents() without a limit is a no-op', async () => {
+        const textContents = { plain: 'aaaaaaaaaa' };
+        assert.strictEqual(tools.truncateTextContents(textContents, 0), false);
+        assert.strictEqual(tools.truncateTextContents(textContents, undefined), false);
+        assert.strictEqual(textContents.plain, 'aaaaaaaaaa');
+        assert.strictEqual(tools.truncateTextContents(undefined, 5), false);
+    });
+
+    await t.test('truncateTextContents() only touches the plain and html keys', async () => {
+        const textContents = { plain: 'aaaaaaaaaa', html: undefined, id: 'attachment-reference-id', hasMore: false };
+        assert.strictEqual(tools.truncateTextContents(textContents, 5), true);
+        assert.strictEqual(textContents.plain, 'aaaaa');
+        assert.strictEqual(textContents.html, undefined);
+        // a text id or flag riding on the same object must never be clipped
+        assert.strictEqual(textContents.id, 'attachment-reference-id');
+        assert.strictEqual(textContents.hasMore, false);
+    });
+
+    await t.test('cidReferenceRegex() returns a fresh regex each call so no lastIndex state leaks', async () => {
+        const re = tools.cidReferenceRegex();
+        assert.notStrictEqual(re, tools.cidReferenceRegex());
+        assert.ok(re.global);
+
+        // the collection helper must tokenize with this same grammar
+        const html = '<img src="cid:part1@example.com">';
+        assert.deepStrictEqual(
+            [...html.matchAll(tools.cidReferenceRegex())].map(m => m[1]),
+            ['part1@example.com']
+        );
+        assert.ok(tools.collectCidReferences(html).has('part1@example.com'));
+    });
+
+    await t.test('isEndedSession() ends a session only when a later version exists', () => {
+        // The read side of the passwordVersion setAdminSession() stamps. Two Hapi strategies in
+        // workers/api.js ask it about the same cookie - the admin session and the browse page's
+        // sess_ API token - so "log out all sessions" ends both or neither.
+        const now = Date.now();
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 1, issuedAt: now }), true);
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 2, issuedAt: now }), false);
+
+        // A session stamped before the field existed, against an instance that has never bumped
+        // the version, is not force-expired - but one bump ends it
+        assert.strictEqual(tools.isEndedSession(0, {}), false);
+        assert.strictEqual(tools.isEndedSession(1, {}), true);
+
+        // No local password at all (an unsecured instance) never ends anything
+        assert.strictEqual(tools.isEndedSession(0, { passwordVersion: 3 }), false);
+
+        // A request carrying no cookie has no session to end; the credential checks that follow
+        // are what refuse it
+        assert.strictEqual(tools.isEndedSession(0, undefined), false);
+        assert.strictEqual(tools.isEndedSession(1, undefined), true);
+    });
+
+    await t.test('formatSecretHint() leaves little of the secret and sanitizeUrlError() redacts the URL an error carries', () => {
+        // the hint travels on the token error into the log, so three characters and the length
+        assert.strictEqual(tools.formatSecretHint('GOCSPX-abcdefghijklmnopqrstuvwxyz'), 'GOC... (33B)');
+        assert.strictEqual(tools.formatSecretHint(''), '... (0B)');
+        assert.strictEqual(tools.formatSecretHint(undefined), '... (0B)');
+
+        // a URL parser error names the string it failed on, proxy credentials included
+        let err;
+        try {
+            // only the parser's exception is under test
+            // eslint-disable-next-line no-new
+            new URL('socks5://user:s3cret@[bad');
+        } catch (e) {
+            err = e;
+        }
+        assert.match(err.input, /s3cret/);
+        tools.sanitizeUrlError(err);
+        assert.doesNotMatch(err.input, /s3cret/);
+        // tolerant of everything else
+        assert.strictEqual(tools.sanitizeUrlError(null), null);
+        const plain = new Error('x');
+        assert.strictEqual(tools.sanitizeUrlError(plain), plain);
+    });
+
+    await t.test('isEndedSession() ages a session out by the time it was issued', () => {
+        // The sealed cookie carries no expiry, so a cookie captured once used to stay valid until
+        // the next password change
+        const now = Date.now();
+        const day = 24 * 3600 * 1000;
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 2, issuedAt: now - 29 * day }, now), false);
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 2, issuedAt: now - 31 * day }, now), true);
+        // issued before the stamp existed: one sign-in at upgrade time rather than a cookie that
+        // never ages out
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 2 }, now), true);
+        assert.strictEqual(tools.isEndedSession(2, { passwordVersion: 2, issuedAt: 'soon' }, now), true);
+        // the stamp is what setAdminSession() writes, so a fresh session passes
+        const cookie = { set: [] };
+        tools.setAdminSession({ cookieAuth: { set: value => cookie.set.push(value) } }, { user: 'admin', passwordVersion: 2 });
+        assert.strictEqual(tools.isEndedSession(2, cookie.set[0]), false);
+        assert.ok(cookie.set[0].sid);
+        // and a caller re-stamping a session it means to keep carries the age over
+        tools.setAdminSession({ cookieAuth: { set: value => cookie.set.push(value) } }, { user: 'admin', passwordVersion: 2, issuedAt: now - 31 * day });
+        assert.strictEqual(tools.isEndedSession(2, cookie.set[1], now), true);
+    });
+
+    // splitUrlCredentials() feeds the Authorization header of webhook deliveries, the webhook test
+    // probe and the auth-server lookup. An earlier version ran he.encode() over the parts, so a
+    // password with "&", "<" or a quote was sent as entity references and rejected on every attempt
+    const basic = (user, pass) => `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+
+    await t.test('splitUrlCredentials() returns no header for a URL without credentials', () => {
+        const { url, authorization } = tools.splitUrlCredentials('https://example.com/hook?x=1');
+        assert.strictEqual(authorization, null);
+        assert.strictEqual(url.toString(), 'https://example.com/hook?x=1');
+    });
+
+    await t.test('splitUrlCredentials() strips the credentials from the URL', () => {
+        const { url, authorization } = tools.splitUrlCredentials('https://user:secret@example.com/hook');
+        assert.strictEqual(authorization, basic('user', 'secret'));
+        assert.strictEqual(url.toString(), 'https://example.com/hook');
+        assert.strictEqual(url.username, '');
+        assert.strictEqual(url.password, '');
+    });
+
+    await t.test('splitUrlCredentials() sends the typed form of a percent-encoded credential', () => {
+        // "p@ss&w<>rd" as the URL parser stores it
+        const { authorization } = tools.splitUrlCredentials('https://user:p%40ss%26w%3C%3Erd@example.com/');
+        assert.strictEqual(authorization, basic('user', 'p@ss&w<>rd'));
+    });
+
+    await t.test('splitUrlCredentials() leaves HTML-special characters alone', () => {
+        // "&", "<" and quotes survive the URL parser unencoded, and must reach the receiver as such
+        const { authorization } = tools.splitUrlCredentials(`https://user:p&ss"<>@example.com/`);
+        assert.strictEqual(authorization, basic('user', 'p&ss"<>'));
+    });
+
+    await t.test('splitUrlCredentials() keeps a malformed escape as written', () => {
+        const { authorization } = tools.splitUrlCredentials('https://user:100%zz@example.com/');
+        assert.strictEqual(authorization, basic('user', '100%zz'));
+    });
+
+    await t.test('splitUrlCredentials() works with a username or a password alone', () => {
+        assert.strictEqual(tools.splitUrlCredentials('https://token@example.com/').authorization, basic('token', ''));
+        assert.strictEqual(tools.splitUrlCredentials('https://:secret@example.com/').authorization, basic('', 'secret'));
+    });
+
+    // failAction tests
+
+    await t.test('failAction() reports the leaf key and the full path of every failing field', async () => {
+        const Joi = require('joi');
+
+        const schema = Joi.object({
+            to: Joi.array().items(Joi.object({ address: Joi.string().email() })),
+            subject: Joi.string().max(3)
+        });
+        const { error } = schema.validate({ to: [{ address: 'not-an-email' }], subject: 'too long' }, { abortEarly: false });
+
+        const request = {
+            logger: { debug() {}, error() {} },
+            method: 'post',
+            route: { path: '/v1/test' },
+            app: { gt: { gettext: value => value } }
+        };
+
+        await assert.rejects(tools.failAction(request, {}, error), err => {
+            assert.strictEqual(err.output.statusCode, 400);
+            assert.strictEqual(err.output.payload.message, 'Invalid input');
+            // key alone cannot tell to[0].address from a top-level address, path can
+            assert.deepStrictEqual(
+                err.output.payload.fields.map(field => [field.key, field.path]),
+                [
+                    ['address', 'to.0.address'],
+                    ['subject', 'subject']
+                ]
+            );
+            return true;
+        });
+    });
+
+    // getLogs tests
+
+    const { redis } = require('../lib/db');
+    const msgpack = require('../lib/msgpack');
+    const { REDIS_PREFIX } = require('../lib/consts');
+
+    const readStream = async stream => {
+        const chunks = [];
+        for await (const chunk of stream) {
+            chunks.push(chunk);
+        }
+        return Buffer.concat(chunks).toString();
+    };
+
+    await t.test('getLogs() streams the stored entries as JSON lines and reports an undecodable row in place', async () => {
+        const account = 'tools-logs-account';
+        const logKey = `${REDIS_PREFIX}iam:${account}:g`;
+
+        // 0xc1 is the one byte the msgpack format never uses, so the last row cannot decode
+        await redis.rpush(logKey, msgpack.encode({ msg: 'first' }), msgpack.encode({ msg: 'second' }), Buffer.from([0xc1]));
+
+        try {
+            const stream = await tools.getLogs(redis, account);
+            assert.strictEqual(stream.headers['content-type'], 'text/plain');
+
+            const body = await readStream(stream);
+            const lines = body
+                .trim()
+                .split('\n')
+                .map(line => JSON.parse(line));
+
+            assert.deepStrictEqual(lines[0], { msg: 'first' });
+            assert.deepStrictEqual(lines[1], { msg: 'second' });
+            assert.strictEqual(lines[2].error, 'Failed to decode log entry');
+            assert.ok(!body.includes('    at '), 'a stack trace must not reach the download');
+        } finally {
+            await redis.unlink(logKey);
+        }
+    });
+
+    await t.test('getLogs() answers an empty log with a notice', async () => {
+        const stream = await tools.getLogs(redis, 'tools-logs-missing-account');
+        assert.strictEqual(await readStream(stream), 'No logs found for tools-logs-missing-account\n');
+    });
+
+    await t.test('getLogs() builds a Content-Disposition any account id can live in', async () => {
+        const { validateHeaderValue } = require('node:http');
+        const stub = { lrangeBuffer: async () => [] };
+
+        // Cyrillic is above U+00FF, which Node refuses in a header value: the download used to 500
+        const stream = await tools.getLogs(stub, '\u043f\u043e\u0447\u0442\u0430"acc');
+        const header = stream.headers['content-disposition'];
+        assert.doesNotThrow(() => validateHeaderValue('content-disposition', header));
+        assert.ok(/^[\x20-\x7e]+$/.test(header), 'the header value is plain ASCII');
+        assert.ok(header.includes('filename="logs.______acc.txt"'), header);
+        const encoded = header.match(/filename\*=UTF-8''(.+)$/)[1];
+        assert.strictEqual(decodeURIComponent(encoded), 'logs.\u043f\u043e\u0447\u0442\u0430"acc.txt');
+
+        const plain = await tools.getLogs(stub, 'plain-account');
+        assert.strictEqual(plain.headers['content-disposition'], `attachment; filename="logs.plain-account.txt"; filename*=UTF-8''logs.plain-account.txt`);
+    });
+
+    await t.test('getLogs() rejects when the log cannot be read, rather than ending a 200 stream with the error', async () => {
+        const failing = {
+            lrangeBuffer: async () => {
+                throw new Error('Redis is unavailable');
+            }
+        };
+        await assert.rejects(tools.getLogs(failing, 'tools-logs-account'), /Redis is unavailable/);
+    });
+
+    await t.test('assertTlsCredentials() is a no-op for a plaintext listener', () => {
+        assert.doesNotThrow(() => tools.assertTlsCredentials({ secure: false }, 'The SMTP server'));
+        assert.doesNotThrow(() => tools.assertTlsCredentials({}, 'The SMTP server'));
+        assert.doesNotThrow(() => tools.assertTlsCredentials(null, 'The SMTP server'));
+    });
+
+    await t.test('assertTlsCredentials() refuses a TLS listener without its own certificate', () => {
+        // Both server libraries would otherwise fall back to a built-in key that ships in every copy
+        for (const options of [{ secure: true }, { secure: true, key: 'KEY' }, { secure: true, cert: 'CERT' }]) {
+            assert.throws(
+                () => tools.assertTlsCredentials(options, 'The IMAP proxy'),
+                err => {
+                    assert.strictEqual(err.code, 'ETLSNOCERT');
+                    assert.match(err.message, /^The IMAP proxy has TLS enabled but no certificate/);
+                    return true;
+                }
+            );
+        }
+    });
+
+    await t.test('assertTlsCredentials() accepts a TLS listener with key and certificate', () => {
+        assert.doesNotThrow(() => tools.assertTlsCredentials({ secure: true, key: 'KEY', cert: 'CERT' }, 'The SMTP server'));
+    });
+
+    await t.test('maybeReloadTlsCertificates() reloads only for the settings a listener resolves from', async () => {
+        // The list is the whole contract: a setting that decides what is served but is missing from
+        // it leaves that setting silently diverging from what the listeners actually offer.
+        assert.deepEqual(tools.TLS_MATERIAL_SETTINGS.slice().sort(), [
+            'apiTLSCertificate',
+            'imapProxyServerTLSCertificate',
+            'serviceUrl',
+            'smtpServerTLSCertificate',
+            'tlsHostnames',
+            'tlsProvisioning'
+        ]);
+
+        const logger = { error() {} };
+        const commands = [];
+        const call = async message => {
+            commands.push(message.cmd);
+            return {};
+        };
+
+        assert.equal(await tools.maybeReloadTlsCertificates(call, logger, ['locale', 'tlsHostnames']), true);
+        assert.deepEqual(commands.sort(), ['apiReloadCertificates', 'imapProxyReloadCertificates', 'smtpReloadCertificates']);
+
+        commands.length = 0;
+        assert.equal(await tools.maybeReloadTlsCertificates(call, logger, ['locale']), false);
+        assert.equal(await tools.maybeReloadTlsCertificates(call, logger, []), false);
+        assert.equal(await tools.maybeReloadTlsCertificates(call, logger), false);
+        assert.deepEqual(commands, []);
+    });
+
+    await t.test('reloadTlsCertificates() reports a command that failed and still sends the rest', async () => {
+        // One listener that cannot come back must not cost the other two their new certificate
+        const logged = [];
+        const commands = [];
+        const call = async message => {
+            commands.push(message.cmd);
+            if (message.cmd === 'smtpReloadCertificates') {
+                throw new Error('no such worker');
+            }
+            return {};
+        };
+
+        await tools.reloadTlsCertificates(call, { error: entry => logged.push(entry) }, { action: 'test' });
+
+        assert.equal(commands.length, 3);
+        assert.equal(logged.length, 1);
+        assert.equal(logged[0].cmd, 'smtpReloadCertificates');
+        assert.equal(logged[0].action, 'test');
     });
 });

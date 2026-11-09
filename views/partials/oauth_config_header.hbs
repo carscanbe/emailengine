@@ -1,10 +1,8 @@
-<div class="d-sm-flex align-items-center justify-content-between mb-1">
-    <h1 class="h3 mb-0 text-gray-800">
-        <small><i class="fas fa-cog fa-fw"></i></small>
-        OAuth2
-    </h1>
-</div>
-
-<p class="mb-4">
-    Configure OAuth2 apps for supported services.
-</p>
+{{!-- shared header for the OAuth2 config pages; block form places page
+      actions in the header row (same idiom as ui/page-header). Pass badgeLabel
+      to show a count badge after the title (e.g. the apps total). --}}
+{{#if @partial-block}}
+{{#> ui/page-header title="OAuth2 Apps" icon="icon-[tabler--brand-oauth]" subtitle="Configure provider credentials for connecting Gmail, Outlook, and other email accounts." badgeLabel=badgeLabel badgeVariant="neutral" class="mb-6"}}{{> @partial-block}}{{/ui/page-header}}
+{{else}}
+{{> ui/page-header title="OAuth2 Apps" icon="icon-[tabler--brand-oauth]" subtitle="Configure provider credentials for connecting Gmail, Outlook, and other email accounts." badgeLabel=badgeLabel badgeVariant="neutral" class="mb-6"}}
+{{/if}}

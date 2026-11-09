@@ -6,8 +6,7 @@ const packageData = require('../package.json');
 const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
-const { REDIS_PREFIX } = require('../lib/consts');
-const { getDuration, readEnvValue, threadStats, maybeReloadHttpProxyAgent } = require('../lib/tools');
+const { getDuration, readEnvValue, threadStats } = require('../lib/tools');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 const settings = require('../lib/settings');
 
@@ -15,11 +14,11 @@ const { initSentry } = require('../lib/sentry');
 initSentry('submit');
 
 const util = require('util');
-const { redis, queueConf, submitQueue } = require('../lib/db');
+const { redis, queueConf, submitQueue, logBullErrors } = require('../lib/db');
 const { Worker } = require('bullmq');
 const { Account } = require('../lib/account');
 const getSecret = require('../lib/get-secret');
-const msgpack = require('msgpack5')();
+const { retainFailedContent } = require('../lib/outbox');
 
 const { EMAIL_FAILED_NOTIFY } = require('../lib/consts');
 
@@ -42,43 +41,12 @@ const SUBMIT_QC = (readEnvValue('EENGINE_SUBMIT_QC') && Number(readEnvValue('EEN
 
 const SUBMIT_DELAY = getDuration(readEnvValue('EENGINE_SUBMIT_DELAY') || config.submitDelay) || null;
 
-const { shouldDiscardJob } = require('../lib/delivery-error');
+const { isFinalFailedAttempt } = require('../lib/delivery-error');
+const { createSubmitProcessor, completeSubmission, normalizeQueueId } = require('../lib/submit-processor');
 
-let callQueue = new Map();
-let mids = 0;
-
-async function call(message, transferList) {
-    return new Promise((resolve, reject) => {
-        let mid = `${Date.now()}:${++mids}`;
-
-        let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
-        let timer = setTimeout(() => {
-            let err = new Error('Timeout waiting for command response [T5]');
-            err.statusCode = 504;
-            err.code = 'Timeout';
-            err.ttl = ttl;
-            callQueue.delete(mid);
-            reject(err);
-        }, ttl);
-
-        callQueue.set(mid, { resolve, reject, timer });
-
-        try {
-            parentPort.postMessage(
-                {
-                    cmd: 'call',
-                    mid,
-                    message
-                },
-                transferList
-            );
-        } catch (err) {
-            clearTimeout(timer);
-            callQueue.delete(mid);
-            return reject(err);
-        }
-    });
-}
+const { createRpcClient, respond, isCall } = require('../lib/worker-rpc');
+const rpc = createRpcClient({ port: parentPort, defaultTimeout: EENGINE_TIMEOUT, timeoutTag: 'T5' });
+const call = rpc.call;
 
 async function metrics(logger, key, method, ...args) {
     try {
@@ -114,7 +82,7 @@ async function notify(account, event, data) {
         payload.data = data;
     }
 
-    await Webhooks.pushToQueue(event, await Webhooks.formatPayload(event, payload));
+    await Webhooks.enqueue(event, payload);
 }
 
 const smtpLogger = {};
@@ -135,178 +103,12 @@ for (let level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {
 
 const submitWorker = new Worker(
     'submit',
-    async job => {
-        if (!job.data.queueId && job.data.qId) {
-            // this value was used to be called qId
-            job.data.queueId = job.data.qId;
-        }
-
-        let queueEntryBuf = await redis.hgetBuffer(`${REDIS_PREFIX}iaq:${job.data.account}`, job.data.queueId);
-        if (!queueEntryBuf) {
-            // nothing to do here
-            try {
-                await redis.hdel(`${REDIS_PREFIX}iaq:${job.data.account}`, job.data.queueId);
-            } catch (err) {
-                // ignore
-            }
-            return;
-        }
-
-        let queueEntry;
-        try {
-            queueEntry = msgpack.decode(queueEntryBuf);
-        } catch (err) {
-            logger.error({ msg: 'Failed to parse queued email entry', job: job.data, err });
-            try {
-                await redis.hdel(`${REDIS_PREFIX}iaq:${job.data.account}`, job.data.queueId);
-            } catch (err) {
-                // ignore
-            }
-            return;
-        }
-
-        if (!queueEntry) {
-            //could be expired?
-            return false;
-        }
-
-        let accountObject = new Account({ account: job.data.account, redis, call, secret: await getSecret() });
-
-        logger.trace({
-            msg: 'Processing message',
-            action: 'submit',
-            queue: job.queue.name,
-            code: 'processing',
-            job: job.id,
-            event: job.name,
-            data: job.data,
-            account: job.data.account
-        });
-
-        try {
-            try {
-                // try to update
-                await job.updateProgress({
-                    status: 'processing'
-                });
-            } catch (err) {
-                // ignore
-            }
-
-            let backoffDelay = Number(job.opts.backoff && job.opts.backoff.delay) || 0;
-            // job.attemptsMade is not yet incremented for the ongoing attempt, so the
-            // next retry (if this attempt fails) is delayed by 2^attemptsMade * base
-            let nextAttempt = job.attemptsMade + 1 < job.opts.attempts ? Math.round(job.processedOn + Math.pow(2, job.attemptsMade) * backoffDelay) : false;
-
-            queueEntry.job = {
-                id: job.id,
-                attemptsMade: job.attemptsMade,
-                attempts: job.opts.attempts,
-                nextAttempt: nextAttempt ? new Date(nextAttempt).toISOString() : false
-            };
-
-            let res = await accountObject.submitMessage(queueEntry);
-
-            logger.trace({
-                msg: 'Submitted queued message for delivery',
-                action: 'submit',
-                queue: job.queue.name,
-                code: 'result_success',
-                job: job.id,
-                event: job.name,
-                data: job.data,
-                account: job.data.account
-            });
-
-            try {
-                // try to update
-                await job.updateProgress({
-                    status: 'submitted',
-                    response: res.response
-                });
-            } catch (err) {
-                // ignore
-            }
-        } catch (err) {
-            try {
-                const submitJobEntry = await submitQueue.getJob(job.id);
-                if (submitJobEntry && submitJobEntry.progress && ['submitted', 'smtp-completed'].includes(submitJobEntry.progress.status)) {
-                    // SMTP transition succeeded, can accept even if the process yielded in error
-                    logger.trace({
-                        msg: 'Submitted queued message for delivery',
-                        action: 'submit',
-                        queue: job.queue.name,
-                        code: 'result_success',
-                        job: job.id,
-                        event: job.name,
-                        data: job.data,
-                        account: job.data.account,
-                        err
-                    });
-                    return;
-                }
-            } catch (err) {
-                logger.error({
-                    msg: 'Job listing failed',
-                    job: job.id,
-                    err
-                });
-            }
-
-            logger.error({
-                msg: 'Message submission failed',
-                action: 'submit',
-                queue: job.queue.name,
-                code: 'result_fail',
-                job: job.id,
-                event: job.name,
-                data: job.data,
-                account: job.data.account,
-                err
-            });
-
-            try {
-                // try to update
-                await job.updateProgress({
-                    status: 'error',
-                    error: {
-                        message: err.message,
-                        code: err.code,
-                        statusCode: err.statusCode
-                    },
-                    networkRouting: err.info?.networkRouting
-                });
-            } catch (err) {
-                // ignore
-            }
-
-            if (shouldDiscardJob(err, job)) {
-                try {
-                    // do not retry after 5xx error (except 503 which is transient)
-                    await job.discard();
-                    logger.info({
-                        msg: 'Job discarded',
-                        account: queueEntry.account,
-                        queueId: job.data.queueId
-                    });
-                } catch (E) {
-                    logger.error({
-                        msg: 'Failed to discard job',
-                        action: 'submit',
-                        queue: job.queue.name,
-                        code: 'discard_fail',
-                        job: job.id,
-                        event: job.name,
-                        data: job.data,
-                        account: job.data.account,
-                        err: E
-                    });
-                }
-            }
-
-            throw err;
-        }
-    },
+    createSubmitProcessor({
+        redis,
+        logger,
+        submitQueue,
+        getAccount: async account => new Account({ account, redis, call, secret: await getSecret() })
+    }),
     Object.assign(
         {
             concurrency: SUBMIT_QC,
@@ -333,24 +135,16 @@ const submitWorker = new Worker(
     )
 );
 
+logBullErrors(submitWorker, 'worker:submit');
+
 submitWorker.on('completed', async job => {
     metrics(logger, 'queuesProcessed', 'inc', {
         queue: 'submit',
         status: 'completed'
     });
 
-    if (!job.data.queueId && job.data.qId) {
-        // this value was used to be called qId
-        job.data.queueId = job.data.qId;
-    }
-
-    if (job.data && job.data.account && job.data.queueId) {
-        try {
-            await redis.hdel(`${REDIS_PREFIX}iaq:${job.data.account}`, job.data.queueId);
-        } catch (err) {
-            logger.error({ msg: 'Failed to remove queue entry', account: job.data.account, queueId: job.data.queueId, messageId: job.data.messageId, err });
-        }
-    }
+    // BullMQ emits this only once the completion is stored, which is what lets the sent marker go
+    await completeSubmission(job, { redis, logger });
 
     logger.info({
         msg: 'Submission queue entry completed',
@@ -368,17 +162,26 @@ submitWorker.on('failed', async job => {
         status: 'failed'
     });
 
-    if (job.finishedOn || job.discarded) {
-        // this was final attempt, remove it
-        if (!job.data.queueId && job.data.qId) {
-            // this value was used to be called qId
-            job.data.queueId = job.data.qId;
-        }
+    // BullMQ sets finishedOn only when the job is done for good, which covers both exhausting its
+    // attempts and being ended early by the UnrecoverableError thrown for a permanent rejection.
+    if (job.finishedOn) {
+        // this was the final attempt
+        normalizeQueueId(job);
         if (job.data && job.data.account && job.data.queueId) {
+            // The content stays stored, within the failed-content bounds, so the message can be
+            // retried from the queue browser or the outbox API. It used to be deleted here, which
+            // left a failed job that a retry could put back into the queue but that then found
+            // nothing to send.
             try {
-                await redis.hdel(`${REDIS_PREFIX}iaq:${job.data.account}`, job.data.queueId);
+                await retainFailedContent({ account: job.data.account, queueId: job.data.queueId, finishedOn: job.finishedOn, logger });
             } catch (err) {
-                logger.error({ msg: 'Failed to remove queue entry', account: job.data.account, queueId: job.data.queueId, messageId: job.data.messageId, err });
+                logger.error({
+                    msg: 'Failed to retain the content of a failed message',
+                    account: job.data.account,
+                    queueId: job.data.queueId,
+                    messageId: job.data.messageId,
+                    err
+                });
             }
             // report as failed
             try {
@@ -402,7 +205,9 @@ submitWorker.on('failed', async job => {
         }
     }
 
-    logger.info({
+    let isFinal = isFinalFailedAttempt(job);
+
+    logger[isFinal ? 'error' : 'debug']({
         msg: 'Submission queue entry failed',
         action: 'submit',
         queue: job.queue.name,
@@ -420,6 +225,16 @@ async function onCommand(command) {
     switch (command.cmd) {
         case 'resource-usage':
             return threadStats.usage();
+
+        // Shutdown drain. Signals reach the main thread only, so server.js forwards them here.
+        // This matters more than for the other queues: the `iaq:` entry is cleared in the
+        // 'completed' handler, so a thread terminated mid-delivery leaves the job to be recovered
+        // as stalled and re-run - re-sending a message the MTA had already accepted. A graceful
+        // close stops fetching new jobs immediately and waits for the in-flight one.
+        case 'close':
+            await submitWorker.close();
+            return true;
+
         default:
             logger.debug({ msg: 'Unhandled command', command });
             return 999;
@@ -439,49 +254,12 @@ setInterval(() => {
 parentPort.postMessage({ cmd: 'ready' });
 
 parentPort.on('message', message => {
-    if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
-        let { resolve, reject, timer } = callQueue.get(message.mid);
-        clearTimeout(timer);
-        callQueue.delete(message.mid);
-        if (message.error) {
-            let err = new Error(message.error);
-            if (message.code) {
-                err.code = message.code;
-            }
-            if (message.statusCode) {
-                err.statusCode = message.statusCode;
-            }
-            if (message.info) {
-                err.info = message.info;
-            }
-            return reject(err);
-        } else {
-            return resolve(message.response);
-        }
+    if (rpc.handleResponse(message)) {
+        return;
     }
 
-    if (message && message.cmd === 'call' && message.mid) {
-        return onCommand(message.message)
-            .then(response => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    response
-                });
-            })
-            .catch(err => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    error: err.message,
-                    code: err.code,
-                    statusCode: err.statusCode
-                });
-            });
-    }
-
-    if (message && message.cmd === 'settings') {
-        maybeReloadHttpProxyAgent(message.data);
+    if (isCall(message)) {
+        return respond(parentPort, message, onCommand, { logger });
     }
 });
 

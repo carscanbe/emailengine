@@ -7,22 +7,18 @@
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
-const { arfDetect } = require('../lib/arf-detect');
+const { arfDetect, camelCaseComplaint, ORIGINAL_MESSAGE_TYPES } = require('../lib/arf-detect');
 const { simpleParser } = require('mailparser');
 const fs = require('fs');
 
-// Exercise the real complaint heuristic instead of a copy. The IMAP sync path
-// uses Mailbox.mightBeAComplaint (lib/email-client/imap/mailbox.js); it only
-// reads `this.path` and `this.isAllMail`, so we bind a minimal receiver that
-// represents an INBOX folder. A regression in the shipping heuristic now fails
-// this suite.
-const { Mailbox } = require('../lib/email-client/imap/mailbox');
+// Exercise the real complaint heuristic instead of a copy: BaseClient.mightBeAComplaint is the one
+// check both arrival paths run, gated on the message being in the Inbox, which is what the
+// messages here represent.
 const { BaseClient } = require('../lib/email-client/base-client');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 
-const inboxReceiver = { path: 'INBOX', isAllMail: false };
-const mightBeAComplaint = messageInfo => Mailbox.prototype.mightBeAComplaint.call(inboxReceiver, messageInfo);
+const mightBeAComplaint = messageInfo => BaseClient.prototype.mightBeAComplaint({ messageSpecialUse: '\\Inbox', ...messageInfo });
 
 const Path = require('path');
 const path = fname => Path.join(__dirname, 'fixtures', 'complaints', fname);
@@ -37,7 +33,6 @@ async function parseForArfDetect(filePath) {
     return {
         from: parsed.from?.value?.[0] || {},
         subject: parsed.subject || '',
-        messageSpecialUse: '\\Inbox',
         attachments: (parsed.attachments || []).map(att => ({
             contentType: att.contentType,
             content: att.content
@@ -258,48 +253,170 @@ test('mightBeAComplaint heuristics', async t => {
         };
         assert.strictEqual(mightBeAComplaint(messageInfo), false);
     });
+
+    await t.test('Tolerates a message without attachments', async () => {
+        // The Gmail API and Graph clients leave `attachments` unset when there are none, and the
+        // sender and subject rules qualify such a message on their own
+        assert.strictEqual(mightBeAComplaint({ from: { address: 'abuse@isp.example' }, subject: 'Abuse report' }), true);
+    });
 });
 
-// BaseClient.mightBeAComplaint (the Gmail/Outlook path) has drifted from the
-// Mailbox.mightBeAComplaint (IMAP path) heuristic above: it gates on
-// messageSpecialUse === '\\Inbox', requires an embedded message for the Hotmail
-// case, and does NOT recognize the generic feedback-loop sender patterns. These
-// tests pin that real (narrower) behavior so a future change to either copy is
-// caught. If the two are ever consolidated, update these expectations together.
-test('mightBeAComplaint drift between BaseClient and Mailbox', async t => {
-    const baseClientComplaint = messageData => BaseClient.prototype.mightBeAComplaint.call(null, messageData);
+// The arrival paths gate and download on the exported type lists, and arfDetect() has to parse
+// every type they name, or a message admitted on one of them is parsed against nothing
+test('every original-message attachment type is parsed', async t => {
+    for (const contentType of ORIGINAL_MESSAGE_TYPES) {
+        await t.test(contentType, async () => {
+            const report = await arfDetect({
+                attachments: [{ contentType, content: 'Message-ID: <original@example.com>\r\nSubject: Hello\r\n\r\nbody' }]
+            });
 
-    await t.test('BaseClient requires messageSpecialUse Inbox', () => {
-        const msg = { attachments: [{ contentType: 'message/feedback-report' }] };
-        // Without the Inbox special-use marker the base-client heuristic bails out.
-        assert.strictEqual(baseClientComplaint(msg), false);
-        assert.strictEqual(baseClientComplaint({ ...msg, messageSpecialUse: '\\Inbox' }), true);
+            assert.strictEqual(report.headers['message-id'], '<original@example.com>');
+        });
+    }
+});
+
+test('camelCaseComplaint', async t => {
+    await t.test('camelCases both sections of a report', () => {
+        const complaint = camelCaseComplaint({
+            arf: { 'feedback-type': 'abuse', 'original-rcpt-to': ['user@example.com'] },
+            headers: { 'message-id': '<a@b>', subject: 'x' }
+        });
+
+        assert.deepStrictEqual(complaint, {
+            arf: { feedbackType: 'abuse', originalRcptTo: ['user@example.com'] },
+            headers: { messageId: '<a@b>', subject: 'x' }
+        });
     });
 
-    await t.test('BaseClient ignores generic FBL sender patterns that Mailbox detects', () => {
-        const msg = {
+    await t.test('leaves a section out when it holds no fields', () => {
+        const complaint = camelCaseComplaint({ arf: { 'feedback-type': 'abuse' }, headers: {} });
+
+        assert.deepStrictEqual(Object.keys(complaint), ['arf']);
+    });
+});
+
+// A feedback report is an attacker-supplied attachment, and libmime.decodeHeaders() hands back
+// "__proto__" as a real own key, which arfDetect() would otherwise write into report.arf. No
+// global pollution is possible, and the reportDefaults merge at the end of arfDetect() already
+// discards the resulting prototype swap on its own - so this pins the observable contract, and
+// only fails if BOTH that merge and the key guard are dropped.
+test('ARF reports with prototype-shaped field names', async t => {
+    await t.test('drops a field name the camelCase step turns into "__proto__"', async () => {
+        // The name published in the complaint is not the name in the report: camelCaseComplaint()
+        // rebuilds it, and "_-_proto__" camelCases straight into "__proto__". Nothing before that
+        // has a reason to refuse the name, and the assignment then swaps the prototype of the
+        // section rather than storing a field - so unlike the case below, no later merge hides it
+        // and this fails on its own if the guard goes.
+        const report = await arfDetect({
+            from: { address: 'complaints@example.com' },
+            subject: 'complaint about message',
             messageSpecialUse: '\\Inbox',
-            from: { address: 'fbl@example.com' },
-            subject: 'FBL Report',
-            attachments: [{ contentType: 'text/rfc822-headers' }]
-        };
-        // Mailbox path: FBL sender + embedded message -> complaint.
-        assert.strictEqual(mightBeAComplaint(msg), true);
-        // BaseClient path: no feedback-report, text/rfc822-headers is not treated
-        // as an embedded message, no FBL pattern -> not a complaint.
-        assert.strictEqual(baseClientComplaint(msg), false);
+            attachments: [
+                {
+                    contentType: 'message/feedback-report',
+                    content: Buffer.from('Feedback-Type: abuse\r\n_-_proto__: injected\r\nUser-Agent: SomeUA\r\n')
+                }
+            ]
+        });
+
+        const complaint = camelCaseComplaint(report);
+
+        assert.strictEqual(Object.getPrototypeOf(complaint.arf), Object.prototype);
+        assert.deepStrictEqual(Object.keys(complaint.arf), ['feedbackType', 'userAgent']);
+        assert.strictEqual(complaint.arf.length, undefined, 'the section must not inherit the injected value');
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(complaint)).arf, complaint.arf);
     });
 
-    await t.test('BaseClient Hotmail case requires an embedded message', () => {
-        const base = {
+    await t.test('returns a clean report that survives the webhook round-trip', async () => {
+        // Field names go into the raw report body rather than an object literal, since a literal
+        // keyed by "__proto__" would set the literal's prototype instead of a key.
+        const report = await arfDetect({
+            from: { address: 'complaints@example.com' },
+            subject: 'complaint about message',
             messageSpecialUse: '\\Inbox',
-            from: { address: 'staff@hotmail.com' },
-            subject: 'complaint about message'
-        };
-        // Without an embedded message BaseClient rejects, Mailbox accepts.
-        assert.strictEqual(baseClientComplaint({ ...base, attachments: [] }), false);
-        assert.strictEqual(mightBeAComplaint({ ...base, attachments: [] }), true);
-        // With an embedded message both accept.
-        assert.strictEqual(baseClientComplaint({ ...base, attachments: [{ contentType: 'message/rfc822' }] }), true);
+            attachments: [
+                {
+                    contentType: 'message/feedback-report',
+                    content: Buffer.from('Feedback-Type: abuse\r\n__proto__: injected\r\nUser-Agent: SomeUA\r\n')
+                }
+            ]
+        });
+
+        assert.strictEqual(Object.getPrototypeOf(report.arf), Object.prototype);
+        assert.strictEqual(report.arf['feedback-type'], 'abuse');
+        assert.ok(!Object.keys(report.arf).includes('__proto__'));
+
+        const complaint = camelCaseComplaint(report);
+        assert.strictEqual(Object.getPrototypeOf(complaint.arf), Object.prototype);
+        assert.strictEqual(complaint.arf.feedbackType, 'abuse');
+        // The payload is published as JSON, so it has to survive a round-trip unchanged
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(complaint)).arf, complaint.arf);
+    });
+
+    await t.test('drops a field name the camelCase step turns into an Object.prototype method name', async () => {
+        // "to-string" is a name the parse boundary has no reason to refuse, but camelCased it
+        // shadows Object.prototype.toString as an own string property - the first consumer that
+        // string-coerces the published report then throws "Cannot convert object to a primitive
+        // value". Same for "has-own-property" and hasOwnProperty().
+        const report = await arfDetect({
+            from: { address: 'complaints@example.com' },
+            subject: 'complaint about message',
+            messageSpecialUse: '\\Inbox',
+            attachments: [
+                {
+                    contentType: 'message/feedback-report',
+                    content: Buffer.from('Feedback-Type: abuse\r\nTo-String: injected\r\nHas-Own-Property: injected\r\nUser-Agent: SomeUA\r\n')
+                }
+            ]
+        });
+
+        const complaint = camelCaseComplaint(report);
+
+        assert.deepStrictEqual(Object.keys(complaint.arf), ['feedbackType', 'userAgent']);
+        assert.strictEqual(typeof complaint.arf.toString, 'function', 'toString stays the inherited method');
+        assert.strictEqual(typeof complaint.arf.hasOwnProperty, 'function', 'hasOwnProperty stays the inherited method');
+        assert.strictEqual(typeof `${complaint.arf}`, 'string', 'the section still string-coerces');
+    });
+});
+
+test('ARF Source-IP precedence', async t => {
+    await t.test('the feedback report Source-IP wins over an X-Sender-IP header', async () => {
+        const report = await arfDetect({
+            from: { address: 'complaints@example.com' },
+            subject: 'complaint about message',
+            messageSpecialUse: '\\Inbox',
+            attachments: [
+                {
+                    contentType: 'message/feedback-report',
+                    content: Buffer.from('Feedback-Type: abuse\r\nSource-IP: 192.0.2.1\r\n')
+                },
+                {
+                    contentType: 'message/rfc822-headers',
+                    content: Buffer.from('X-Sender-IP: 198.51.100.2\r\nSubject: original\r\n\r\n')
+                }
+            ]
+        });
+
+        assert.strictEqual(report.arf['source-ip'], '192.0.2.1', 'the authoritative Source-IP is kept');
+    });
+
+    await t.test('X-Sender-IP fills in when the feedback report has no Source-IP', async () => {
+        const report = await arfDetect({
+            from: { address: 'complaints@example.com' },
+            subject: 'complaint about message',
+            messageSpecialUse: '\\Inbox',
+            attachments: [
+                {
+                    contentType: 'message/feedback-report',
+                    content: Buffer.from('Feedback-Type: abuse\r\n')
+                },
+                {
+                    contentType: 'message/rfc822-headers',
+                    content: Buffer.from('X-Sender-IP: 198.51.100.2\r\nSubject: original\r\n\r\n')
+                }
+            ]
+        });
+
+        assert.strictEqual(report.arf['source-ip'], '198.51.100.2', 'the fallback header is used');
     });
 });

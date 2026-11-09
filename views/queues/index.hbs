@@ -1,0 +1,104 @@
+{{!-- Queue overview: one card per BullMQ queue. Counts are links into the queue's own page, so
+      a number that looks wrong is one click from the entries behind it. static/js/queues.js
+      repaints the counts and the paused state every few seconds from /admin/queues/counts. --}}
+{{> ui/page-header title="Queues" icon="icon-[tabler--stack-2]" subtitle="What is waiting for a worker, what is running, and what failed: webhook deliveries, outgoing messages and exports." class="mb-6"}}
+
+{{#each queues}}
+<div class="card bg-base-100 shadow-md mb-6" data-queue-card="{{name}}">
+    <div class="card-header flex flex-wrap items-start justify-between gap-3">
+        <div class="flex items-start gap-3 min-w-0">
+            <div class="bg-primary/10 text-primary rounded-field flex size-9 shrink-0 items-center justify-center max-sm:hidden">
+                <span class="{{icon}} size-5"></span>
+            </div>
+            <div class="min-w-0">
+                <h6 class="card-title text-primary mb-0 flex flex-wrap items-center gap-2">
+                    <a href="/admin/queues/{{name}}" class="link link-animated">{{label}}</a>
+                    {{!-- The badge is rendered either way and toggled by the page script, so a
+                          pause made elsewhere shows up without a reload --}}
+                    <span data-queue-paused="{{name}}" class="{{#unless isPaused}}hidden{{/unless}}">
+                        {{> ui/badge label="Paused" variant="warning" title="Workers take nothing new from this queue until it is resumed"}}
+                    </span>
+                </h6>
+                <p class="text-base-content/60 text-sm mt-1 mb-0 max-w-2xl">{{description}}</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+            {{> queue_pause_controls name=name isPaused=isPaused next="/admin/queues"}}
+            {{#> ui/overflow-menu label=(concat "More " label " queue actions")}}
+            <li><a class="dropdown-item" href="/admin/queues/{{name}}">Open queue</a></li>
+            {{> queue_clean_items name=name title=title nounPlural=nounPlural}}
+            {{/ui/overflow-menu}}
+        </div>
+    </div>
+
+    <div class="card-body">
+        {{!-- One tile per state, in the order the queue page tabs use. The zero tiles are muted
+              so the eye lands on the states that hold something. --}}
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {{#each stateCounts}}
+            {{!-- five tiles on a two-column phone grid leave the last one alone on its row; it takes the row --}}
+            <a href="{{url}}" class="rounded-box border border-base-content/10 px-4 py-3 hover:bg-base-200/60 transition-colors{{#if @last}} max-sm:col-span-2{{/if}}" title="{{description}}">
+                <div class="text-2xl font-semibold {{#if count}}text-{{eeColor variant}}{{else}}text-base-content/40{{/if}}" data-queue-count="{{../name}}:{{name}}" data-count-variant="{{eeColor variant}}">{{formatInteger count @root.userLocale}}</div>
+                <div class="text-xs font-medium uppercase tracking-wide text-base-content/60">{{label}}</div>
+            </a>
+            {{/each}}
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-base-content/60">
+            {{#> ui/tooltip multiline=true text=(concat (ngettext "%d worker thread" "%d worker threads" concurrency.workers) " (" concurrency.workersEnv ")" (newline) (ngettext "%d job at a time each" "%d jobs at a time each" concurrency.perWorker) " (" concurrency.concurrencyEnv ")")}}
+            <span><span class="icon-[tabler--cpu] size-4 align-text-bottom"></span> Runs up to <strong class="text-base-content">{{concurrency.total}}</strong> at once</span>
+            {{/ui/tooltip}}
+
+            {{#equals name "submit"}}
+            {{#> ui/tooltip multiline=true text=(concat "The most recent failed messages keep their content so they can be retried:" (newline) "up to " (formatInteger @root.failedContent.limits.maxCount @root.userLocale) " messages (EENGINE_QUEUE_KEEP_FAILED_CONTENT)" (newline) "up to " @root.failedContent.limits.maxBytesLabel " in total (EENGINE_QUEUE_KEEP_FAILED_CONTENT_SIZE)" (newline) "for " (ngettext "%d day" "%d days" @root.failedContent.limits.maxAgeDays) " (EENGINE_QUEUE_KEEP_FAILED_AGE)")}}
+            <span><span class="icon-[tabler--database] size-4 align-text-bottom"></span> Content kept for <strong class="text-base-content">{{@root.failedContent.count}}</strong> failed {{#equals @root.failedContent.count 1}}message{{else}}messages{{/equals}} ({{@root.failedContent.bytesLabel}} of {{@root.failedContent.limits.maxBytesLabel}})</span>
+            {{/ui/tooltip}}
+            {{/equals}}
+        </div>
+    </div>
+</div>
+{{/each}}
+
+{{!-- The help panel reads top to bottom the way the page does: the states the tiles count, what
+      is kept and for how long (the live bounds, not the defaults), then the actions and the API.
+      Paragraphs carry their own bottom margin like every other help panel; ui/details puts no
+      spacing between its children. --}}
+{{#> ui/details summary="How the queues work" class="card bg-base-100 shadow-md mb-6"}}
+<div>
+    <p class="mb-2">Webhook deliveries, outgoing messages and exports each wait in a queue of their own until a worker
+        thread takes them. Every entry passes through the same states, which the tiles above count:</p>
+    <ul class="list-disc ps-6 space-y-1 mb-4">
+        <li><strong>Waiting</strong>: ready to run as soon as a worker is free. The top of the list is what runs next.</li>
+        <li><strong>Active</strong>: being processed by a worker right now.</li>
+        <li><strong>Delayed</strong>: waiting for its scheduled time, or for the backoff before the next attempt after a
+            failed one.</li>
+        <li><strong>Failed</strong>: given up on, after the last attempt or on an error that retrying could not fix. The
+            webhook and message queues keep their most recent {{formatInteger retention.failedCount userLocale}} failed
+            entries for {{ngettext '%d day' '%d days' retention.failedAgeDays}}.</li>
+        <li><strong>Completed</strong>: finished. {{#if retention.completedCount}}The webhook and message queues keep their
+            most recent {{formatInteger retention.completedCount userLocale}} for at most a day{{else}}Webhook deliveries
+            and messages are removed as soon as they finish{{/if}}, as set by the completed job history limit in
+            <a href="/admin/config/service#queue_settings" class="link link-animated">General settings</a>.</li>
+    </ul>
+    <p class="mb-2">An export leaves its queue the moment it is done, whatever the outcome; its result is on the
+        account's page.</p>
+    <p class="mb-2"><strong>Pause</strong> stops the workers from taking anything more out of a queue: an attempt that is
+        already running finishes, and new entries keep arriving and wait until the queue is resumed. <strong>Clean</strong>
+        removes every completed or every failed entry of a queue at once. On a queue's own page a single entry can be
+        opened, run now instead of waiting for its time, retried after it failed (a message only while its content is
+        still kept) or removed.</p>
+    <p class="mb-2">The counts on this page refresh on their own every few seconds.</p>
+    <p class="mb-2">The API reports the same counts through
+        <a href="/admin/reference/settings#getV1SettingsQueueQueue" class="link link-animated"><code>GET /v1/settings/queue/{queue}</code></a>
+        and lists the outgoing messages through
+        <a href="/admin/reference/outbox#getV1Outbox" class="link link-animated"><code>GET /v1/outbox</code></a>, with the
+        calls to retry, send now or remove a message beside it.</p>
+    <p class="mb-0"><a href="https://learn.emailengine.app/docs/advanced/queue-management" target="_blank"
+            rel="noopener noreferrer" referrerpolicy="no-referrer" class="link link-animated">Learn more about the queues</a>.</p>
+</div>
+{{/ui/details}}
+
+{{> queue_clean_modal}}
+
+<script data-cfasync="false" src="/static/js/queues.js" defer></script>

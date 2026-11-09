@@ -7,12 +7,13 @@
 # preparedLicense here on purpose - the suite enables auth and activates the trial through the UI.
 
 # JSON formatted settings, seeded on startup.
-# serviceUrl is the recognizable e2e URL that postalsys-web allowlists to skip the trial rate
-# limit. It is only used as the trial request's `url`; the browser and API talk to 127.0.0.1:7099.
+# serviceUrl identifies this throwaway e2e instance to the trial endpoint. It is only used as the
+# trial request's `url`; the browser and API talk to 127.0.0.1:7099.
 settings = '''
 {
   "serviceUrl": "https://e2e.emailengine.app/",
-  "ignoreMailCertErrors": true
+  "ignoreMailCertErrors": true,
+  "sentryEnabled": false
 }
 '''
 
@@ -27,7 +28,7 @@ imap = 1
 level = "warn"
 
 [dbs]
-# Isolated Redis DB for e2e; flushed before each run by test/e2e/flush-redis.js
+# Isolated Redis DB for e2e; flushed before each run by test/helpers/flush-redis.js
 redis = "redis://127.0.0.1:6379/14"
 
 [api]

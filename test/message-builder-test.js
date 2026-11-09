@@ -10,11 +10,13 @@ const test = require('node:test');
 const assert = require('node:assert').strict;
 
 const {
+    applyTemplate,
     NetworkRoutingBuilder,
     NotificationBuilder,
     ProviderMessageIdHandler,
     SmtpErrorBuilder,
-    SentMailCopyDecider
+    SentMailCopyDecider,
+    SmtpConfigBuilder
 } = require('../lib/email-client/message-builder');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
@@ -63,37 +65,35 @@ test('SentMailCopyDecider.shouldCopy', async t => {
 });
 
 test('ProviderMessageIdHandler', async t => {
-    await t.test('rewrites the message ID from a Hotmail/Outlook response', () => {
-        const info = { messageId: '<original@local>', response: '250 2.0.0 OK <ABC123.prod.outlook.com>' };
-        const original = ProviderMessageIdHandler.handleHotmail(info);
-        assert.strictEqual(original, '<original@local>');
-        assert.strictEqual(info.messageId, '<ABC123.prod.outlook.com>');
+    const { parseServerMessageId } = require('nodemailer/lib/smtp-connection/server-message-id.js');
+
+    // What nodemailer puts on info for the replies this used to parse itself, so a nodemailer change
+    // in the formats it reads shows up here
+    const sent = (response, host) => ({ messageId: '<original@local>', response, serverMessageId: parseServerMessageId(response, host) });
+
+    await t.test('takes the Message-ID an Outlook server gave the message', () => {
+        const info = sent('250 2.0.0 OK <ABC123@AM0PR01MB.eurprd01.prod.outlook.com> [Hostname=AM0PR01MB]', 'smtp.office365.com');
+        assert.strictEqual(ProviderMessageIdHandler.processResponse(info), '<original@local>');
+        assert.strictEqual(info.messageId, '<ABC123@AM0PR01MB.eurprd01.prod.outlook.com>');
     });
 
-    await t.test('leaves the message ID untouched for a non-Hotmail response', () => {
-        const info = { messageId: '<keep@local>', response: '250 OK queued' };
-        assert.strictEqual(ProviderMessageIdHandler.handleHotmail(info), undefined);
-        assert.strictEqual(info.messageId, '<keep@local>');
+    await t.test('builds the Amazon SES Message-ID, email.amazonses.com in us-east-1', () => {
+        const id = '0100018b5c3c0a4f-6b9e6f4e-0f8e-4f3e-9b5a-1c2d3e4f5a6b-000000';
+        const east = sent(`250 Ok ${id}`, 'email-smtp.us-east-1.amazonaws.com');
+        assert.strictEqual(ProviderMessageIdHandler.processResponse(east), '<original@local>');
+        assert.strictEqual(east.messageId, `<${id}@email.amazonses.com>`);
+
+        const west = sent(`250 Ok ${id}`, 'email-smtp.eu-west-1.amazonaws.com');
+        ProviderMessageIdHandler.processResponse(west);
+        assert.strictEqual(west.messageId, `<${id}@eu-west-1.amazonses.com>`);
     });
 
-    await t.test('builds an AWS SES message ID from the response (us-east-1 -> email)', () => {
-        const info = { messageId: '<orig@local>', response: '250 Ok 0123456789abcdef0123456789abcdef' };
-        const original = ProviderMessageIdHandler.handleAwsSes(info, 'email-smtp.us-east-1.amazonaws.com');
-        assert.strictEqual(original, '<orig@local>');
-        assert.strictEqual(info.messageId, '<0123456789abcdef0123456789abcdef@email.amazonses.com>');
-    });
-
-    await t.test('builds an AWS SES message ID for a non-us-east region', () => {
-        const info = { messageId: '<orig@local>', response: '250 Ok abcdef0123456789' };
-        ProviderMessageIdHandler.handleAwsSes(info, 'email-smtp.eu-west-1.amazonaws.com');
-        assert.strictEqual(info.messageId, '<abcdef0123456789@eu-west-1.amazonses.com>');
-    });
-
-    await t.test('processResponse tries Hotmail then SES', () => {
-        const sesInfo = { messageId: '<orig@local>', response: '250 Ok deadbeefdeadbeef' };
-        const original = ProviderMessageIdHandler.processResponse(sesInfo, 'email-smtp.us-east-1.amazonaws.com');
-        assert.strictEqual(original, '<orig@local>');
-        assert.match(sesInfo.messageId, /amazonses\.com>$/);
+    await t.test('leaves the Message-ID alone for any other reply', () => {
+        for (const info of [sent('250 OK queued', 'smtp.example.com'), sent('250 Ok 0100018b-000000', 'smtp.example.com'), { messageId: '<keep@local>' }]) {
+            const before = info.messageId;
+            assert.strictEqual(ProviderMessageIdHandler.processResponse(info), undefined);
+            assert.strictEqual(info.messageId, before);
+        }
     });
 });
 
@@ -108,17 +108,30 @@ test('SmtpErrorBuilder.buildStatus', async t => {
         assert.match(status.description, /timed out/i);
     });
 
-    await t.test('returns null for an unknown error code', () => {
-        assert.strictEqual(SmtpErrorBuilder.buildStatus({ code: 'ESOMETHINGELSE' }, settings, null), null);
+    // The description table turns a known code into a sentence an operator can act on; a code it
+    // does not cover still has to be recorded, or the gateway's lastError and the account's
+    // smtpStatus keep showing the previous attempt.
+    await t.test('an unknown error code falls back to the error message', () => {
+        const status = SmtpErrorBuilder.buildStatus({ code: 'ESOMETHINGELSE', message: '550 mailbox unavailable' }, settings, null);
+        assert.ok(status);
+        assert.strictEqual(status.status, 'error');
+        assert.strictEqual(status.code, 'ESOMETHINGELSE');
+        assert.strictEqual(status.description, '550 mailbox unavailable');
     });
 
-    await t.test('returns null when the description builder yields nothing', () => {
-        // EMESSAGE maps to a builder that returns null -> no status.
-        assert.strictEqual(SmtpErrorBuilder.buildStatus({ code: 'EMESSAGE' }, settings, null), null);
+    await t.test('a code whose description builder yields nothing falls back the same way', () => {
+        // EMESSAGE, ESTREAM and EENVELOPE map to builders that return null on purpose
+        const status = SmtpErrorBuilder.buildStatus({ code: 'EENVELOPE', message: 'No recipients defined' }, settings, null);
+        assert.ok(status);
+        assert.strictEqual(status.description, 'No recipients defined');
     });
 
-    await t.test('ESOCKET only produces a status when it is a cert failure', () => {
-        assert.strictEqual(SmtpErrorBuilder.buildStatus({ code: 'ESOCKET' }, settings, null), null);
+    await t.test('a message-less error still gets a description', () => {
+        assert.strictEqual(SmtpErrorBuilder.buildStatus({ code: 'EMESSAGE' }, settings, null).description, 'Failed to send email');
+    });
+
+    await t.test('ESOCKET describes the certificate failure and falls back otherwise', () => {
+        assert.strictEqual(SmtpErrorBuilder.buildStatus({ code: 'ESOCKET', message: 'socket hang up' }, settings, null).description, 'socket hang up');
         const certStatus = SmtpErrorBuilder.buildStatus({ code: 'ESOCKET', cert: {}, reason: 'self signed' }, settings, null);
         assert.ok(certStatus);
         assert.match(certStatus.description, /Certificate check/);
@@ -133,6 +146,15 @@ test('NetworkRoutingBuilder.build', async t => {
     await t.test('captures localAddress and proxy', () => {
         const routing = NetworkRoutingBuilder.build({ localAddress: '10.0.0.5', proxy: 'socks5://p', name: 'host1' }, {});
         assert.deepStrictEqual(routing, { localAddress: '10.0.0.5', proxy: 'socks5://p', name: 'host1' });
+    });
+
+    await t.test('strips proxy credentials, since the object reaches webhook payloads', () => {
+        const routing = NetworkRoutingBuilder.build({ proxy: 'socks5://user:secret@proxy.example.com:1080' }, {});
+        assert.strictEqual(routing.proxy, 'socks5://proxy.example.com:1080');
+        assert.doesNotMatch(JSON.stringify(routing), /secret/);
+
+        const http = NetworkRoutingBuilder.build({ proxy: 'http://user:secret@proxy.example.com:3128/' }, {});
+        assert.strictEqual(http.proxy, 'http://proxy.example.com:3128/');
     });
 
     await t.test('records a requested localAddress that differs from the effective one', () => {
@@ -171,5 +193,68 @@ test('NotificationBuilder payloads', async t => {
         assert.strictEqual(payload.smtpResponseCode, 550);
         assert.strictEqual(payload.smtpCommand, 'RCPT');
         assert.deepStrictEqual(payload.job, { attempt: 1 });
+    });
+});
+
+test('SmtpConfigBuilder.loadGateway', async t => {
+    const silentLogger = { warn: () => false, info: () => false, debug: () => false, error: () => false };
+
+    await t.test('without a gateway id there is nothing to load', async () => {
+        const builder = new SmtpConfigBuilder({ redis, logger: silentLogger, account: 'a' });
+        assert.deepStrictEqual(await builder.loadGateway(null, '<m@x>'), { gatewayData: null, gatewayObject: null });
+    });
+
+    // The message was queued for a gateway; falling back to the account's own SMTP server would
+    // send it through a route nobody asked for.
+    await t.test('a gateway that does not exist fails instead of falling through to the account SMTP', async () => {
+        const builder = new SmtpConfigBuilder({ redis, logger: silentLogger, account: 'a' });
+        await assert.rejects(builder.loadGateway('no-such-gateway-for-test', '<m@x>'), err => {
+            assert.strictEqual(err.code, 'GatewayNotFound');
+            assert.match(err.message, /no-such-gateway-for-test/);
+            // Boom serializes output.payload only, so an in-process API caller sees the code
+            // just as it sees MessageNotFound and FolderNotFound
+            assert.strictEqual(err.output.payload.code, 'GatewayNotFound');
+            assert.strictEqual(err.output.statusCode, 404);
+            return true;
+        });
+    });
+
+    await t.test('a transient load failure is thrown as is, so the job retries', async () => {
+        const failing = new Error('Connection is closed.');
+        const brokenRedis = { hgetallBuffer: async () => Promise.reject(failing) };
+        const builder = new SmtpConfigBuilder({ redis: brokenRedis, logger: silentLogger, account: 'a' });
+        await assert.rejects(builder.loadGateway('gw1', '<m@x>'), err => err === failing);
+    });
+});
+
+test('applyTemplate()', async t => {
+    const template = { format: 'markdown', content: { subject: 'Hi {{name}}', html: '# {{name}}', text: 'plain' } };
+
+    await t.test('merges the template content and applies its format', () => {
+        const data = applyTemplate({ template: 'tpl-1', render: { params: { name: 'Nyan' } } }, template);
+
+        assert.deepEqual(data.render, { params: { name: 'Nyan' }, format: 'markdown' });
+        assert.equal(data.subject, 'Hi {{name}}');
+        assert.equal(data.html, '# {{name}}');
+        assert.ok(!('template' in data), 'the template id is consumed');
+    });
+
+    await t.test('a template with no render options still gets its format', () => {
+        assert.deepEqual(applyTemplate({ template: 'tpl-1' }, template).render, { format: 'markdown' });
+    });
+
+    // The documented way to send a stored template as-is. `data.render = data.render || {}` turned the
+    // explicit false into an empty options object, and an options object renders - so the one value
+    // that asked for no rendering was the one value that could not be expressed.
+    await t.test('render false survives, so the template is sent as-is', () => {
+        const data = applyTemplate({ template: 'tpl-1', render: false }, template);
+
+        assert.equal(data.render, false);
+        assert.equal(data.html, '# {{name}}', 'the content is still merged');
+    });
+
+    await t.test('a template with no html or no format is merged without render options', () => {
+        assert.equal(applyTemplate({ template: 'tpl-1' }, { format: 'markdown', content: { text: 'plain' } }).render, undefined);
+        assert.equal(applyTemplate({ template: 'tpl-1' }, { content: { html: '<p>x</p>' } }).render, undefined);
     });
 });

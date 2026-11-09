@@ -1,344 +1,178 @@
-<div class="d-sm-flex align-items-center justify-content-between mb-1">
-    <h1 class="h3 mb-0 text-gray-800">
+{{!-- live state badge: app.js updates the badge-{type} class, text and error
+      tooltip through the /admin/changes SSE feed (targets .state-info[data-type]) --}}
+{{> ui/page-header title="IMAP Proxy" icon="icon-[tabler--server]" stateLabel=serverState.label stateType="imapProxy" class="mb-1"}}
 
-        <small><i class="fas fa-server fa-fw"></i></small>
-        IMAP Proxy
-        <span class="badge badge-{{serverState.label.type}} state-info" data-type="imapProxy">
-            {{#if serverState.label.spinner}}
-            <i class="fas fa-spinner fa-spin fa-fw"></i>
-            {{/if}}
+<p>Connect an IMAP client to an account managed by EmailEngine. The proxy authenticates with the email server
+    using the account's stored credentials. Your client signs in with an access token or the global password.</p>
 
-            {{serverState.label.name}}</span>
-    </h1>
+<div class="alert alert-soft alert-info mb-6">
+    <span class="icon-[tabler--info-circle] size-5 shrink-0"></span>
+    <span><strong>Compatibility Note:</strong> IMAP proxy only works with accounts that
+        connect via IMAP protocol. This includes Gmail and Microsoft 365 accounts using OAuth2 authentication with IMAP
+        access. Accounts using Microsoft Graph or Gmail API as their mail backend are not supported through the
+        proxy.</span>
 </div>
 
-<p>Access any EmailEngine-managed account through standard IMAP clients. The proxy handles authentication with the real
-    email server, so your IMAP client only needs an access token-no actual credentials or OAuth2 setup required.</p>
+<p class="mb-6">Configure your IMAP proxy server below.</p>
 
-<div class="alert alert-info mb-4">
-    <i class="fas fa-info-circle"></i> <strong>Compatibility Note:</strong> IMAP proxy only works with accounts that
-    connect via IMAP protocol. This includes Gmail and Microsoft 365 accounts using OAuth2 authentication with IMAP
-    access. Accounts using MS Graph API or Gmail API as their mail backend are not supported through the proxy.
-</div>
-
-<p class="mb-4">Configure your IMAP proxy server below.</p>
+{{> ui/env-managed-alert}}
 
 <form method="post" action="/admin/config/imap-proxy">
-    <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
+    {{!-- no id: the layout already renders the #crumb element the script reads --}}
+    <input type="hidden" name="crumb" value="{{crumb}}" />
 
-    <div class="card mt-4">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Server Configuration</h6>
+    <div class="card bg-base-100 shadow-md mb-6">
+        <div class="card-header">
+            <h6 class="card-title text-primary">Server Configuration</h6>
         </div>
-        <div class="card-body">
-            <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerEnabled</a>]
-                </div>
 
-                <input type="checkbox" class="form-check-input {{#if errors.imapProxyServerEnabled}}is-invalid{{/if}}"
-                    id="imapProxyServerEnabled" name="imapProxyServerEnabled" {{#if
-                    values.imapProxyServerEnabled}}checked{{/if}} />
-                <label class="form-check-label" for="imapProxyServerEnabled">Enable IMAP Proxy</label>
-                {{#if errors.imapProxyServerEnabled}}
-                <span class="invalid-feedback">{{errors.imapProxyServerEnabled}}</span>
-                {{/if}}
+        <div class="px-6 py-4 border-b border-base-content/10 ee-toggle-row flex items-start justify-between gap-4">
+            {{> ui/checkbox id="imapProxyServerEnabled" name="imapProxyServerEnabled" label="Enable IMAP Proxy"
+            checked=values.imapProxyServerEnabled error=errors.imapProxyServerEnabled}}
+
+            <div class="text-end">
+                {{> ui/setting-ref name="imapProxyServerEnabled" class="whitespace-nowrap"}}
             </div>
+        </div>
 
-            <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerPort</a>]
-                </div>
-
-                <label for="imapProxyServerPort">Port</label>
-
+        <div class="card-body space-y-4">
+            <div>
+                {{> ui/setting-ref name="imapProxyServerPort"}}
+                {{#> ui/form-field id="imapProxyServerPort" label="Port" error=errors.imapProxyServerPort}}
                 <input type="number"
-                    class="form-control trigger-example-render {{#if errors.imapProxyServerPort}}is-invalid{{/if}}"
+                    class="input trigger-example-render{{#if errors.imapProxyServerPort}} is-invalid{{/if}}"
                     id="imapProxyServerPort" name="imapProxyServerPort" value="{{values.imapProxyServerPort}}" />
-
-                {{#if errors.imapProxyServerPort}}
-                <span class="invalid-feedback">{{errors.imapProxyServerPort}}</span>
-                {{/if}}
-                <small class="form-text text-muted">TCP port for IMAP connections. Ports below 1024 may require elevated
-                    privileges.</small>
+                <span class="helper-text">TCP port for IMAP connections. Ports below 1024 may require elevated
+                    privileges.</span>
+                {{/ui/form-field}}
             </div>
 
-            <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerHost</a>]
-                </div>
-
-                <label for="imapProxyServerHost">Listen Address</label>
-
+            <div>
+                {{> ui/setting-ref name="imapProxyServerHost"}}
+                {{#> ui/form-field id="imapProxyServerHost" label="Listen Address" error=errors.imapProxyServerHost}}
                 <input type="text"
-                    class="form-control basicAutoComplete trigger-example-render {{#if errors.imapProxyServerHost}}is-invalid{{/if}}"
+                    class="input basicAutoComplete trigger-example-render{{#if errors.imapProxyServerHost}} is-invalid{{/if}}"
                     id="imapProxyServerHost" name="imapProxyServerHost" value="{{values.imapProxyServerHost}}"
                     data-lpignore="true" autocomplete="off" />
-
-                {{#if errors.imapProxyServerHost}}
-                <span class="invalid-feedback">{{errors.imapProxyServerHost}}</span>
-                {{/if}}
-                <small class="form-text text-muted">IP address to bind to. Use "0.0.0.0" or leave empty to accept
-                    connections from anywhere.</small>
+                <span class="helper-text">IP address the proxy listens on. Use "0.0.0.0" or leave blank to listen on all IPv4 interfaces.</span>
+                {{/ui/form-field}}
             </div>
 
-            <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerProxy</a>]
-                </div>
-
-                <input type="checkbox" class="form-check-input {{#if errors.imapProxyServerProxy}}is-invalid{{/if}}"
-                    id="imapProxyServerProxy" name="imapProxyServerProxy" {{#if
-                    values.imapProxyServerProxy}}checked{{/if}} />
-                <label class="form-check-label" for="imapProxyServerProxy">Enable PROXY Protocol</label>
-                {{#if errors.imapProxyServerProxy}}
-                <span class="invalid-feedback">{{errors.imapProxyServerProxy}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Required when using HAProxy with <code>send-proxy</code>.</small>
+            <div>
+                {{> ui/setting-ref name="imapProxyServerProxy"}}
+                {{> ui/checkbox id="imapProxyServerProxy" name="imapProxyServerProxy" label="Enable PROXY Protocol"
+                checked=values.imapProxyServerProxy error=errors.imapProxyServerProxy}}
+                <span class="helper-text">Required when using HAProxy with <code>send-proxy</code>. The PROXY header is trusted from any peer, so only enable this when the port is reachable through the load balancer alone.</span>
             </div>
         </div>
     </div>
 
-    <div class="card mt-4">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Authentication</h6>
+    <div class="card bg-base-100 shadow-md mb-6">
+        <div class="card-header">
+            <h6 class="card-title text-primary">Authentication</h6>
         </div>
         <div class="card-body">
 
-            <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerPassword</a>]
-                </div>
-
-                <label for="imapProxyServerPassword">Global Password</label>
-                <div class="input-group">
-                    <input type="password"
-                        class="form-control trigger-example-render {{#if errors.imapProxyServerPassword}}is-invalid{{/if}}"
-                        id="imapProxyServerPassword" name="imapProxyServerPassword"
-                        value="{{values.imapProxyServerPassword}}" {{#unless
-                        values.imapProxyServerPassword}}placeholder="No global password set" {{/unless}}
-                        data-lpignore="true" autocomplete="off" />
-
-                    <div class="input-group-append">
-                        <button class="btn btn-outline-primary" type="button" id="showPassword"><i
-                                class="fas fa-eye"></i></button>
-                    </div>
-                </div>
-
-                {{#if errors.imapProxyServerPassword}}
-                <span class="invalid-feedback">{{errors.imapProxyServerPassword}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Optional shared password for all accounts. Leave empty to use only
-                    access tokens.</small>
+            <div>
+                {{> ui/setting-ref name="imapProxyServerPassword"}}
+                {{#> ui/form-field id="imapProxyServerPassword" label="Global Password"
+                error=errors.imapProxyServerPassword}}
+                {{> ui/secret-field id="imapProxyServerPassword" value=values.imapProxyServerPassword
+                error=errors.imapProxyServerPassword placeholder="No global password set"
+                inputClass="trigger-example-render" toggleId="showPassword"}}
+                <span class="helper-text">Optional shared password for all accounts. Leave empty to use only access
+                    tokens.</span>
+                {{/ui/form-field}}
             </div>
         </div>
 
-        <div class="card-footer">
-            <small class="text-muted">
-                <i class="fas fa-info-circle text-gray-300"></i>
+        <div class="card-footer border-base-content/10 border-t px-6 py-4">
+            <small class="text-base-content/60">
+                <span class="icon-[tabler--info-circle] size-4 align-text-bottom"></span>
 
                 <strong>How to connect:</strong> Use account IDs as usernames. For passwords, use either the global
-                password above or <a href="/admin/tokens">access tokens</a> with IMAP Proxy scope.
+                password above or <a href="/admin/tokens" class="link link-animated">access tokens</a> with IMAP Proxy
+                scope.
             </small>
         </div>
 
     </div>
 
-    <div class="card mt-4">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Security (TLS)</h6>
-        </div>
-        <div class="card-body">
-            <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
-                        target="_blank" rel="noopener noreferrer">imapProxyServerTLSEnabled</a>]
-                </div>
+    {{> tls_security_card field="imapProxyServerTLSEnabled"}}
 
-                <input type="checkbox"
-                    class="form-check-input trigger-example-render {{#if errors.imapProxyServerTLSEnabled}}is-invalid{{/if}}"
-                    id="imapProxyServerTLSEnabled" {{#if
-                    certificateData}}data-certificate="{{certificateData.fingerprint}}" {{/if}}
-                    data-domain="{{serviceDomain}}" name="imapProxyServerTLSEnabled" {{#if
-                    values.imapProxyServerTLSEnabled}}checked{{/if}} />
+    {{#> ui/details summary="Client Configuration Examples" class="card bg-base-100 shadow-md mb-6"}}
 
-                <label class="form-check-label" for="imapProxyServerTLSEnabled">Enable TLS Encryption
+    <p class="mb-4">Connect to the proxy using the account ID as your IMAP username.</p>
 
-                    {{#if certificateData.label}}
-                    <span id="tls-label" class="badge badge-{{certificateData.label.type}}"
-                        data-labeltype="{{certificateData.label.type}}" style="cursor: default;" data-toggle="tooltip"
-                        data-placement="top"
-                        title="{{certificateData.label.title}}">{{certificateData.label.text}}</span>
-                    {{/if}}
+    {{#> ui/tabs label="Client configuration examples" elId="code-examples"}}
+    {{> ui/tab target="example-node-imap" label="Node.js (node-imap)" active=true}}
+    {{> ui/tab target="example-php-imap" label="PHP (php-imap)"}}
+    {{/ui/tabs}}
 
-                </label>
+    <div class="mt-4 mb-4">
+        <div id="example-node-imap" role="tabpanel" aria-labelledby="example-node-imap-tab">
 
-                {{#if errors.imapProxyServerTLSEnabled}}
-                <span class="invalid-feedback">{{errors.imapProxyServerTLSEnabled}}</span>
-                {{/if}}
-
-                <small class="form-text text-muted">
-                    {{#if serviceDomain}}
-
-                    Certificates will be provisioned for <em>{{serviceDomain}}</em>. Change the domain in <a
-                        href="/admin/config/service#settingsServiceUrl">Service URL settings</a>.
-
-                    {{else}}
-
-                    Set a domain name in <a href="/admin/config/service#settingsServiceUrl">Service URL settings</a> to
-                    enable automatic TLS certificates.
-
-                    {{/if}}
-
-                </small>
-            </div>
+            <pre class="ee-code-block"><code id="example-node-imap-code"></code></pre>
 
         </div>
 
-        {{#if serviceDomain}}
-        <div class="card-footer">
-            <small class="text-muted">
-                <i class="fas fa-info-circle text-gray-300"></i>
-                EmailEngine must be publicly accessible at <em><a href="{{serviceUrl}}" target="_blank"
-                        rel="noopener noreferrer">{{serviceUrl}}</a></em> for automatic certificates. Otherwise, a
-                self-signed certificate will be used.
-            </small>
-        </div>
-        {{/if}}
+        <div id="example-php-imap" class="hidden" role="tabpanel" aria-labelledby="example-php-imap-tab">
 
-    </div>
+            <pre class="ee-code-block"><code id="example-php-imap-code"></code></pre>
 
-    <div class="card mt-4 mb-4">
-        <a href="#showHelp" class="d-block card-header py-3 collapsed" data-toggle="collapse" role="button"
-            aria-expanded="true" aria-controls="showHelp">
-            <h6 class="m-0 font-weight-bold text-primary">Client Configuration Examples</h6>
-        </a>
-        <div class="collapse" id="showHelp">
-            <div class="card-body">
-                <p>Connect to the proxy using the account ID as your IMAP username.</p>
-
-                <ul class="nav nav-tabs mb-3" id="code-examples" role="tablist">
-                    <li class="nav-item" role="presentation">
-                        <a class="nav-link active" id="example-node-imap-tab" data-toggle="tab"
-                            href="#example-node-imap" role="tab" aria-controls="example-node-imap"
-                            aria-selected="true">Node.js (node-imap)</a>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <a class="nav-link" id="example-php-imap-tab" data-toggle="tab" href="#example-php-imap"
-                            role="tab" aria-controls="example-php-imap">PHP (php-imap)</a>
-                    </li>
-                </ul>
-
-                <!-- Tab panes -->
-                <div class="tab-content">
-                    <div class="tab-pane active" id="example-node-imap" role="tabpanel"
-                        aria-labelledby="example-node-imap-tab">
-
-                        <pre><code id="example-node-imap-code"></code></pre>
-
-                    </div>
-
-                    <div class="tab-pane" id="example-php-imap" role="tabpanel" aria-labelledby="example-php-imap-tab">
-
-                        <pre><code id="example-php-imap-code"></code></pre>
-
-                    </div>
-                </div>
-
-                <div>
-                    <div class="form-group form-check">
-                        <input type="checkbox" class="form-check-input trigger-example-render"
-                            id="exampleShowPassword" />
-                        <label class="form-check-label" for="exampleShowPassword">Show password in examples</label>
-                    </div>
-                </div>
-
-            </div>
         </div>
     </div>
 
-    <div class="mb-4 mt-4">
-        <button type="submit" class="btn btn-primary btn-icon-split">
-            <span class="icon text-white-50">
-                <i class="fas fa-cog"></i>
-            </span>
-            <span class="text">Save Changes</span>
-        </button>
+    <div>
+        {{> ui/checkbox id="exampleShowPassword" noName=true label="Show password in examples" class="trigger-example-render"}}
+    </div>
+
+    {{/ui/details}}
+
+    <div class="mb-6">
+        {{> ui/btn label="Save changes" type="submit" icon="icon-[tabler--settings]"}}
     </div>
 
 </form>
 
-<div class="modal fade" id="tlsModal" tabindex="-1" aria-labelledby="tlsModalLabel" aria-hidden="true">
-    <div class="modal-dialog  modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-
-                <h5 class="modal-title modal-show-default" id="tlsModalLabel">Provisioning Certificate <i
-                        class="fas fa-spinner fa-spin fa-fw modal-show-default"></i></h5>
-                <h5 class="modal-title modal-show-error">Certificate Request Failed</h5>
-
-                <button type="button" class="close modal-show-error d-none" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
-            </div>
-            <div class="modal-body modal-show-default">
-                Setting up TLS certificate for <em class="show-service-domain">{{serviceDomain}}</em>. This may take a
-                moment...
-            </div>
-            <div class="modal-body modal-show-error d-none">
-                <p>Unable to provision certificate:</p>
-
-                <div class="text-monospace error-content alert alert-danger"></div>
-            </div>
-
-            <div class="modal-footer modal-show-error d-none">
-                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
 
 <input type="hidden" id="availableAddresses" value="{{availableAddresses}}">
 
-<script>
+<script data-cfasync="false" nonce="{{cspNonce}}">
     document.addEventListener('DOMContentLoaded', () => {
 
-        let showBt = document.getElementById('showPassword');
-        let serviceSecretElm = document.getElementById('imapProxyServerPassword');
-
-        let showSecret = () => {
-            let current = serviceSecretElm.getAttribute('type')
-            serviceSecretElm.setAttribute('type', current === 'text' ? 'password' : 'text');
-            showBt.blur()
-        }
-
-        showBt.addEventListener('click', showSecret);
-
         let availableAddresses = document.getElementById('availableAddresses').value.split(',').map(e => e.trim()).filter(e => e);
-        $('.basicAutoComplete').autoComplete({
-            resolver: 'custom',
-            events: {
-                search: function (query, callback) {
-                    callback(availableAddresses.filter(a => a.indexOf(query) >= 0))
-                }
+        uiDatalist('available-addresses-list', availableAddresses, document.querySelectorAll('.basicAutoComplete'));
+
+
+        let renderExamples = uiCodeExamples({
+            header: `// Replace "USERNAME" with the account id of a registered user you want to connect as.
+// Replace "HOST" with the hostname or IP address of the IMAP proxy interface.
+// NB! Make sure that firewall settings allow accessing the IMAP proxy interface.
+
+`,
+            portField: 'imapProxyServerPort',
+            passwordField: 'imapProxyServerPassword',
+            passwordFallback: '<imap-proxy-access-token>',
+            replacements: {
+                USE_TLS: () => document.getElementById('imapProxyServerTLSEnabled').checked ? 'true' : 'false',
+                PHPIMAP_TLS: () => document.getElementById('imapProxyServerTLSEnabled').checked ? "'ssl'" : 'false'
             },
-            preventEnter: true,
-            minLength: 1
-        });
-
-
-        let codeTemplates = {
-            nodeImap: {
-                lang: 'javascript',
-                codeAuth: `const imap = new Imap({
+            templates: {
+                nodeImap: {
+                    lang: 'javascript',
+                    target: 'example-node-imap-code',
+                    codeAuth: `const imap = new Imap({
   user: 'USERNAME',
   password: 'PASSWORD',
   host: 'HOST',
   port: PORT,
   tls: USE_TLS
 });`},
-            phpImap: {
-                lang: 'php',
-                codeAuth: `// https://www.php-imap.com/configuration/account/account
+                phpImap: {
+                    lang: 'php',
+                    target: 'example-php-imap-code',
+                    codeAuth: `// https://www.php-imap.com/configuration/account/account
 $client = $cm->make([
     'host' => 'HOST',
     'port' => PORT,
@@ -347,133 +181,7 @@ $client = $cm->make([
     'password' => 'PASSWORD',
     'protocol' => 'imap'
 ]);`}
-        };
-
-        let renderTemplate = (templateKey) => {
-            let template = codeTemplates[templateKey]['codeAuth'];
-
-            template = `// Replace "USERNAME" with the account id of a registered user you want to connect as.
-// Replace "HOST" with the hostname or IP address of the IMAP proxy interface.
-// NB! Make sure that firewall settings allow accessing the IMAP proxy interface.
-
-` + template;
-
-            let password = !document.getElementById('imapProxyServerPassword').value ? '<imap-proxy-access-token>' : (document.getElementById('exampleShowPassword').checked ? document.getElementById('imapProxyServerPassword').value : '******')
-
-            let code = template.
-                replace(/HOST/g, window.location.hostname).
-                replace(/PORT/g, Number(document.getElementById('imapProxyServerPort').value) || 0).
-                replace(/USE_TLS/g, document.getElementById('imapProxyServerTLSEnabled').checked ? 'true' : 'false').
-                replace(/NODEMAILER_TLS/g, document.getElementById('imapProxyServerTLSEnabled').checked ? 'true' : 'false').
-                replace(/PHPMAILER_TLS/g, document.getElementById('imapProxyServerTLSEnabled').checked ? 'tls' : '').
-                replace(/PHPIMAP_TLS/g, document.getElementById('imapProxyServerTLSEnabled').checked ? "'ssl'" : 'false').
-                replace(/USERNAME/g, 'account_id').
-                replace(/PASSWORD/g, password);
-
-            return hljs.highlight(code, { language: codeTemplates[templateKey].lang }).value;
-        }
-
-        let renderExamples = () => {
-            document.getElementById('example-node-imap-code').innerHTML = renderTemplate('nodeImap');
-            document.getElementById('example-php-imap-code').innerHTML = renderTemplate('phpImap');
-
-            document.getElementById('exampleShowPassword').disabled = !document.getElementById('imapProxyServerPassword').value;
-        }
-
-        for (let elm of document.querySelectorAll('.trigger-example-render')) {
-            elm.addEventListener('change', renderExamples);
-        }
-
-        renderExamples();
-
-        function paintCertData(certData) {
-            let tlsLabelElm = document.getElementById('tls-label');
-
-            if (!certData || !certData.label || !tlsLabelElm) {
-                return
             }
-
-            tlsLabelElm.classList.remove(`badge-${tlsLabelElm.dataset.labeltype}`);
-            tlsLabelElm.classList.add(`badge-${certData.label.type}`);
-            tlsLabelElm.dataset.labeltype = certData.label.type
-
-            tlsLabelElm.title = certData.label.title;
-            tlsLabelElm.textContent = certData.label.text;
-
-            $(tlsLabelElm).tooltip('dispose');
-            $(tlsLabelElm).tooltip('enable');
-        }
-
-        let loadingCertData = false;
-        let loadedCertData = false;
-
-        function loadCertData() {
-            loadingCertData = true;
-
-            for (let elm of document.querySelectorAll('#tlsModal .modal-show-error')) {
-                elm.classList.add('d-none')
-            }
-
-            for (let elm of document.querySelectorAll('#tlsModal .modal-show-default')) {
-                elm.classList.remove('d-none')
-            }
-
-            $('#tlsModal').modal('show');
-
-            $('#tlsModal').on('shown.bs.modal', function () {
-                fetch('/admin/config/smtp/certificate', {
-                    method: 'post',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({
-                        crumb: document.getElementById('crumb').value
-                    })
-                }).then(res => {
-                    if (!res.ok) {
-                        throw new Error(`HTTP error! status: ${res.status}`);
-                    }
-                    return res.json()
-                }).then(data => {
-                    if (!data || !data.success) {
-                        throw new Error(data && data.error || 'Request failed')
-                    }
-                    console.log(data)
-                    $('#tlsModal').modal('hide');
-                    loadingCertData = false;
-                    loadedCertData = true;
-                    document.getElementById('imapProxyServerTLSEnabled').dataset.certificate = data.fingerprint
-
-                    paintCertData(data);
-                }).catch(err => {
-                    console.error(err)
-                    loadingCertData = false;
-
-                    document.getElementById('imapProxyServerTLSEnabled').checked = false;
-                    renderExamples();
-
-                    for (let elm of document.querySelectorAll('#tlsModal .modal-show-error')) {
-                        elm.classList.remove('d-none')
-                    }
-
-                    for (let elm of document.querySelectorAll('#tlsModal .modal-show-default')) {
-                        elm.classList.add('d-none')
-                    }
-
-                    document.querySelector('#tlsModal .error-content').textContent = err.message;
-                });
-            });
-        }
-
-        function checkLoadCerts() {
-            if (document.getElementById('imapProxyServerTLSEnabled').checked &&
-                !loadingCertData && !loadedCertData &&
-                //!document.getElementById('imapProxyServerTLSEnabled').dataset.certificate &&
-                document.getElementById('imapProxyServerTLSEnabled').dataset.domain) {
-
-                loadCertData();
-            }
-        }
-
-        document.getElementById('imapProxyServerTLSEnabled').addEventListener('click', checkLoadCerts);
-        document.getElementById('imapProxyServerTLSEnabled').addEventListener('change', checkLoadCerts);
+        });
     });
 </script>

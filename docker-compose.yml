@@ -23,23 +23,38 @@ services:
             - emailengine-network
         environment:
             # Configuration via environment variables
-            # For full list see https://github.com/postalsys/emailengine#config-mapping
+            # For the full list see https://learn.emailengine.app/docs/configuration
 
             # Settings to write to v1/settings on startup
             EENGINE_SETTINGS: ${EENGINE_SETTINGS:-}
 
-            # Encryption secret - REQUIRED for production
-            EENGINE_SECRET: ${EENGINE_SECRET:-default-dev-secret-change-in-production}
+            # Encryption secret for stored credentials - REQUIRED. Generate one with
+            # `openssl rand -hex 32` and put it in .env; compose refuses to start without it,
+            # since a default here would encrypt every account password with a public key
+            EENGINE_SECRET: '${EENGINE_SECRET:?EENGINE_SECRET must be set in .env - generate one with openssl rand -hex 32}'
 
             # Database connection URL
             EENGINE_REDIS: ${EENGINE_REDIS:-redis://redis:6379/2}
+
+            # The image trusts X-Forwarded-For (EENGINE_API_PROXY=true) so the client address
+            # comes from your reverse proxy. Name the proxy here (IPs or CIDRs, comma-separated,
+            # e.g. the Docker bridge gateway or the proxy container's address), otherwise any
+            # client that reaches the port directly can pick its own source address and the
+            # admin IP allowlist and per-token address restrictions cannot be relied on
+            EENGINE_API_PROXY_ADDRESSES: ${EENGINE_API_PROXY_ADDRESSES:-}
 
             # Additional settings
             EENGINE_LOG_LEVEL: ${EENGINE_LOG_LEVEL:-info}
             EENGINE_WORKERS: ${EENGINE_WORKERS:-4}
 
         healthcheck:
-            test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000/health']
+            # 127.0.0.1 and not localhost: the image is Alpine, so this is BusyBox wget on musl.
+            # musl returns ::1 first for localhost (both are in the container's /etc/hosts) and
+            # BusyBox wget connects to that one address without falling back to the next, while
+            # EmailEngine listens on 0.0.0.0, which is IPv4 only. Through localhost the check can
+            # only ever report "connection refused", so the container stays unhealthy for good and
+            # anything chained behind `depends_on: service_healthy` waits forever.
+            test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://127.0.0.1:3000/health']
             interval: ${HEALTHCHECK_INTERVAL:-30s}
             timeout: ${HEALTHCHECK_TIMEOUT:-10s}
             retries: ${HEALTHCHECK_RETRIES:-3}
@@ -91,7 +106,7 @@ services:
             test: >
                 sh -c "
                 if [ -n \"$$REDIS_PASSWORD\" ]; then
-                    redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping
+                    REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --no-auth-warning ping
                 else
                     redis-cli ping
                 fi

@@ -1,0 +1,51 @@
+{{!-- Security (TLS) card shared by the SMTP and IMAP proxy config pages.
+      The checkbox decides whether this listener speaks TLS; which certificate
+      it serves is decided on /admin/config/tls and only summarized here.
+
+      It used to do both. Ticking it fired an ACME order in the foreground,
+      before the setting had been saved, and unticked itself when the order
+      failed - so the page stopped matching the stored setting, and the reason
+      was never shown. The listener now always has a certificate to start with
+      (a self-signed one if nothing better exists), which is what lets this be
+      an ordinary checkbox again.
+      Params:
+        field - the TLS-enabled setting name, also the checkbox id/name
+                (smtpServerTLSEnabled / imapProxyServerTLSEnabled) --}}
+<div class="card bg-base-100 shadow-md mb-6">
+    <div class="card-header">
+        <h6 class="card-title text-primary">Security (TLS)</h6>
+    </div>
+    <div class="card-body">
+        <div>
+            {{> ui/setting-ref name=field}}
+
+            <div class="flex items-center gap-2">
+                {{> ui/checkbox id=field name=field label="Enable TLS Encryption" class="trigger-example-render"
+                checked=(lookup values field) error=(lookup errors field)}}
+
+                {{!-- shrink-0: the checkbox beside it is w-full, so without this the badge is the
+                      flex item that gives way - it was squeezed to half its text and printed its
+                      second line over the setting reference --}}
+                {{#if tlsSummary.label}}
+                {{#> ui/tooltip text=tlsSummary.label.title class="shrink-0"}}
+                {{> ui/badge label=tlsSummary.label.text variant=tlsSummary.label.type elId="tls-label"}}
+                {{/ui/tooltip}}
+                {{/if}}
+            </div>
+
+            <span class="helper-text">
+                {{#if tlsSummary.hostname}}
+                Clients connect to <em>{{tlsSummary.hostname}}</em>, which is served with
+                {{#if tlsSummary.certificate}}a {{tlsSummary.certificate.sourceLabel}} certificate{{else}}no
+                certificate yet{{/if}}. Manage certificates on the <a href="/admin/config/tls"
+                    class="link link-animated">TLS Certificates</a> page.
+                {{else}}
+                No hostname is configured, so this listener serves a self-signed certificate. Set a <a
+                    href="/admin/config/service#settingsServiceUrl" class="link link-animated">Service URL</a> and
+                manage certificates on the <a href="/admin/config/tls" class="link link-animated">TLS
+                    Certificates</a> page.
+                {{/if}}
+            </span>
+        </div>
+    </div>
+</div>

@@ -1,12 +1,34 @@
 'use strict';
 
-// Hermetic unit tests for lib/api-routes/route-helpers.js. Pure functions, no DB or network.
+// Unit tests for lib/api-routes/route-helpers.js and the pure form helpers of
+// lib/ui-routes/route-helpers.js. Pure functions, no network; the ui-routes module pulls in
+// lib/db on require, hence the Redis teardown.
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
 const Boom = require('@hapi/boom');
+const Joi = require('joi');
 
-const { handleError } = require('../lib/api-routes/route-helpers');
+const {
+    handleError,
+    maskCustomHeaders,
+    maskUrlPassword,
+    maskSecrets,
+    containsMaskedSecret,
+    isMaskedRoundTrip,
+    assertNoNetworkOverride,
+    assertNoAttachedIdentity,
+    assertNoIdentityRetarget,
+    assertCredentialAllows,
+    isRestrictedCredential,
+    isBoundCredential,
+    MASKED
+} = require('../lib/api-routes/route-helpers');
+const { submittedValues, formatAccountData, windowedPageLinks, buildPagingView } = require('../lib/ui-routes/route-helpers');
+const { redis } = require('../lib/db');
+const registerRedisTeardown = require('./helpers/redis-teardown');
+
+registerRedisTeardown(redis);
 
 // Minimal request stub - handleError logs at warn (4xx) or error (5xx)
 const fakeRequest = { logger: { warn() {}, error() {} } };
@@ -127,5 +149,706 @@ test('handleError log level', async t => {
         }
         assert.equal(request.logged[0].level, 'error');
         assert.equal(request.logged[0].data.statusCode, 500);
+    });
+});
+
+// Masking of credentials that belong to systems other than the mail server. These were returned in
+// full by the account and webhook-route getters while the mail passwords beside them were masked,
+// which mattered once a token could be narrowed to a group that reaches those reads.
+test('secret masking in API responses', async t => {
+    await t.test('maskCustomHeaders keeps the keys and blanks the values', () => {
+        // The key carries no secret and is what makes the response useful - a reader can see THAT an
+        // Authorization header is configured without being handed its value.
+        assert.deepEqual(
+            maskCustomHeaders([
+                { key: 'Authorization', value: 'Bearer super-secret' },
+                { key: 'X-Trace', value: '1' }
+            ]),
+            [
+                { key: 'Authorization', value: MASKED },
+                { key: 'X-Trace', value: MASKED }
+            ]
+        );
+    });
+
+    await t.test('maskCustomHeaders does not mutate its input', () => {
+        const headers = [{ key: 'Authorization', value: 'Bearer super-secret' }];
+        maskCustomHeaders(headers);
+        assert.equal(headers[0].value, 'Bearer super-secret', 'the stored object was modified in place');
+    });
+
+    await t.test('maskCustomHeaders passes through anything that is not a header list', () => {
+        assert.equal(maskCustomHeaders(undefined), undefined);
+        assert.equal(maskCustomHeaders(null), null);
+        assert.deepEqual(maskCustomHeaders([]), []);
+        // An entry with no value at all is left alone rather than gaining one
+        assert.deepEqual(maskCustomHeaders([{ key: 'X-Only' }]), [{ key: 'X-Only' }]);
+    });
+
+    await t.test('maskUrlPassword replaces inline credentials but keeps the host', () => {
+        // proxyUrl accepts credentials inline, so returning it verbatim published them. Host and
+        // port stay because they are operational information a client legitimately reads back.
+        // The username goes too: it is half of the same credential, and on a proxy that keys on a
+        // token it is the whole of it.
+        const masked = maskUrlPassword('socks5://user:secret@proxy.example.com:1080');
+        assert.equal(masked, `socks5://${MASKED}:${MASKED}@proxy.example.com:1080`);
+        assert.ok(!masked.includes('secret'));
+        assert.ok(!masked.includes('user'));
+    });
+
+    await t.test('maskUrlPassword returns a passwordless URL byte-identical', () => {
+        // The early return matters: URL normalization would otherwise append a trailing slash and
+        // change the value for every account that has a proxy without credentials.
+        for (const url of ['socks5://proxy.example.com:1080', 'http://proxy.example.com:8080']) {
+            assert.equal(maskUrlPassword(url), url);
+        }
+    });
+
+    await t.test('maskUrlPassword masks a token carried in the username', () => {
+        // Commercial proxies commonly key on a token in the username with no password at all, and
+        // lib/tools.js reads exactly that shape. Gating only on the password let it straight through:
+        // the URL came back as `socks://tok3n:******@...`, which discloses the whole credential and
+        // invents a password that was never stored. Asserted on the exact value rather than on the
+        // absence of `tok3n@` - the substring passed while the token was intact, because a colon had
+        // been inserted after it.
+        assert.equal(maskUrlPassword('socks://tok3n@proxy.example.com:1080'), `socks://${MASKED}@proxy.example.com:1080`);
+
+        // The mirror image: a password with no username keeps the empty username rather than
+        // gaining one
+        assert.equal(maskUrlPassword('https://:hookpass@receiver.example.com/hook'), `https://:${MASKED}@receiver.example.com/hook`);
+    });
+
+    await t.test('maskUrlPassword replaces a value it cannot parse', () => {
+        // An unparseable value could itself be the credential that made it unparseable, so it is
+        // replaced rather than echoed - the same decision lib/tools.js documents for the log stream.
+        // Empty rather than a placeholder because every schema carrying one of these allows it.
+        assert.equal(maskUrlPassword('not a url'), '');
+        // Falsy input has nothing to protect and stays as it was
+        assert.equal(maskUrlPassword(''), '');
+        assert.equal(maskUrlPassword(undefined), undefined);
+        assert.equal(maskUrlPassword(null), null);
+    });
+
+    await t.test('the masked proxy URL still satisfies the response schema', () => {
+        // Same constraint as settingsSchema.proxyUrl. A mask that failed response validation would
+        // turn every account read with a credentialed proxy into a logged validation error.
+        const proxyUrl = Joi.string()
+            .uri({ scheme: ['http', 'https', 'socks', 'socks4', 'socks4a', 'socks5'], allowRelative: false })
+            .allow('');
+
+        for (const url of ['socks5://user:secret@proxy.example.com:1080', 'http://u:p@1.2.3.4:8080']) {
+            assert.equal(proxyUrl.validate(maskUrlPassword(url)).error, undefined, `masked ${url} failed schema validation`);
+        }
+    });
+});
+
+// The leak these close is what made a per-field mask the wrong shape: a failed submission records
+// the proxy it used, and that record is persisted onto the account, the gateway and the queue entry -
+// so the same URL came back one field over from where it had just been masked.
+test('maskSecrets covers every credential-bearing field of an entity', async t => {
+    const credentialedProxy = 'socks5://puser:ppass@proxy.example.com:1080';
+    const credentialedHook = 'https://huser:hpass@receiver.example.com/hook';
+
+    await t.test('masks the proxy recorded inside a submission status or error', () => {
+        // GET /v1/account/{account} masked `proxy` and then returned the same URL through
+        // smtpStatus.networkRouting.proxy in the same response body
+        const account = {
+            proxy: credentialedProxy,
+            smtpStatus: { networkRouting: { proxy: credentialedProxy } },
+            lastError: { networkRouting: { proxy: credentialedProxy } }
+        };
+        maskSecrets(account);
+
+        assert.ok(!JSON.stringify(account).includes('ppass'), `a proxy password survived: ${JSON.stringify(account)}`);
+    });
+
+    await t.test('masks the proxy inside a queue entry, including under progress.error', () => {
+        const entry = { proxy: credentialedProxy, progress: { error: { networkRouting: { proxy: credentialedProxy } } } };
+        maskSecrets(entry);
+        assert.ok(!JSON.stringify(entry).includes('ppass'), `a proxy password survived: ${JSON.stringify(entry)}`);
+    });
+
+    await t.test('masks webhook destinations, which can embed basic auth', () => {
+        // The codebase already treats these as credential carriers: workers/webhooks.js refuses to
+        // log a raw target URL for this reason. Masking the headers while returning the URL in full
+        // left both halves of the same authentication.
+        const entities = [{ webhooks: credentialedHook }, { targetUrl: credentialedHook }];
+        for (const entity of entities) {
+            maskSecrets(entity);
+            assert.ok(!JSON.stringify(entity).includes('hpass'), `a webhook password survived: ${JSON.stringify(entity)}`);
+        }
+    });
+
+    await t.test('masks header values under both field names', () => {
+        const entity = {
+            customHeaders: [{ key: 'Authorization', value: 'Bearer route-secret' }],
+            webhooksCustomHeaders: [{ key: 'Authorization', value: 'Bearer account-secret' }]
+        };
+        maskSecrets(entity);
+        assert.ok(!JSON.stringify(entity).includes('secret'), `a header value survived: ${JSON.stringify(entity)}`);
+    });
+
+    await t.test('masks the global settings equivalents', () => {
+        // GET /v1/settings returns these under different names, and none of them is in
+        // settings.encryptedKeys, so they were disclosed in full
+        const values = { proxyUrl: credentialedProxy, httpProxyUrl: credentialedProxy, webhooks: credentialedHook };
+        maskSecrets(values);
+        assert.ok(!JSON.stringify(values).includes('ppass'));
+        assert.ok(!JSON.stringify(values).includes('hpass'));
+    });
+
+    await t.test('masks the basic-auth credentials of the authServer setting', () => {
+        // resolveCredentials() accepts user:pass@ in authServer, so GET /v1/settings?authServer=true
+        // used to return the credential service's password to any unnarrowed token
+        const values = { authServer: 'https://svc:apass@auth.example.com/creds' };
+        maskSecrets(values);
+        assert.equal(values.authServer, `https://${MASKED}:${MASKED}@auth.example.com/creds`);
+        assert.ok(containsMaskedSecret('authServer', values.authServer), 'a masked echo is caught on write');
+    });
+
+    await t.test('leaves everything that is not a credential alone', () => {
+        const entity = {
+            account: 'acct',
+            host: 'imap.example.com',
+            port: 993,
+            smtpEhloName: 'mail.example.com',
+            proxy: 'socks5://proxy.example.com:1080',
+            lastError: { response: 'Invalid credentials' }
+        };
+        const before = JSON.stringify(entity);
+        maskSecrets(entity);
+        assert.equal(JSON.stringify(entity), before, 'a value with no credential in it was rewritten');
+    });
+
+    await t.test('does not walk into message content looking for secrets', () => {
+        // An outbox entry carries the submitted message. Containers are enumerated rather than
+        // scanned recursively, so a body that happens to contain the word proxy is untouched.
+        const entry = { messageId: '<a@b>', envelope: { to: ['x@example.com'] }, text: { html: '<p>proxy: socks5://u:p@h</p>' } };
+        const before = JSON.stringify(entry);
+        maskSecrets(entry);
+        assert.equal(JSON.stringify(entry), before);
+    });
+
+    await t.test('tolerates anything that is not an entity', () => {
+        assert.equal(maskSecrets(undefined), undefined);
+        assert.equal(maskSecrets(null), null);
+        assert.equal(maskSecrets('str'), 'str');
+        assert.deepEqual(maskSecrets({}), {});
+    });
+
+    await t.test('masks the connection error state under the name the account actually stores', () => {
+        // Account.unserializeAccountData() parses it as `lastErrorState`; only the getter renames it
+        // to `lastError` on the way out, well after the mask runs. Masking one name and not the other
+        // published the proxy of the failed connection from an endpoint whose mask call looked total.
+        const account = { lastErrorState: { response: 'Connection refused', networkRouting: { proxy: credentialedProxy } } };
+        maskSecrets(account);
+        assert.ok(!JSON.stringify(account).includes('ppass'), `a proxy password survived: ${JSON.stringify(account)}`);
+        assert.equal(account.lastErrorState.response, 'Connection refused', 'the error message itself is not a credential');
+    });
+});
+
+// A route-level permission model does not inspect payloads, which is fine until a payload field
+// decides where a credential is sent. `submit` is grantable, so this is the one place the narrowing
+// has to do what the route grant cannot.
+test('assertNoNetworkOverride keeps a narrowed token off the connection route', async t => {
+    const narrowed = { permissions: { actions: ['send'], groups: ['submit'] } };
+    const proxyPayload = { proxy: 'socks5://attacker.example.com:1080' };
+
+    await t.test('refuses a submit-time proxy from a narrowed token', () => {
+        assert.throws(
+            () => assertNoNetworkOverride({ payload: proxyPayload, auth: { artifacts: narrowed } }),
+            err => Boom.isBoom(err) && err.output.statusCode === 403,
+            'a send-only token could redirect the SMTP session and collect the account credentials'
+        );
+    });
+
+    await t.test('refuses a submit-time proxy from a browse-page session token', () => {
+        // A session token is bounded by SESSION_TOKEN_GRANTS rather than by a permissions record,
+        // so it reads as unnarrowed here - and it holds send/submit while being refused the account
+        // edit that this guard's "unnarrowed tokens can do it anyway" carve-out assumes. Without
+        // the marker the one credential that lives in page HTML could still post the account's SMTP
+        // session to an address of its choosing.
+        assert.throws(
+            () => assertNoNetworkOverride({ payload: proxyPayload, app: { sessionToken: true }, auth: { artifacts: {} } }),
+            err => Boom.isBoom(err) && err.output.statusCode === 403
+        );
+
+        // and the same request without the marker is the unnarrowed API token, which is allowed
+        assert.doesNotThrow(() => assertNoNetworkOverride({ payload: proxyPayload, app: {}, auth: { artifacts: {} } }));
+    });
+
+    await t.test('reads an unusable permissions record as narrowed', () => {
+        // `{}` is malformed to lib/token-permissions.js, not absent, and both enforcement points
+        // deny on it. This must not be the one reader that takes it for "no narrowing".
+        for (const permissions of [{}, 'nonsense', ['read']]) {
+            assert.throws(() => assertNoNetworkOverride({ payload: proxyPayload, auth: { artifacts: { permissions } } }));
+        }
+    });
+
+    await t.test('leaves an unnarrowed token alone', () => {
+        // It already reaches PUT /v1/account/{account} and can point the account's own proxy
+        // anywhere, so refusing it here would cost a documented capability and buy nothing.
+        assertNoNetworkOverride({ payload: proxyPayload, auth: { artifacts: {} } });
+        assertNoNetworkOverride({ payload: proxyPayload, auth: { artifacts: { permissions: null } } });
+        assertNoNetworkOverride({ payload: proxyPayload, auth: {} });
+        assertNoNetworkOverride({ payload: proxyPayload });
+    });
+
+    await t.test('never refuses a submission that sets no proxy', () => {
+        // Which is every ordinary send, including the draft variant with an empty body
+        assertNoNetworkOverride({ payload: { to: [{ address: 'x@example.com' }] }, auth: { artifacts: narrowed } });
+        assertNoNetworkOverride({ payload: {}, auth: { artifacts: narrowed } });
+        assertNoNetworkOverride({ auth: { artifacts: narrowed } });
+    });
+});
+
+// The attached service account brings no credential of its creator's: the app runs as the
+// deployment's own cloud identity. A token narrowed to `oauth2` manages applications, it does not
+// get to lend itself that identity.
+test('assertNoAttachedIdentity keeps a narrowed token from lending itself the attached service account', async t => {
+    const narrowed = { permissions: { actions: ['write'], groups: ['oauth2'] } };
+
+    await t.test('refuses a narrowed token, a session token and an unreadable record', () => {
+        for (const request of [
+            { auth: { artifacts: narrowed } },
+            { app: { sessionToken: true }, auth: { artifacts: {} } },
+            { auth: { artifacts: { permissions: {} } } }
+        ]) {
+            assert.throws(
+                () => assertNoAttachedIdentity(request, 'metadataServer', 'create'),
+                err => Boom.isBoom(err) && err.output.statusCode === 403 && /can not create/.test(err.message) && /metadataServer/.test(err.message)
+            );
+        }
+    });
+
+    await t.test('leaves an unnarrowed token alone', () => {
+        assertNoAttachedIdentity({ auth: { artifacts: {} } }, 'metadataServer', 'create');
+        assertNoAttachedIdentity({ auth: {} }, 'metadataServer', 'modify');
+    });
+
+    await t.test('never refuses an app that brings its own credential, or no app at all', () => {
+        for (const authMethod of ['serviceKey', undefined, false]) {
+            assertNoAttachedIdentity({ auth: { artifacts: narrowed } }, authMethod, 'create');
+            assertNoAttachedIdentity({ auth: { artifacts: narrowed } }, authMethod, 'modify');
+        }
+    });
+
+    await t.test('refuses a narrowed token an external account app, whose credential source is read from this host', () => {
+        // credential_source names a file the instance reads or a URL it fetches with the caller's
+        // headers, outside the proxy and the egress policy, and the verify report says how the
+        // read went - the same "acts with what the deployment holds" rule as the metadata server
+        for (const verb of ['create', 'modify']) {
+            assert.throws(
+                () => assertNoAttachedIdentity({ auth: { artifacts: narrowed } }, 'externalAccount', verb),
+                err => Boom.isBoom(err) && err.output.statusCode === 403 && /externalAccount/.test(err.message)
+            );
+        }
+        assertNoAttachedIdentity({ auth: { artifacts: {} } }, 'externalAccount', 'create');
+    });
+
+    await t.test('an unnarrowed token holding only an MCP surface scope counts as restricted', () => {
+        // Minted before every MCP token carried a grant list: no permissions record, so inspect()
+        // reads it as unnarrowed, but it reaches the API only through the surface its scope admits
+        for (const scopes of [['mcp-manage'], ['mcp'], ['mcp', 'mcp-manage']]) {
+            assert.equal(isRestrictedCredential({ auth: { artifacts: { scopes } } }), true, JSON.stringify(scopes));
+            assert.throws(() => assertNoAttachedIdentity({ auth: { artifacts: { scopes } } }, 'metadataServer', 'create'));
+        }
+        // and a token that also holds the full API, or every scope, is not
+        for (const scopes of [['api', 'mcp-manage'], ['*'], ['api'], undefined]) {
+            assert.equal(isRestrictedCredential({ auth: { artifacts: { scopes } } }), false, JSON.stringify(scopes));
+        }
+    });
+
+    // An update re-runs the Pub/Sub setup as the attached identity, so moving the project or
+    // subscription of a saved app lends it just like creating one would
+    await t.test('refuses a narrowed token modifying a saved attached service account app', () => {
+        assert.throws(
+            () => assertNoAttachedIdentity({ payload: { googleProjectId: 'other-project' }, auth: { artifacts: narrowed } }, 'metadataServer', 'modify'),
+            err => Boom.isBoom(err) && err.output.statusCode === 403 && /can not modify/.test(err.message)
+        );
+    });
+});
+
+test('assertNoIdentityRetarget keeps a bound or narrowed token on its own identity', async t => {
+    const bound = { account: 'acc-a', scopes: ['api'] };
+    const narrowed = { permissions: { actions: ['write'], groups: ['provisioning'] } };
+    const delegation = { oauth2: { provider: 'app-1', auth: { user: 'a@example.com', delegatedUser: 'b@example.com', delegatedAccount: 'acc-b' } } };
+    const is403 = err => Boom.isBoom(err) && err.output.statusCode === 403;
+
+    await t.test('refuses delegation to another account from a bound token', async () => {
+        // The binding promises the token sees one account; delegation would make that account
+        // authenticate with another account's stored token
+        await assert.rejects(() => assertNoIdentityRetarget({ payload: delegation, auth: { artifacts: bound } }), is403);
+        await assert.rejects(
+            () =>
+                assertNoIdentityRetarget({
+                    payload: { oauth2: { provider: 'app-1', auth: { user: 'a@example.com', delegatedUser: 'b@example.com' } } },
+                    auth: { artifacts: bound }
+                }),
+            is403
+        );
+    });
+
+    await t.test('refuses delegation from a narrowed token and from a session token', async () => {
+        await assert.rejects(() => assertNoIdentityRetarget({ payload: delegation, auth: { artifacts: narrowed } }), is403);
+        await assert.rejects(() => assertNoIdentityRetarget({ payload: delegation, app: { sessionToken: true }, auth: { artifacts: {} } }), is403);
+    });
+
+    await t.test('refuses a bound token retargeting the mailbox of an application-credentials account', async () => {
+        const payload = { oauth2: { provider: 'app-1', auth: { user: 'someone.else@example.com' } } };
+        let asked = 0;
+        await assert.rejects(
+            () =>
+                assertNoIdentityRetarget(
+                    { payload, auth: { artifacts: bound } },
+                    {
+                        isServiceApp: async () => {
+                            asked++;
+                            return true;
+                        }
+                    }
+                ),
+            is403
+        );
+        assert.equal(asked, 1);
+
+        // the same user change on a per-user app is the caller's own credential and passes
+        await assertNoIdentityRetarget({ payload, auth: { artifacts: bound } }, { isServiceApp: async () => false });
+    });
+
+    await t.test('does not look the app up for a credential the rule does not apply to', async () => {
+        const payload = { oauth2: { provider: 'app-1', auth: { user: 'x@example.com' } } };
+        await assertNoIdentityRetarget(
+            { payload, auth: { artifacts: {} } },
+            {
+                isServiceApp: async () => {
+                    throw new Error('must not be asked');
+                }
+            }
+        );
+        await assertNoIdentityRetarget({ payload: delegation, auth: { artifacts: {} } });
+        await assertNoIdentityRetarget({ payload: delegation, auth: {} });
+    });
+
+    await t.test('leaves a payload without an oauth2 auth block alone', async () => {
+        await assertNoIdentityRetarget({ payload: { name: 'x' }, auth: { artifacts: bound } });
+        await assertNoIdentityRetarget({ payload: { oauth2: { provider: 'app-1' } }, auth: { artifacts: bound } });
+        await assertNoIdentityRetarget({ auth: { artifacts: bound } });
+    });
+
+    await t.test('isBoundCredential reads the binding off the token record', () => {
+        assert.equal(isBoundCredential({ auth: { artifacts: bound } }), true);
+        assert.equal(isBoundCredential({ auth: { artifacts: { scopes: ['api'] } } }), false);
+        assert.equal(isBoundCredential({ auth: {} }), false);
+        assert.equal(isBoundCredential({}), false);
+    });
+});
+
+test('assertCredentialAllows asks for the extra grant a handler needs', async t => {
+    const operation = { action: 'write', group: 'message' };
+    const is403 = err => Boom.isBoom(err) && err.output.statusCode === 403;
+
+    await t.test('refuses a token narrowed to reading', () => {
+        const readOnly = { permissions: { actions: ['read'], groups: ['message'] } };
+        assert.throws(() => assertCredentialAllows({ auth: { artifacts: readOnly } }, operation, 'mark a message as seen'), is403);
+    });
+
+    await t.test('admits a token whose record holds the grant, and an unnarrowed one', () => {
+        assertCredentialAllows({ auth: { artifacts: { permissions: { actions: ['read', 'write'], groups: ['message'] } } } }, operation, 'x');
+        assertCredentialAllows({ auth: { artifacts: {} } }, operation, 'x');
+        assertCredentialAllows({ auth: {} }, operation, 'x');
+    });
+
+    await t.test('holds a session token to the session grant list', () => {
+        // write/message is in SESSION_TOKEN_GRANTS, write/account is not
+        assertCredentialAllows({ app: { sessionToken: true }, params: { account: 'a' }, auth: { artifacts: {} } }, operation, 'x');
+        assert.throws(
+            () =>
+                assertCredentialAllows(
+                    { app: { sessionToken: true }, params: { account: 'a' }, auth: { artifacts: {} } },
+                    { action: 'write', group: 'account' },
+                    'x'
+                ),
+            is403
+        );
+    });
+});
+
+test('write-side mask guards', async t => {
+    await t.test('containsMaskedSecret spots the mask in URL credentials', () => {
+        assert.equal(containsMaskedSecret('webhooks', `https://${MASKED}:${MASKED}@example.com/hook`), true);
+        assert.equal(containsMaskedSecret('proxyUrl', `socks5://${MASKED}@proxy.example.com:1080`), true);
+        assert.equal(containsMaskedSecret('httpProxyUrl', `http://user:${MASKED}@proxy.example.com:3128`), true);
+
+        assert.equal(containsMaskedSecret('webhooks', 'https://user:real-secret@example.com/hook'), false);
+        assert.equal(containsMaskedSecret('webhooks', 'https://example.com/hook'), false);
+        assert.equal(containsMaskedSecret('webhooks', 'not a url'), false);
+        assert.equal(containsMaskedSecret('webhooks', null), false);
+    });
+
+    await t.test('containsMaskedSecret spots the mask in header values', () => {
+        assert.equal(containsMaskedSecret('webhooksCustomHeaders', [{ key: 'Authorization', value: MASKED }]), true);
+        assert.equal(containsMaskedSecret('webhooksCustomHeaders', [{ key: 'Authorization', value: 'Bearer real' }]), false);
+        assert.equal(containsMaskedSecret('webhooksCustomHeaders', []), false);
+    });
+
+    await t.test('containsMaskedSecret ignores keys that are never masked', () => {
+        assert.equal(containsMaskedSecret('serviceUrl', `https://${MASKED}:${MASKED}@example.com/`), false);
+        assert.equal(containsMaskedSecret('notifyText', true), false);
+    });
+
+    await t.test('isMaskedRoundTrip accepts exactly the masked echo of the stored value', () => {
+        const stored = 'https://user:secret@example.com/hook';
+        const echo = maskUrlPassword(stored);
+
+        assert.equal(isMaskedRoundTrip('webhooks', echo, stored), true);
+        // same mask, different destination - the credential cannot be carried over
+        assert.equal(isMaskedRoundTrip('webhooks', `https://${MASKED}:${MASKED}@other.example.com/hook`, stored), false);
+        // nothing stored to echo
+        assert.equal(isMaskedRoundTrip('webhooks', echo, null), false);
+    });
+
+    await t.test('isMaskedRoundTrip compares header lists on key and value', () => {
+        const stored = [
+            { key: 'Authorization', value: 'Bearer real' },
+            { key: 'X-Plain', value: '' }
+        ];
+        const echo = maskCustomHeaders(stored);
+
+        assert.equal(isMaskedRoundTrip('webhooksCustomHeaders', echo, stored), true);
+        assert.equal(isMaskedRoundTrip('webhooksCustomHeaders', [{ key: 'Authorization', value: MASKED }], stored), false);
+        assert.equal(isMaskedRoundTrip('webhooksCustomHeaders', [{ key: 'Other', value: MASKED }], []), false);
+    });
+});
+
+test('submittedValues re-renders the submitted form without its secrets', async t => {
+    await t.test('blanks the named fields and leaves the rest as submitted', () => {
+        const request = { payload: { name: 'Gateway', host: 'smtp.example.com', pass: 'hunter2' } };
+
+        assert.deepEqual(submittedValues(request, 'pass'), { name: 'Gateway', host: 'smtp.example.com', pass: '' });
+        // the payload itself is not touched
+        assert.equal(request.payload.pass, 'hunter2');
+    });
+
+    await t.test('blanks every named field, whether or not it was submitted', () => {
+        const request = { payload: { provider: 'gmail', clientSecret: 'secret' } };
+
+        assert.deepEqual(submittedValues(request, 'clientSecret', 'serviceKey'), { provider: 'gmail', clientSecret: '', serviceKey: '' });
+    });
+
+    await t.test('copes with a request that carries no payload', () => {
+        assert.deepEqual(submittedValues({ payload: undefined }, 'pass'), { pass: '' });
+    });
+});
+
+test('maskSecrets masks the target recorded in a webhook error flag', async t => {
+    const credentialedHook = 'https://huser:hpass@receiver.example.com/hook';
+
+    await t.test('on a webhook route, an account and the settings alike', () => {
+        // The flag is written by workers/webhooks.js after a failed delivery and read back
+        // through GET /v1/webhookRoutes, which a read-only token can reach. New flags are stored
+        // redacted; one written by an older release still carries the raw URL.
+        for (const entity of [
+            { targetUrl: credentialedHook, webhookErrorFlag: { message: 'boom', url: credentialedHook } },
+            { webhooks: credentialedHook, webhookErrorFlag: { message: 'boom', url: credentialedHook } }
+        ]) {
+            maskSecrets(entity);
+            assert.ok(!JSON.stringify(entity).includes('hpass'), `a webhook password survived: ${JSON.stringify(entity)}`);
+            assert.equal(entity.webhookErrorFlag.message, 'boom', 'the rest of the flag is untouched');
+        }
+    });
+
+    await t.test('leaves a flag without a URL, or an empty one, alone', () => {
+        const entity = { webhookErrorFlag: {} };
+        maskSecrets(entity);
+        assert.deepEqual(entity.webhookErrorFlag, {});
+
+        const nulled = { webhookErrorFlag: null };
+        maskSecrets(nulled);
+        assert.equal(nulled.webhookErrorFlag, null);
+    });
+});
+
+test('formatAccountData reports an invalidated access token', async t => {
+    const gt = { gettext: s => s };
+
+    // Account.invalidateAccessToken() rewinds `expires` a day into the past and leaves `generated`
+    // alone, which is the one way the two can end up inverted
+    const invalidated = () => ({
+        account: 'acct',
+        state: 'connected',
+        oauth2: { provider: 'gmail', generated: new Date('2026-08-28T10:15:21.000Z'), expires: new Date('2026-08-27T10:37:14.000Z') }
+    });
+
+    await t.test('a token whose expiry was rewound behind its issue time is flagged', () => {
+        const account = invalidated();
+        formatAccountData(account, gt);
+
+        assert.equal(account.oauth2.accessTokenInvalidated, true);
+        // the raw values stay available for the view
+        assert.equal(account.oauth2.generatedStr, '2026-08-28T10:15:21.000Z');
+        assert.equal(account.oauth2.expiresStr, '2026-08-27T10:37:14.000Z');
+    });
+
+    await t.test('a live token is not', () => {
+        const account = invalidated();
+        account.oauth2.expires = new Date('2026-08-28T11:15:21.000Z');
+        formatAccountData(account, gt);
+        assert.equal(account.oauth2.accessTokenInvalidated, false);
+    });
+
+    await t.test('an expired token that simply awaits renewal is not', () => {
+        // expired after it was issued: the ordinary state of a paused account, not an invalidation
+        const account = invalidated();
+        account.oauth2.generated = new Date('2026-08-27T09:37:14.000Z');
+        formatAccountData(account, gt);
+        assert.equal(account.oauth2.accessTokenInvalidated, false);
+    });
+
+    await t.test('a token with no recorded issue time is not', () => {
+        const account = invalidated();
+        delete account.oauth2.generated;
+        formatAccountData(account, gt);
+        assert.equal(account.oauth2.accessTokenInvalidated, false);
+        assert.equal(account.oauth2.generatedStr, false);
+    });
+});
+
+test('formatAccountData says when an Outlook account syncs without its subscription', async t => {
+    const gt = { gettext: s => s };
+
+    // OutlookClient.reportSubscriptionFailure() keeps an account whose mailbox can still be read
+    // connected, with the periodic recovery pass (on by default) as its only sync, and parks the rest
+    const failed = state => ({
+        account: 'acct',
+        state,
+        oauth2: { provider: 'outlook' },
+        outlookSubscription: { state: { state: 'error', error: 'Subscription failed: the Service URL is not set' } }
+    });
+
+    await t.test('a connected account with a failed subscription is polling', () => {
+        const account = failed('connected');
+        formatAccountData(account, gt);
+        assert.equal(account.outlookSubscription.polling, true);
+        assert.equal(account.outlookSubscription.variant, 'warning', 'a failure the poller stands in for');
+    });
+
+    await t.test('a reported account is not', () => {
+        const account = failed('connectError');
+        formatAccountData(account, gt);
+        assert.equal(account.outlookSubscription.polling, false);
+        assert.equal(account.outlookSubscription.variant, 'error');
+    });
+
+    await t.test('nor is one whose subscription works', () => {
+        const account = {
+            account: 'acct',
+            state: 'connected',
+            oauth2: { provider: 'outlook' },
+            outlookSubscription: { expirationDateTime: new Date(Date.now() + 3600 * 1000), state: { state: 'created' } }
+        };
+        formatAccountData(account, gt);
+        assert.equal(account.outlookSubscription.polling, false);
+        assert.equal(account.outlookSubscription.variant, 'success');
+    });
+});
+
+// The two partials a page renders again after it has loaded are compiled outside vision
+// (compiledFragments), so nothing but these tests proves they still compile and that the
+// helpers they call are the ones workers/api.js registers.
+test('compiled view fragments', async t => {
+    const handlebars = require('handlebars');
+    const { gt } = require('../lib/translations');
+    const { registerHandlebarsHelpers } = require('../lib/handlebars-helpers');
+    const { compiledFragments } = require('../lib/ui-routes/route-helpers');
+
+    registerHandlebarsHelpers(handlebars, { gt });
+
+    await t.test('the delivery-test results render with the status helpers', () => {
+        const html = compiledFragments.testSend({
+            status: 'success',
+            spf: { status: { result: 'pass', comment: 'sender SPF authorized' }, 'envelope-from': 'probe@example.com', 'client-ip': '192.0.2.10' },
+            dkim: { results: [{ status: { result: 'pass', aligned: true }, signingDomain: 'example.com', selector: 's1' }] },
+            mainSig: { status: { result: 'pass' } },
+            dmarc: { status: { result: 'fail' } }
+        });
+
+        assert.match(html, /badge-success/, 'a passing check gets the success color');
+        assert.match(html, /icon-\[tabler--circle-check\]/, 'a passing check gets the check icon');
+        assert.match(html, /badge-error/, 'a failing check gets the error color');
+        assert.match(html, /Signature #1/, 'the inc helper numbers the signatures from one');
+        assert.doesNotMatch(html, /\{\{/, 'no unrendered expression is left in the markup');
+    });
+
+    await t.test('the json helper cannot break out of a textarea', () => {
+        // Error-log views print inbound message data this way; a SafeString return value once let
+        // a </textarea> in that data end the element and start a script
+        const html = handlebars.compile('<textarea>{{json p}}</textarea>')({ p: { x: '</textarea><script>' } });
+        assert.ok(!html.includes('</textarea><script>'), html);
+        assert.match(html, /&lt;\/textarea&gt;&lt;script&gt;/);
+    });
+
+    await t.test('the address list renders a checked row for a selected address', () => {
+        const html = compiledFragments.addressList({
+            addresses: [
+                { localAddress: '10.0.0.1', ip: '198.51.100.7', name: 'host-a', checked: true, defaultInterface: true },
+                { localAddress: '10.0.0.2', ip: '198.51.100.8', name: 'host-b', checked: false, notice: 'Not routable' }
+            ]
+        });
+
+        assert.equal((html.match(/checkbox-entry/g) || []).length, 2);
+        assert.match(html, /value="10\.0\.0\.1" checked>/);
+        assert.doesNotMatch(html, /value="10\.0\.0\.2" checked>/);
+        assert.match(html, /badge-soft">default</);
+        assert.match(html, /Not routable/);
+    });
+});
+
+test('pagination links are windowed', async t => {
+    const titles = links => links.map(link => (link.gap ? '...' : link.title));
+    const urlFor = page => `/list?page=${page}`;
+
+    await t.test('a short listing links every page', () => {
+        assert.deepEqual(titles(windowedPageLinks(5, 0, urlFor)), [1, 2, 3, 4, 5]);
+        assert.deepEqual(titles(windowedPageLinks(0, 0, urlFor)), [1], 'an empty listing still has its one page');
+    });
+
+    await t.test('a long listing links the ends and the pages around the current one', () => {
+        assert.deepEqual(titles(windowedPageLinks(5000, 0, urlFor)), [1, 2, 3, '...', 5000]);
+        assert.deepEqual(titles(windowedPageLinks(5000, 99, urlFor)), [1, '...', 98, 99, 100, 101, 102, '...', 5000]);
+        assert.deepEqual(titles(windowedPageLinks(5000, 4999, urlFor)), [1, '...', 4998, 4999, 5000]);
+    });
+
+    await t.test('the current page is marked and every link carries its URL', () => {
+        const links = windowedPageLinks(50, 9, urlFor);
+        assert.equal(links.filter(link => link.active).length, 1);
+        assert.equal(links.find(link => link.active).url, '/list?page=10');
+    });
+
+    await t.test('buildPagingView uses the window', () => {
+        const view = buildPagingView('admin/suppression-lists', { page: 0, pages: 1000 }, { pageSize: 20 });
+        assert.ok(view.pageLinks.length < 10);
+        assert.equal(view.showPaging, true);
+    });
+});
+
+test('formatAccountData labels an IMAP or SMTP account with its registrable domain', async t => {
+    const gt = { gettext: s => s };
+
+    await t.test('the IMAP host is shortened to the domain the provider registered', () => {
+        const account = formatAccountData({ account: 'acct', imap: { host: 'imap.mail.example.co.uk' } }, gt);
+        assert.equal(account.type.name, 'IMAP');
+        assert.equal(account.type.comment, 'example.co.uk');
+    });
+
+    await t.test('an SMTP-only account uses the SMTP host', () => {
+        const account = formatAccountData({ account: 'acct', smtp: { host: 'smtp.example.com' } }, gt);
+        assert.equal(account.type.name, 'SMTP');
+        assert.equal(account.type.comment, 'example.com');
+    });
+
+    await t.test('a host with no registrable domain, such as an address, is shown as it is', () => {
+        const account = formatAccountData({ account: 'acct', imap: { host: '192.168.1.10' } }, gt);
+        assert.equal(account.type.comment, '192.168.1.10');
     });
 });

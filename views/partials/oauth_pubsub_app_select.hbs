@@ -1,0 +1,34 @@
+{{!-- The Pub/Sub service account an API-based Gmail app uses to arm watches, shared by the
+interactive `gmail` block and the `gmailService` one: both reach Gmail over the HTTP API, so both want
+the same control, and the server-side `pubSubApp` field was never provider-specific.
+
+It sits in the API panel of the base scope card, and checkScopesRadio() at the bottom of oauth_form.hbs
+disables it while that panel is hidden, so a hidden selection is never submitted. --}}
+
+<div>
+    <label class="label-text" for="pubSubApp">Pub/Sub app for real-time notifications <span
+            class="text-base-content/60">(optional)</span></label>
+    <select class="select max-w-xl{{#if errors.pubSubApp}} is-invalid{{/if}}" id="pubSubApp"
+        name="pubSubApp" {{#unless baseScopesApi}}disabled{{/unless}}>
+
+        <option value="">No Pub/Sub app - poll for changes</option>
+
+        {{!-- Nothing disables an option here: the select carries that for the whole control, and
+        filterPubSubApps() in oauth_form.hbs owns the per-option state so the two cannot fight. An
+        {{#unless baseScopesApi}} inside this {{#each}} resolved against the ITEM rather than the page,
+        so it shipped `disabled` on every option in every mode. --}}
+        {{#each pubSubApps}}
+        <option value="{{id}}" data-project="{{googleProjectId}}" {{#if selected}}selected{{/if}}>{{name}}{{#if
+            description}} -
+            {{description}}{{/if}} [{{googleProjectId}}]</option>
+        {{/each}}
+
+    </select>
+    {{#if errors.pubSubApp}}
+    <span class="helper-text text-error">{{errors.pubSubApp}}</span>
+    {{/if}}
+    <span class="helper-text">Without one, EmailEngine polls each account about every 10 minutes, so webhooks
+        still fire, only later. The Pub/Sub app must belong to the same Google Cloud project. No Pub/Sub app yet?
+        <a href="/admin/config/oauth/new?provider=gmailService&amp;baseScopes=pubsub" target="_blank"
+            rel="noopener" class="link link-animated">Register one</a> in a new tab, then reload this page.</span>
+</div>

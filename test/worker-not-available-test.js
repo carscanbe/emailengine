@@ -3,98 +3,147 @@
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
-// Exercise the real submit-worker discard predicate (lib/delivery-error.js),
-// the exact code path workers/submit.js uses to decide whether a failed
-// delivery job should be discarded (permanent failure) or left for BullMQ to
-// retry. Previously this test re-implemented the predicate inline and never
-// covered the NON_RETRYABLE_CODES (EAUTH/EOAUTH2/...) branch at all.
-const { shouldDiscardJob, isPermanentDeliveryError, NON_RETRYABLE_CODES } = require('../lib/delivery-error');
+// Exercise the real submit-worker discard predicate (lib/delivery-error.js), the exact code path
+// workers/submit.js uses to decide whether a failed delivery job should be discarded (permanent
+// failure) or left for BullMQ to retry.
+//
+// The cases below build their errors the way the production code builds them: real nodemailer SMTP
+// failures always carry a `code` (EENVELOPE/EMESSAGE/EAUTH/...) alongside the numeric `responseCode`,
+// and those errors reach shouldDiscardJob only after crossing two worker-thread RPC hops. Both are
+// modelled here - the `code` (an earlier version of this suite omitted it and so asserted retry
+// behavior production never had), and the RPC round-trip (via the real lib/worker-rpc-error helpers,
+// so a dropped field fails a test instead of silently changing production).
+const { shouldDiscardJob, isPermanentDeliveryError, isFinalFailedAttempt, NON_RETRYABLE_CODES } = require('../lib/delivery-error');
+const { packRpcError, unpackRpcError } = require('../lib/worker-rpc-error');
+
+// How base-client.js stamps a real nodemailer SMTP failure: nodemailer sets `responseCode` and a
+// `code` (EENVELOPE for envelope rejections, EMESSAGE for DATA rejections, EAUTH for auth), and
+// base-client copies responseCode into `statusCode` for the API response and webhook payload.
+function smtpError(message, responseCode, code) {
+    let err = new Error(message);
+    err.responseCode = responseCode;
+    err.statusCode = Number(responseCode) || null;
+    if (code) {
+        err.code = code;
+    }
+    return err;
+}
+
+// Serializes the error the way the worker-thread RPC hops do (lib/worker-rpc-error.js), so a case is
+// classified against the exact shape the submit worker receives, not the one built above. The
+// transform is stateless, so one crossing catches a dropped field as well as replaying all the hops:
+// if a future change drops a field from the RPC envelope, the greylist/5xx cases below fail here.
+function acrossWorkerBoundary(err) {
+    return unpackRpcError(packRpcError(err));
+}
 
 test('submit worker delivery-error classification', async t => {
-    await t.test('does not discard jobs with 503 status code', () => {
-        let err503 = new Error('No active handler');
-        err503.statusCode = 503;
-
-        let err500 = new Error('Internal server error');
-        err500.statusCode = 500;
-
-        let err502 = new Error('Bad gateway');
-        err502.statusCode = 502;
-
+    await t.test('a genuine SMTP 5xx is permanent', () => {
         let job = { attemptsMade: 1, opts: { attempts: 10 } };
 
-        assert.strictEqual(shouldDiscardJob(err503, job), false, '503 errors should NOT be discarded (allows BullMQ retry)');
-        assert.strictEqual(shouldDiscardJob(err500, job), true, '500 errors should be discarded');
-        assert.strictEqual(shouldDiscardJob(err502, job), true, '502 errors should be discarded');
-    });
-
-    await t.test('still discards 5xx errors other than 503', () => {
-        let statusCodes = [500, 501, 502, 504, 505];
-        let job = { attemptsMade: 0, opts: { attempts: 5 } };
-
-        for (let code of statusCodes) {
-            let err = new Error(`Error ${code}`);
-            err.statusCode = code;
-            assert.strictEqual(shouldDiscardJob(err, job), true, `${code} errors should still be discarded`);
+        for (let responseCode of [500, 501, 502, 550, 554]) {
+            let err = acrossWorkerBoundary(smtpError(`Error ${responseCode}`, responseCode, 'EENVELOPE'));
+            assert.strictEqual(isPermanentDeliveryError(err), true, `SMTP ${responseCode} should be permanent`);
+            assert.strictEqual(shouldDiscardJob(err, job), true, `SMTP ${responseCode} should be discarded`);
         }
     });
 
-    await t.test('does not discard transient codes below 500', () => {
+    await t.test('an SMTP 503 is transient', () => {
+        let job = { attemptsMade: 1, opts: { attempts: 10 } };
+        let err = acrossWorkerBoundary(smtpError('Try again later', 503, 'EENVELOPE'));
+
+        assert.strictEqual(isPermanentDeliveryError(err), false, '503 is left retryable on purpose');
+        assert.strictEqual(shouldDiscardJob(err, job), false);
+    });
+
+    await t.test('a transient 4xx SMTP reply is retried even though nodemailer tags it EENVELOPE', () => {
+        // The regression this guards: greylisting (and other soft 4xx rejections) come back as a 4xx
+        // reply with code EENVELOPE/EMESSAGE/EAUTH. EENVELOPE is in NON_RETRYABLE_CODES, so before
+        // the fix the message was discarded on the first attempt despite the server asking for a
+        // retry. Per RFC 5321 a 4yz reply is transient, so the reply code has to win over the code.
         let job = { attemptsMade: 0, opts: { attempts: 5 } };
 
-        for (let code of [421, 450, 451, 452]) {
-            let err = new Error(`Error ${code}`);
-            err.statusCode = code;
-            assert.strictEqual(shouldDiscardJob(err, job), false, `${code} errors should be retried`);
+        for (let [responseCode, code] of [
+            [421, 'EPROTOCOL'],
+            [450, 'EENVELOPE'], // "450 greylisted, try again later" on RCPT TO
+            [451, 'EMESSAGE'],
+            [452, 'EENVELOPE'],
+            [454, 'EAUTH'] // temporary authentication failure
+        ]) {
+            let err = acrossWorkerBoundary(smtpError(`Error ${responseCode}`, responseCode, code));
+            assert.strictEqual(isPermanentDeliveryError(err), false, `SMTP ${responseCode}/${code} must not be permanent`);
+            assert.strictEqual(shouldDiscardJob(err, job), false, `SMTP ${responseCode}/${code} must be retried`);
         }
     });
 
-    await t.test('does not discard when all attempts are exhausted', () => {
-        let err500 = new Error('Internal server error');
-        err500.statusCode = 500;
+    await t.test('a 5xx that is NOT an SMTP reply does not discard the queued message', () => {
+        // Only the SMTP path sets `responseCode`; everywhere else a 5xx `statusCode` describes
+        // infrastructure, not the message - 503 "no active handler", 504 RPC timeouts, 500 Redis lock
+        // failures, an OAuth2 token-endpoint blip, a Gmail/Graph API 5xx, a WIF token exchange. None
+        // set a NON_RETRYABLE `code`, so keying on provenance retries them all without naming them.
+        let job = { attemptsMade: 1, opts: { attempts: 10 } };
 
-        let job = { attemptsMade: 10, opts: { attempts: 10 } };
+        const nonSmtpErrors = [
+            { msg: 'No active handler', statusCode: 503, code: 'WorkerNotAvailable' },
+            { msg: 'Timeout waiting for command response [T5]', statusCode: 504, code: 'Timeout' },
+            { msg: 'Redis lock failed', statusCode: 500 },
+            { msg: 'OAuth2 request failed', statusCode: 502 },
+            { msg: 'Token request failed', statusCode: 500, code: 'ETokenRefresh' },
+            { msg: 'ESTSExchange request failed', statusCode: 500, code: 'ESTSExchange' }
+        ];
 
-        assert.strictEqual(shouldDiscardJob(err500, job), false, 'Should not discard when attempts are exhausted');
+        for (let spec of nonSmtpErrors) {
+            let source = new Error(spec.msg);
+            source.statusCode = spec.statusCode;
+            if (spec.code) {
+                source.code = spec.code;
+            }
+            let err = acrossWorkerBoundary(source);
+
+            assert.strictEqual(isPermanentDeliveryError(err), false, `a non-SMTP ${spec.statusCode} (${spec.code || 'no code'}) must not be permanent`);
+            assert.strictEqual(shouldDiscardJob(err, job), false, `a non-SMTP ${spec.statusCode} (${spec.code || 'no code'}) must not discard the job`);
+        }
     });
 
-    await t.test('discards non-retryable error codes regardless of status', () => {
-        // This branch (NON_RETRYABLE_CODES) was previously untested entirely.
+    await t.test('discards non-retryable error codes with no SMTP reply', () => {
+        // Hard failures with no server reply at all (missing credentials, TLS/protocol mismatch, a
+        // client-side "no recipients defined" EENVELOPE): they recur on every retry, so discard.
         let job = { attemptsMade: 0, opts: { attempts: 10 } };
 
         for (let code of NON_RETRYABLE_CODES) {
             let err = new Error(`Permanent failure: ${code}`);
             err.code = code;
-            // No statusCode at all - must still be permanent because of the code.
+            err = acrossWorkerBoundary(err);
             assert.strictEqual(isPermanentDeliveryError(err), true, `${code} should be a permanent error`);
             assert.strictEqual(shouldDiscardJob(err, job), true, `${code} jobs should be discarded`);
         }
     });
 
-    await t.test('non-retryable code is discarded even with a transient status code', () => {
-        // A permanent code wins over a transient (sub-500 or 503) status code.
-        let job = { attemptsMade: 1, opts: { attempts: 10 } };
+    await t.test('does not discard when all attempts are exhausted', () => {
+        // BullMQ fails the job naturally at that point, so there is nothing to discard.
+        let job = { attemptsMade: 10, opts: { attempts: 10 } };
 
-        let err = new Error('Auth failed mid-handshake');
-        err.code = 'EAUTH';
-        err.statusCode = 503; // transient on its own
-
-        assert.strictEqual(isPermanentDeliveryError(err), true);
-        assert.strictEqual(shouldDiscardJob(err, job), true);
-    });
-
-    await t.test('does not discard unknown/transient errors with no status or code', () => {
-        let job = { attemptsMade: 0, opts: { attempts: 10 } };
-
-        let err = new Error('ETIMEDOUT'); // network timeout, retryable
-        err.code = 'ETIMEDOUT';
-
-        assert.strictEqual(isPermanentDeliveryError(err), false);
-        assert.strictEqual(shouldDiscardJob(err, job), false);
+        assert.strictEqual(shouldDiscardJob(acrossWorkerBoundary(smtpError('Rejected', 550, 'EENVELOPE')), job), false);
     });
 
     await t.test('isPermanentDeliveryError tolerates a missing error object', () => {
         assert.strictEqual(isPermanentDeliveryError(null), false);
         assert.strictEqual(isPermanentDeliveryError(undefined), false);
+    });
+
+    await t.test('isFinalFailedAttempt reads finishedOn, which is what ends a discarded job', () => {
+        // A job ended early by the UnrecoverableError that workers/submit.js throws on a permanent
+        // rejection: BullMQ sets finishedOn even though attempts remain. This used to be detected
+        // via job.discarded, which BullMQ 6 removed along with Job#discard().
+        assert.strictEqual(isFinalFailedAttempt({ finishedOn: Date.now(), attemptsMade: 1, opts: { attempts: 10 } }), true);
+
+        // A routine retryable failure with attempts left: not final, and no finishedOn
+        assert.strictEqual(isFinalFailedAttempt({ attemptsMade: 1, opts: { attempts: 10 } }), false);
+
+        // Attempts exhausted the ordinary way
+        assert.strictEqual(isFinalFailedAttempt({ attemptsMade: 10, opts: { attempts: 10 } }), true);
+
+        // Defaults to a single attempt when the job carries no explicit limit
+        assert.strictEqual(isFinalFailedAttempt({ attemptsMade: 1, opts: {} }), true);
     });
 });

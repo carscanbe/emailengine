@@ -1,0 +1,314 @@
+'use strict';
+
+// The MCP OAuth authorization server core (lib/mcp/oauth.js): client registration policy, PKCE,
+// and the single-use code exchange. Talks to the test Redis database like the other unit-tier
+// suites; the HTTP shells around these functions are covered by the integration tier.
+
+const test = require('node:test');
+const assert = require('node:assert').strict;
+
+const { redis } = require('../lib/db');
+const registerRedisTeardown = require('./helpers/redis-teardown');
+const { pkcePair } = require('./helpers/pkce');
+const tokens = require('../lib/tokens');
+const tokenPermissions = require('../lib/token-permissions');
+const { MCP_SECTIONS, mcpLevel } = require('../lib/token-permission-view');
+const {
+    registerClient,
+    getClient,
+    isAcceptableRedirectUri,
+    isAcceptableResource,
+    createAuthorizationCode,
+    redeemAuthorizationCode,
+    verifyPkce,
+    normalizeScopes,
+    touchClient,
+    CLIENT_TTL,
+    PENDING_CLIENT_TTL,
+    MAX_PENDING_CLIENTS,
+    pendingClientsKey
+} = require('../lib/mcp/oauth');
+const { REDIS_PREFIX } = require('../lib/consts');
+
+registerRedisTeardown(redis);
+
+const ORIGIN = 'https://emailengine.example.com';
+
+test('MCP OAuth', async t => {
+    await t.test('redirect URI policy', () => {
+        assert.ok(isAcceptableRedirectUri('https://claude.ai/api/mcp/auth_callback'));
+        assert.ok(isAcceptableRedirectUri('http://localhost:33418/callback'));
+        assert.ok(isAcceptableRedirectUri('http://127.0.0.1:8080/cb'));
+        assert.ok(isAcceptableRedirectUri('com.example.app:/oauth/callback'));
+
+        assert.ok(!isAcceptableRedirectUri('http://example.com/callback'), 'plain http off the loopback');
+        assert.ok(!isAcceptableRedirectUri('https://example.com/cb#fragment'), 'fragments are refused');
+        assert.ok(!isAcceptableRedirectUri('javascript:alert(1)'));
+        assert.ok(!isAcceptableRedirectUri('data:text/html,x'));
+        assert.ok(!isAcceptableRedirectUri('not a url'));
+    });
+
+    await t.test('resource indicator validation', () => {
+        assert.ok(isAcceptableResource(undefined, ORIGIN), 'absent is tolerated');
+        assert.ok(isAcceptableResource(`${ORIGIN}/mcp`, ORIGIN));
+        assert.ok(isAcceptableResource(`${ORIGIN}/mcp/`, ORIGIN), 'trailing slash normalized');
+        assert.ok(isAcceptableResource(ORIGIN, ORIGIN), 'bare origin accepted');
+        assert.ok(!isAcceptableResource('https://elsewhere.example.com/mcp', ORIGIN));
+    });
+
+    await t.test('registration accepts a clean redirect URI list and refuses one carrying any bad entry', async () => {
+        const client = await registerClient({
+            redirectUris: ['https://claude.ai/cb', 'http://localhost:33418/cb'],
+            clientName: 'Test client'
+        });
+
+        assert.match(client.client_id, /^[0-9a-f]{32}$/);
+        assert.deepEqual(client.redirect_uris, ['https://claude.ai/cb', 'http://localhost:33418/cb']);
+        assert.equal(client.token_endpoint_auth_method, 'none');
+
+        const stored = await getClient(client.client_id);
+        assert.equal(stored.client_name, 'Test client');
+
+        // RFC 7591 3.2.2: one unacceptable URI fails the whole registration, naming the URI -
+        // silently registering the acceptable subset just deferred the failure to authorize
+        // time, where the client saw a generic error page instead
+        await assert.rejects(
+            registerClient({ redirectUris: ['https://claude.ai/cb', 'http://example.com/evil'] }),
+            err => err.oauthError === 'invalid_redirect_uri' && /http:\/\/example\.com\/evil/.test(err.message)
+        );
+
+        await assert.rejects(registerClient({ redirectUris: [] }), /redirect_uris/);
+        await assert.rejects(registerClient({ redirectUris: Array.from({ length: 11 }, (_, i) => `https://claude.ai/cb${i}`) }), /redirect_uris/);
+    });
+
+    await t.test('PKCE S256 verification', () => {
+        const { verifier, challenge } = pkcePair();
+        assert.ok(verifyPkce(verifier, challenge));
+        assert.ok(!verifyPkce(verifier + 'x', challenge));
+        assert.ok(!verifyPkce('too-short', challenge));
+    });
+
+    await t.test('a code redeems exactly once, for the right client, redirect and verifier', async () => {
+        const client = await registerClient({ redirectUris: ['https://claude.ai/cb'], clientName: 'Redeemer' });
+        const { verifier, challenge } = pkcePair();
+
+        const mint = () =>
+            createAuthorizationCode({
+                clientId: client.client_id,
+                redirectUri: 'https://claude.ai/cb',
+                codeChallenge: challenge,
+                resource: `${ORIGIN}/mcp`,
+                account: null,
+                scopes: ['mcp'],
+                description: 'MCP: Redeemer'
+            });
+
+        const base = {
+            clientId: client.client_id,
+            redirectUri: 'https://claude.ai/cb',
+            codeVerifier: verifier,
+            resource: `${ORIGIN}/mcp`,
+            origin: ORIGIN,
+            ip: '198.51.100.7'
+        };
+
+        // wrong client
+        await assert.rejects(redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), clientId: 'f'.repeat(32) })), /another client/);
+        // wrong redirect
+        await assert.rejects(redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), redirectUri: 'https://claude.ai/other' })), /redirect_uri/);
+        // wrong verifier
+        await assert.rejects(redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), codeVerifier: 'x'.repeat(64) })), /PKCE/);
+        // wrong resource
+        await assert.rejects(
+            redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), resource: 'https://elsewhere.example.com/mcp' })),
+            /resource/
+        );
+        // RFC 8707: a resource acceptable on its own still has to be the one the code was
+        // issued for - the code above was minted for {ORIGIN}/mcp, not the bare origin
+        await assert.rejects(redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), resource: ORIGIN })), /authorization request/);
+        // a trailing slash is the same resource, not a mismatch
+        const slashed = await redeemAuthorizationCode(Object.assign({}, base, { code: await mint(), resource: `${ORIGIN}/mcp/` }));
+        assert.equal(slashed.token_type, 'Bearer');
+        await tokens.delete(slashed.access_token);
+
+        // the happy path issues a real mcp-scoped token...
+        const code = await mint();
+        const response = await redeemAuthorizationCode(Object.assign({}, base, { code }));
+        assert.equal(response.token_type, 'Bearer');
+        assert.equal(response.scope, 'mcp');
+
+        const tokenData = await tokens.get(response.access_token, false);
+        assert.deepEqual(tokenData.scopes, ['mcp']);
+        assert.equal(tokenData.description, 'MCP: Redeemer');
+
+        // ...and the code is spent
+        await assert.rejects(redeemAuthorizationCode(Object.assign({}, base, { code })), /expired/);
+
+        await tokens.delete(response.access_token);
+    });
+
+    await t.test('the scopes the operator approved reach the minted token, in canonical order', async () => {
+        const client = await registerClient({ redirectUris: ['https://claude.ai/cb'], clientName: 'Scoped' });
+
+        const mintFor = async scopes => {
+            const { verifier, challenge } = pkcePair();
+            const code = await createAuthorizationCode({
+                clientId: client.client_id,
+                redirectUri: 'https://claude.ai/cb',
+                codeChallenge: challenge,
+                resource: `${ORIGIN}/mcp`,
+                account: null,
+                scopes,
+                description: 'MCP: Scoped'
+            });
+            return redeemAuthorizationCode({
+                code,
+                clientId: client.client_id,
+                redirectUri: 'https://claude.ai/cb',
+                codeVerifier: verifier,
+                resource: `${ORIGIN}/mcp`,
+                origin: ORIGIN,
+                ip: '198.51.100.7'
+            });
+        };
+
+        // Both, listed mail-first: stored and reported management-first, space separated per
+        // RFC 6749, and only the scopes this server issues survive
+        const both = await mintFor(['mcp', 'mcp-manage', 'bogus']);
+        assert.equal(both.scope, 'mcp-manage mcp');
+        assert.deepEqual((await tokens.get(both.access_token, false)).scopes, ['mcp-manage', 'mcp']);
+        await tokens.delete(both.access_token);
+
+        const manage = await mintFor(['mcp-manage']);
+        assert.equal(manage.scope, 'mcp-manage');
+        assert.deepEqual((await tokens.get(manage.access_token, false)).scopes, ['mcp-manage']);
+        await tokens.delete(manage.access_token);
+
+        // The wire form is accepted too
+        assert.deepEqual(normalizeScopes('mcp offline_access mcp-manage'), ['mcp-manage', 'mcp']);
+        assert.deepEqual(normalizeScopes(''), []);
+        assert.deepEqual(normalizeScopes(undefined), []);
+
+        // A code for no surface at all - or for a caller that forgot the argument - is refused at
+        // mint time, not discovered at exchange time
+        await assert.rejects(
+            createAuthorizationCode({
+                clientId: client.client_id,
+                redirectUri: 'https://claude.ai/cb',
+                codeChallenge: 'a'.repeat(43),
+                resource: `${ORIGIN}/mcp`,
+                description: 'MCP: Scoped'
+            }),
+            err => err.oauthError === 'invalid_scope'
+        );
+        await assert.rejects(
+            createAuthorizationCode({
+                clientId: client.client_id,
+                redirectUri: 'https://claude.ai/cb',
+                codeChallenge: 'a'.repeat(43),
+                resource: `${ORIGIN}/mcp`,
+                scopes: ['bogus'],
+                description: 'MCP: Scoped'
+            }),
+            err => err.oauthError === 'invalid_scope'
+        );
+    });
+
+    await t.test('the narrowing the operator approved reaches the minted token', async () => {
+        // The consent page defaults to read-only, and that choice is only worth anything if it
+        // survives the code record into the credential - otherwise the browser flow, aimed at
+        // the least controllable clients, would issue send-capable tokens regardless
+        const client = await registerClient({ redirectUris: ['https://claude.ai/cb'], clientName: 'Narrowed' });
+        const { verifier, challenge } = pkcePair();
+
+        const code = await createAuthorizationCode({
+            clientId: client.client_id,
+            redirectUri: 'https://claude.ai/cb',
+            codeChallenge: challenge,
+            resource: `${ORIGIN}/mcp`,
+            account: null,
+            scopes: ['mcp'],
+            permissions: { grants: mcpLevel(MCP_SECTIONS.mail, 'read').pairs },
+            description: 'MCP: Narrowed'
+        });
+
+        const response = await redeemAuthorizationCode({
+            code,
+            clientId: client.client_id,
+            redirectUri: 'https://claude.ai/cb',
+            codeVerifier: verifier,
+            resource: `${ORIGIN}/mcp`,
+            origin: ORIGIN,
+            ip: '198.51.100.7'
+        });
+
+        const tokenData = await tokens.get(response.access_token, false);
+        assert.deepEqual(tokenData.permissions, { grants: mcpLevel(MCP_SECTIONS.mail, 'read').pairs });
+
+        // and the narrowing is the one the enforcement would apply: a send is refused
+        assert.equal(tokenPermissions.check({ tokenData, operation: { action: 'send', group: 'submit' } }).allowed, false);
+        assert.equal(tokenPermissions.check({ tokenData, operation: { action: 'destructive', group: 'message' } }).allowed, false);
+        assert.equal(tokenPermissions.check({ tokenData, operation: { action: 'read', group: 'message' } }).allowed, true);
+
+        await tokens.delete(response.access_token);
+    });
+});
+
+test('MCP OAuth client registration lifetime', async t => {
+    const ttlOf = async clientId => await redis.ttl(`${REDIS_PREFIX}mcp:oauth:client:${clientId}`);
+
+    await t.test('a registration lives only until consent, which extends it to the full lifetime', async () => {
+        const client = await registerClient({ redirectUris: ['https://claude.ai/cb'], clientName: 'Lifetime' });
+
+        const initial = await ttlOf(client.client_id);
+        assert.ok(initial > 0 && initial <= PENDING_CLIENT_TTL, `unconsented registration TTL ${initial}`);
+        assert.notEqual(await redis.zscore(pendingClientsKey(), client.client_id), null);
+
+        await touchClient(client.client_id);
+        const extended = await ttlOf(client.client_id);
+        assert.ok(extended > PENDING_CLIENT_TTL && extended <= CLIENT_TTL, `consented registration TTL ${extended}`);
+        assert.equal(await redis.zscore(pendingClientsKey(), client.client_id), null, 'no longer counted as pending');
+    });
+
+    await t.test('registrations waiting for consent are capped instance wide', async t => {
+        // Lowered for these calls only: the pending set is shared with the suites running
+        // alongside, so this test adds and removes only its own members
+        const key = pendingClientsKey();
+        const limit = 50;
+        assert.ok(limit < MAX_PENDING_CLIENTS);
+        const mine = [];
+        t.after(async () => {
+            if (mine.length) {
+                await redis.zrem(key, ...mine);
+            }
+        });
+
+        const expires = Date.now() + 60 * 1000;
+        const fill = [];
+        for (let i = 0; i < limit; i++) {
+            mine.push(`filler-${i}`);
+            fill.push(expires, `filler-${i}`);
+        }
+        await redis.zadd(key, ...fill);
+
+        await assert.rejects(
+            registerClient({ redirectUris: ['https://claude.ai/cb'], maxPending: limit }),
+            err => err.oauthError === 'temporarily_unavailable' && err.statusCode === 503
+        );
+
+        // Expired entries do not count: once they lapse, registration works again, and the
+        // lapsed entries are pruned by it
+        await redis.zrem(key, ...mine);
+        const lapsed = [];
+        for (let i = 0; i < limit; i++) {
+            mine.push(`lapsed-${i}`);
+            lapsed.push(Date.now() - 1000, `lapsed-${i}`);
+        }
+        await redis.zadd(key, ...lapsed);
+
+        const client = await registerClient({ redirectUris: ['https://claude.ai/cb'], maxPending: limit });
+        mine.push(client.client_id);
+        assert.match(client.client_id, /^[0-9a-f]{32}$/);
+        assert.equal(await redis.zscore(key, 'lapsed-0'), null);
+    });
+});

@@ -1,12 +1,14 @@
 'use strict';
 
 const http = require('node:http');
+const { withCapturingServer } = require('./helpers/capture-http-server');
 const test = require('node:test');
 const assert = require('node:assert').strict;
+const exitWhenStandalone = require('./helpers/exit-standalone');
 
 test('OAuth integration tests', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     const { GmailOauth, OPENID_SCOPES } = require('../lib/oauth/gmail');
@@ -92,27 +94,109 @@ test('OAuth integration tests', async t => {
         assert.strictEqual(params.get('redirect_uri'), 'http://localhost/callback?param=value');
     });
 
-    await t.test('Error response falls back when responseJson is undefined or null', async () => {
-        const buildErrorResponse = responseJson => {
-            return responseJson || { error: 'Failed to parse response' };
-        };
+    // Token-error handling is exercised through the real OutlookOauth.refreshToken() against a local
+    // token endpoint. These used to be hand-written copies of the fallback and the partial-secret
+    // regex, and the regex copy had already drifted from lib/oauth/outlook.js.
+    async function withTokenEndpoint(respond, fn) {
+        const requests = [];
+        const server = http.createServer((req, res) => {
+            const chunks = [];
+            req.on('data', chunk => chunks.push(chunk));
+            req.on('end', () => {
+                requests.push({ method: req.method, url: req.url, body: Buffer.concat(chunks).toString() });
+                const { status, body } = respond();
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(body);
+            });
+        });
+        await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+        try {
+            const flags = [];
+            const outlook = new OutlookOauth({
+                ...baseOpts,
+                clientSecret: 'abcdefghijklmnopqrstuvwxyz',
+                authority: 'common',
+                setFlag: async (...args) => flags.push(args)
+            });
+            outlook.entraEndpoint = `http://127.0.0.1:${server.address().port}`;
+            await fn(outlook, { requests, flags });
+        } finally {
+            await new Promise(resolve => server.close(resolve));
+        }
+    }
 
-        assert.deepStrictEqual(buildErrorResponse(undefined), { error: 'Failed to parse response' });
-        assert.deepStrictEqual(buildErrorResponse(null), { error: 'Failed to parse response' });
-        assert.strictEqual(buildErrorResponse({ error: 'invalid_grant' }).error, 'invalid_grant');
+    await t.test('OutlookOauth.refreshToken falls back to a placeholder when the error body is not JSON', async () => {
+        await withTokenEndpoint(
+            () => ({ status: 400, body: '<html>Bad Request</html>' }),
+            async (outlook, { requests }) => {
+                await assert.rejects(
+                    () => outlook.refreshToken({ refreshToken: 'rt-1' }),
+                    err => {
+                        assert.strictEqual(err.code, 'ETokenRefresh');
+                        assert.strictEqual(err.statusCode, 400);
+                        assert.deepStrictEqual(err.tokenRequest.response, { error: 'Failed to parse response' });
+                        assert.strictEqual(err.clientSecretHint, undefined);
+                        return true;
+                    }
+                );
+                assert.strictEqual(requests.length, 1);
+                assert.strictEqual(requests[0].url, '/common/oauth2/v2.0/token');
+                const params = new URLSearchParams(requests[0].body);
+                assert.strictEqual(params.get('grant_type'), 'refresh_token');
+                assert.strictEqual(params.get('refresh_token'), 'rt-1');
+            }
+        );
     });
 
-    await t.test('Optional chaining prevents error on null error_description', async () => {
-        const EXPOSE_PARTIAL_SECRET_KEY_REGEX = /Unauthorized/i;
+    await t.test('OutlookOauth.refreshToken exposes a partial client secret and flags the app for a rejected secret', async () => {
+        await withTokenEndpoint(
+            () => ({
+                status: 401,
+                body: JSON.stringify({ error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret is provided.' })
+            }),
+            async (outlook, { flags }) => {
+                await assert.rejects(
+                    () => outlook.refreshToken({ refreshToken: 'rt-1' }),
+                    err => {
+                        assert.strictEqual(err.code, 'ETokenRefresh');
+                        assert.ok(err.clientSecretHint, 'partial secret is attached');
+                        assert.notStrictEqual(err.clientSecretHint, 'abcdefghijklmnopqrstuvwxyz', 'never the whole secret');
+                        return true;
+                    }
+                );
+                assert.strictEqual(flags.length, 1);
+                assert.strictEqual(flags[0][0].code, 'OUTLOOK_CLIENT_SECRET_INVALID');
+            }
+        );
+    });
 
-        const testCases = [null, undefined, {}, { error: 'some_error' }, { error_description: null }, { error_description: undefined }];
+    await t.test('OutlookOauth.refreshToken handles an invalid_grant without error_description', async () => {
+        await withTokenEndpoint(
+            () => ({ status: 400, body: JSON.stringify({ error: 'invalid_grant', error_description: null }) }),
+            async (outlook, { flags }) => {
+                await assert.rejects(
+                    () => outlook.refreshToken({ refreshToken: 'rt-1' }),
+                    err => {
+                        assert.strictEqual(err.clientSecretHint, undefined);
+                        assert.strictEqual(err.tokenRequest.userFlag.code, 'OUTLOOK_TOKEN_RENEWAL_FAILED');
+                        return true;
+                    }
+                );
+                // A user-level failure is not an app misconfiguration
+                assert.strictEqual(flags.length, 0);
+            }
+        );
+    });
 
-        for (const response of testCases) {
-            const result = EXPOSE_PARTIAL_SECRET_KEY_REGEX.test(response?.error_description);
-            assert.strictEqual(typeof result, 'boolean');
-        }
-
-        assert.ok(EXPOSE_PARTIAL_SECRET_KEY_REGEX.test({ error_description: 'Unauthorized access' }?.error_description));
+    await t.test('OutlookOauth.refreshToken clears the app flag on success', async () => {
+        await withTokenEndpoint(
+            () => ({ status: 200, body: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }) }),
+            async (outlook, { flags }) => {
+                const result = await outlook.refreshToken({ refreshToken: 'rt-1' });
+                assert.strictEqual(result.access_token, 'at-1');
+                assert.deepStrictEqual(flags, [[]]);
+            }
+        );
     });
 
     await t.test('GmailOauth generates valid auth URL', async () => {
@@ -177,8 +261,9 @@ test('OAuth integration tests', async t => {
             const gmail = new GmailOauth(baseOpts);
             gmail.revokeUrl = `http://127.0.0.1:${port}/revoke`;
 
-            await gmail.revokeToken('test-access-token-123');
+            const result = await gmail.revokeToken('test-access-token-123');
 
+            assert.deepStrictEqual(result, { revoked: true, status: 200 });
             assert.strictEqual(capturedMethod, 'POST');
             assert.ok(capturedHeaders['content-type'].includes('application/x-www-form-urlencoded'));
             assert.strictEqual(capturedBody, 'token=test-access-token-123');
@@ -187,33 +272,43 @@ test('OAuth integration tests', async t => {
         }
     });
 
-    await t.test('GmailOauth.revokeToken does not throw on HTTP error', async () => {
-        const server = http.createServer((req, res) => {
-            req.on('data', () => {});
-            req.on('end', () => {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'invalid_token' }));
-            });
-        });
-
-        await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-        const { port } = server.address();
-
-        try {
+    async function revokeAgainst(status, body) {
+        let result;
+        const responder = res => {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(body);
+        };
+        await withCapturingServer(responder, async ({ baseUrl }) => {
             const gmail = new GmailOauth(baseOpts);
-            gmail.revokeUrl = `http://127.0.0.1:${port}/revoke`;
+            gmail.revokeUrl = `${baseUrl}/revoke`;
+            result = await gmail.revokeToken('bad-token');
+        });
+        return result;
+    }
 
-            await gmail.revokeToken('bad-token');
-        } finally {
-            await new Promise(resolve => server.close(resolve));
-        }
+    await t.test('GmailOauth.revokeToken reports an already invalid token without throwing', async () => {
+        const result = await revokeAgainst(400, JSON.stringify({ error: 'invalid_token', error_description: 'Token expired or revoked' }));
+        assert.deepStrictEqual(result, { revoked: false, status: 400, reason: 'TokenInvalid', error: 'invalid_token' });
     });
 
-    await t.test('GmailOauth.revokeToken does not throw on network error', async () => {
+    await t.test('GmailOauth.revokeToken reports any other refusal as ProviderRefused', async () => {
+        const result = await revokeAgainst(503, 'Service Unavailable');
+        assert.deepStrictEqual(result, { revoked: false, status: 503, reason: 'ProviderRefused' });
+
+        const coded = await revokeAgainst(400, JSON.stringify({ error: 'unsupported_token_type' }));
+        assert.strictEqual(coded.reason, 'ProviderRefused');
+        assert.strictEqual(coded.error, 'unsupported_token_type');
+    });
+
+    await t.test('GmailOauth.revokeToken reports a network error as RequestFailed without throwing', async () => {
         const gmail = new GmailOauth(baseOpts);
         gmail.revokeUrl = 'http://127.0.0.1:1/revoke';
 
-        await gmail.revokeToken('any-token');
+        const result = await gmail.revokeToken('any-token');
+        assert.strictEqual(result.revoked, false);
+        assert.strictEqual(result.reason, 'RequestFailed');
+        assert.strictEqual(result.status, undefined);
+        assert.ok(result.error);
     });
 
     await t.test('Scope comparison detects missing functional scopes', async () => {
@@ -430,26 +525,33 @@ test('OAuth integration tests', async t => {
         await fs.promises.writeFile(tokenPath, 'subject-token', 'utf8');
 
         try {
-            let externalAccount = JSON.stringify({
+            const buildConfig = tokenUrl => ({
                 type: 'external_account',
                 audience: '//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/q',
                 subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
-                token_url: `${base}/sts`,
+                token_url: tokenUrl,
                 service_account_impersonation_url: `${base}/v1/projects/-/serviceAccounts/svc@proj.iam.gserviceaccount.com:generateAccessToken`,
                 credential_source: { file: tokenPath }
             });
 
+            // The constructor's own signer is replaced below, so it only has to be structurally
+            // valid - and token_url is pinned to Google STS, so it has to name the real endpoint.
             let gmail = new GmailOauth({
                 ...baseOpts,
                 serviceClient: '7103296518315821565203',
                 serviceClientEmail: 'svc@proj.iam.gserviceaccount.com',
                 authMethod: 'externalAccount',
-                externalAccount
+                externalAccount: JSON.stringify(buildConfig('https://sts.googleapis.com/v1/token'))
             });
 
             // Redirect the Google token endpoint and the signer's iamcredentials base to the mock.
             gmail.tokenUrl = `${base}/token`;
-            gmail.signer = new ExternalAccountSigner({ config: JSON.parse(externalAccount), iamCredentialsBaseUrl: base });
+            // allowedTokenHosts is the injection point that lets the STS exchange reach the mock
+            gmail.signer = new ExternalAccountSigner({
+                config: buildConfig(`${base}/sts`),
+                allowedTokenHosts: ['127.0.0.1'],
+                iamCredentialsBaseUrl: base
+            });
 
             let result = await gmail.refreshToken({ user: 'user@example.com' });
 

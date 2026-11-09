@@ -1,0 +1,250 @@
+'use strict';
+
+// fetchWithVettedRedirects (lib/egress-fetch.js): the redirect-following fetch the autodiscovery
+// lookups use, where every hop has to pass the egress check before it is taken. Driven against
+// throwaway localhost servers so the assertions are about what actually went on the wire: which
+// URLs the validator saw, which server was reached, with what method and body.
+//
+// Pure: the module under test has no Redis dependency, so no teardown is needed.
+
+const test = require('node:test');
+const assert = require('node:assert').strict;
+const { fetch: fetchCmd } = require('undici');
+
+const { startCapturingServer, stopServer } = require('./helpers/capture-http-server');
+const { fetchWithVettedRedirects, readBodyCapped, MAX_REDIRECTS } = require('../lib/egress-fetch');
+
+// A capturing server that is shut down when the owning test ends
+async function serverFor(t, responder) {
+    const started = await startCapturingServer(responder);
+    t.after(() => stopServer(started.server));
+    return started;
+}
+
+const redirect = (res, status, location) => {
+    res.writeHead(status, { Location: location });
+    res.end();
+};
+
+const ok = (res, body) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(body);
+};
+
+// A validator that records what it was asked about and refuses anything aimed at `blockedBase`
+function recordingValidator(blockedBase) {
+    const seen = [];
+    const validateTarget = async url => {
+        seen.push(url);
+        if (blockedBase && url.startsWith(blockedBase)) {
+            let err = new Error(`Refusing ${url}`);
+            err.code = 'EEGRESSBLOCKED';
+            throw err;
+        }
+    };
+    return { seen, validateTarget };
+}
+
+test('fetchWithVettedRedirects', async t => {
+    await t.test('follows a redirect chain and validates every hop, the first request included', async t => {
+        let baseUrl;
+        ({ baseUrl } = await serverFor(t, (res, req) => {
+            if (req.path === '/a') {
+                return redirect(res, 302, '/b');
+            }
+            if (req.path === '/b') {
+                return redirect(res, 301, `${baseUrl}/c`);
+            }
+            ok(res, `arrived at ${req.path}`);
+        }));
+
+        const { seen, validateTarget } = recordingValidator();
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/a`, { validateTarget });
+
+        assert.equal(res.status, 200);
+        assert.equal(await res.text(), 'arrived at /c');
+        assert.deepEqual(seen, [`${baseUrl}/a`, `${baseUrl}/b`, `${baseUrl}/c`], 'every hop must be vetted, relative and absolute alike');
+    });
+
+    await t.test('refuses a hop the validator rejects and never reaches it', async t => {
+        const target = await serverFor(t, res => ok(res, 'internal'));
+        const front = await serverFor(t, res => redirect(res, 302, `${target.baseUrl}/secret`));
+
+        const { validateTarget } = recordingValidator(target.baseUrl);
+
+        await assert.rejects(fetchWithVettedRedirects(fetchCmd, `${front.baseUrl}/start`, { validateTarget }), err => err.code === 'EEGRESSBLOCKED');
+        assert.equal(target.getRequests().length, 0, 'the blocked destination must not see a request');
+        assert.equal(front.getRequests().length, 1);
+    });
+
+    await t.test('gives up after the hop budget', async t => {
+        const { baseUrl, getRequests } = await serverFor(t, res => redirect(res, 302, '/loop'));
+
+        await assert.rejects(fetchWithVettedRedirects(fetchCmd, `${baseUrl}/loop`), err => err.code === 'EMAXREDIRECTS');
+        // the initial request plus one per allowed hop
+        assert.equal(getRequests().length, MAX_REDIRECTS + 1);
+    });
+
+    await t.test('a 303 turns a POST into a bodyless GET, like fetch() would', async t => {
+        const { baseUrl, getRequests } = await serverFor(t, (res, req) => (req.path === '/submit' ? redirect(res, 303, '/result') : ok(res, 'result')));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/submit`, {
+            method: 'post',
+            headers: { 'Content-Type': 'application/xml', 'User-Agent': 'test' },
+            body: '<xml/>'
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+
+        const [first, second] = getRequests();
+        assert.equal(first.method, 'POST');
+        assert.equal(first.body.toString(), '<xml/>');
+        assert.equal(second.method, 'GET');
+        assert.equal(second.body.toString(), '');
+        assert.equal(second.headers['content-type'], undefined, 'the body headers go with the body');
+        assert.equal(second.headers['user-agent'], 'test', 'other headers survive the switch');
+    });
+
+    await t.test('a 307 replays the POST with its body', async t => {
+        const { baseUrl, getRequests } = await serverFor(t, (res, req) => (req.path === '/submit' ? redirect(res, 307, '/again') : ok(res, 'again')));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/submit`, {
+            method: 'post',
+            headers: { 'Content-Type': 'application/xml' },
+            body: '<xml/>'
+        });
+        await res.text();
+
+        const second = getRequests()[1];
+        assert.equal(second.method, 'POST');
+        assert.equal(second.body.toString(), '<xml/>');
+        assert.equal(second.headers['content-type'], 'application/xml');
+    });
+
+    await t.test('refuses a redirect to a scheme that is not http or https', async t => {
+        const { baseUrl } = await serverFor(t, res => redirect(res, 302, 'ftp://files.example.com/config.xml'));
+
+        await assert.rejects(fetchWithVettedRedirects(fetchCmd, `${baseUrl}/x`), err => err.code === 'EREDIRECTSCHEME');
+    });
+
+    await t.test('returns a 3xx that names no Location as it is', async t => {
+        const { baseUrl } = await serverFor(t, res => {
+            res.writeHead(304);
+            res.end();
+        });
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/x`);
+        assert.equal(res.status, 304);
+    });
+
+    await t.test('drops credential headers when a redirect crosses to another origin', async t => {
+        // Autodiscovery carries the mailbox password to a host named by the address domain's own
+        // DNS. A redirect must not be able to pass that password on to a host of its choosing.
+        const elsewhere = await serverFor(t, res => ok(res, 'elsewhere'));
+        const start = await serverFor(t, (res, req) => (req.path === '/a' ? redirect(res, 302, `${elsewhere.baseUrl}/b`) : ok(res, 'unexpected')));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${start.baseUrl}/a`, {
+            method: 'GET',
+            headers: { Authorization: 'Basic c2VjcmV0', Cookie: 'session=1', 'X-Trace': 'kept' }
+        });
+
+        assert.equal(await res.text(), 'elsewhere');
+        const received = elsewhere.getCaptured().headers;
+        assert.ok(!('authorization' in received), 'Authorization must not survive the hop');
+        assert.ok(!('cookie' in received), 'Cookie must not survive the hop either');
+        assert.equal(received['x-trace'], 'kept', 'headers that are not credentials are left alone');
+    });
+
+    await t.test('keeps credential headers on a same-origin redirect', async t => {
+        const { baseUrl, getCaptured } = await serverFor(t, (res, req) => (req.path === '/a' ? redirect(res, 302, '/b') : ok(res, 'same origin')));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/a`, { method: 'GET', headers: { Authorization: 'Basic c2VjcmV0' } });
+
+        assert.equal(await res.text(), 'same origin');
+        assert.equal(getCaptured().headers.authorization, 'Basic c2VjcmV0', 'the origin that was authenticated to is still the one being asked');
+    });
+
+    await t.test('works without a validator, for the policy-off case', async t => {
+        const { baseUrl } = await serverFor(t, (res, req) => (req.path === '/a' ? redirect(res, 302, '/b') : ok(res, 'b')));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/a`);
+        assert.equal(await res.text(), 'b');
+    });
+});
+
+test('readBodyCapped', async t => {
+    // Streams `size` bytes in 16 KB chunks, or without end when size is Infinity. A write to a
+    // response the client has already cut off calls back with an error on the next tick, so the
+    // loop has to stop there: carrying on spun on process.nextTick until the test runner's
+    // async-resource map overflowed ("Map maximum size exceeded") and the file timed out
+    const streamer = size => (res, req, closed) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        let sent = 0;
+        const next = err => {
+            if (err || res.destroyed) {
+                return;
+            }
+            if (sent >= size) {
+                return res.end();
+            }
+            sent += 16 * 1024;
+            res.write('x'.repeat(16 * 1024), next);
+        };
+        res.on('close', () => closed.push(sent));
+        next();
+    };
+
+    async function server(t, handler) {
+        const closed = [];
+        const started = await startCapturingServer((res, req) => handler(res, req, closed));
+        t.after(() => {
+            started.server.closeAllConnections();
+            return stopServer(started.server);
+        });
+        return { baseUrl: started.baseUrl, closed };
+    }
+
+    await t.test('returns a body within the budget', async t => {
+        const { baseUrl } = await server(t, streamer(32 * 1024));
+        const res = await fetchCmd(`${baseUrl}/`);
+        assert.equal((await readBodyCapped(res, 64 * 1024)).length, 32 * 1024);
+    });
+
+    await t.test('refuses a body over the budget and cancels the stream', async t => {
+        const { baseUrl, closed } = await server(t, streamer(Infinity));
+        const res = await fetchCmd(`${baseUrl}/`);
+        await assert.rejects(readBodyCapped(res, 64 * 1024), err => err.code === 'EBODYTOOLARGE');
+
+        // The endless response was actually cut off, not merely ignored
+        const until = Date.now() + 2000;
+        while (!closed.length && Date.now() < until) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        assert.equal(closed.length, 1);
+    });
+
+    await t.test('applies the budget to a response without a stream too', async () => {
+        const stub = { body: null, text: async () => 'x'.repeat(10) };
+        await assert.rejects(readBodyCapped(stub, 5), err => err.code === 'EBODYTOOLARGE');
+        assert.equal(await readBodyCapped(stub, 10), 'x'.repeat(10));
+    });
+
+    await t.test('a redirect with an endless body is still followed', async t => {
+        let baseUrl;
+        ({ baseUrl } = await server(t, (res, req, closed) => {
+            if (req.path === '/a') {
+                res.writeHead(302, { Location: '/b' });
+                const timer = setInterval(() => res.write('x'.repeat(16 * 1024)), 1);
+                res.on('close', () => {
+                    clearInterval(timer);
+                    closed.push(true);
+                });
+                return;
+            }
+            ok(res, 'arrived');
+        }));
+
+        const res = await fetchWithVettedRedirects(fetchCmd, `${baseUrl}/a`, {});
+        assert.equal(await res.text(), 'arrived');
+    });
+});

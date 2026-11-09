@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
+const exitWhenStandalone = require('./helpers/exit-standalone');
 // Mock Redis and BullMQ before any production imports
 const mockQueue = {
     add: async () => ({}),
@@ -72,43 +73,43 @@ function createMockRedis() {
                     }
                     return results;
                 },
-                sadd: function (key, ...members) {
+                sadd(key, ...members) {
                     ops.push(() => redis.sadd(key, ...members));
                     return this;
                 },
-                hmset: function (key, data) {
+                hmset(key, data) {
                     ops.push(() => redis.hmset(key, data));
                     return this;
                 },
-                hset: function () {
+                hset() {
                     ops.push(() => 0);
                     return this;
                 },
-                hdel: function () {
+                hdel() {
                     ops.push(() => 0);
                     return this;
                 },
-                del: function (key) {
+                del(key) {
                     ops.push(() => redis.del(key));
                     return this;
                 },
-                expire: function () {
+                expire() {
                     ops.push(() => 0);
                     return this;
                 },
-                srem: function (key, ...members) {
+                srem(key, ...members) {
                     ops.push(() => redis.srem(key, ...members));
                     return this;
                 },
-                scard: function (key) {
+                scard(key) {
                     ops.push(() => redis.scard(key));
                     return this;
                 },
-                zadd: function () {
+                zadd() {
                     ops.push(() => 0);
                     return this;
                 },
-                hincrby: function () {
+                hincrby() {
                     ops.push(() => 0);
                     return this;
                 }
@@ -163,11 +164,13 @@ function createMockRedis() {
         scan: async () => ['0', []],
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
+        // The lock scripts ioredfour defines. A granted lock answers {1, index, ttl} like the real
+        // script does: ioredfour 2 refuses to release a lock whose index is not a number
         defineCommand: name => {
-            redis[name] = async () => [1, null, 0];
+            redis[name] = async () => [1, 1, 300000];
         },
         pipeline: () => {
             let pipeOps = [];
@@ -202,7 +205,7 @@ function createMockRedis() {
             );
             return pipeChain;
         },
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -222,9 +225,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -244,7 +245,7 @@ require.cache[getSecretPath] = {
 // Now safe to import production modules
 const { PubSubInstance, GooglePubSub } = require('../lib/oauth/pubsub/google');
 const { oauth2Apps } = require('../lib/oauth2-apps');
-const msgpack = require('msgpack5')();
+const msgpack = require('../lib/msgpack');
 const { REDIS_PREFIX } = require('../lib/consts');
 
 // Helper to create a mock 404 error matching the shape from lib/oauth/gmail.js
@@ -323,7 +324,7 @@ function createTestInstance(overrides) {
     return instance;
 }
 
-const MOCKED_METHODS = ['ensurePubsub', 'setMeta', 'get', 'getClient', 'getServiceAccessToken'];
+const MOCKED_METHODS = ['ensurePubsub', 'setMeta', 'get', 'getClient', 'getServiceAccessToken', 'invalidateServiceAccessToken'];
 
 function withMockedOauth2Apps(mocks, fn) {
     let originals = {};
@@ -341,7 +342,8 @@ function withMockedOauth2Apps(mocks, fn) {
                 throw create404Error();
             }
         }),
-        getServiceAccessToken: async () => 'mock-token'
+        getServiceAccessToken: async () => 'mock-token',
+        invalidateServiceAccessToken: async () => {}
     };
     for (let method of MOCKED_METHODS) {
         oauth2Apps[method] = mocks[method] || defaults[method];
@@ -360,7 +362,7 @@ function withMockedOauth2Apps(mocks, fn) {
 
 test('Pub/Sub subscription recovery tests', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     t.beforeEach(() => {
@@ -418,6 +420,25 @@ test('Pub/Sub subscription recovery tests', async t => {
                 assert.strictEqual(ensurePubsubCalls.length, 1);
             }
         )();
+    });
+
+    // undici reports a stalled response body as TypeError('terminated') with the code on err.cause
+    await t.test('a pull whose body stalls is a transient error', async () => {
+        await withMockedOauth2Apps({}, async () => {
+            let instance = createTestInstance({
+                client: {
+                    request: async () => {
+                        let cause = Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' });
+                        throw new TypeError('terminated', { cause });
+                    }
+                }
+            });
+
+            await assert.rejects(
+                () => instance.run(),
+                err => err.retryDelay === 5000 && err.eeLogged === true
+            );
+        })();
     });
 
     await t.test('403 error sets pubSubFlag and throws without calling ensurePubsub', async () => {
@@ -484,6 +505,88 @@ test('Pub/Sub subscription recovery tests', async t => {
                     setMetaCalls.some(c => c.meta.pubSubFlag !== undefined && c.meta.pubSubFlag !== null),
                     'pubSubFlag should be set for 401 errors'
                 );
+            }
+        )();
+    });
+
+    await t.test('401 drops the cached service token so the next run fetches a new one', async () => {
+        let invalidated = [];
+
+        await withMockedOauth2Apps(
+            {
+                invalidateServiceAccessToken: async id => {
+                    invalidated.push(id);
+                }
+            },
+            async () => {
+                let instance = createTestInstance({
+                    appData: {
+                        id: 'test-app',
+                        pubSubSubscription: 'projects/test/subscriptions/test-sub',
+                        accessToken: 'stale',
+                        accessTokenExpires: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+                    },
+                    client: {
+                        request: async () => {
+                            throw create401Error();
+                        }
+                    }
+                });
+
+                await assert.rejects(() => instance.run(), { statusCode: 401 });
+
+                assert.deepStrictEqual(invalidated, ['test-app'], 'the stored token is cleared');
+                assert.strictEqual(instance.appData.accessToken, null, 'the in-memory copy is cleared too');
+                assert.strictEqual(instance.appData.accessTokenExpires, null);
+            }
+        )();
+    });
+
+    // Past five failed recoveries every later attempt used to be refused until a restart or an
+    // app update, even after the operator fixed the permissions
+    await t.test('recovery backs off after five failures instead of refusing forever', async () => {
+        let ensurePubsubCalls = 0;
+
+        await withMockedOauth2Apps(
+            {
+                ensurePubsub: async () => {
+                    ensurePubsubCalls++;
+                    throw new Error('GCP permission error');
+                }
+            },
+            async () => {
+                let instance = createTestInstance({ _recoveryAttempts: 0, _nextRecoveryAt: 0 });
+
+                for (let i = 0; i < 5; i++) {
+                    await assert.rejects(() => instance.attemptRecovery('test'), /GCP permission error/);
+                }
+                assert.strictEqual(ensurePubsubCalls, 5);
+
+                // the sixth waits for the backoff and tells the loop how long
+                let backoffErr;
+                await assert.rejects(
+                    () => instance.attemptRecovery('test'),
+                    err => {
+                        backoffErr = err;
+                        return /backing off/.test(err.message);
+                    }
+                );
+                assert.strictEqual(ensurePubsubCalls, 5, 'no attempt inside the backoff window');
+                assert.ok(backoffErr.retryDelay > 9 * 60 * 1000 && backoffErr.retryDelay <= 10 * 60 * 1000);
+
+                // once the window has passed the recovery runs again
+                instance._nextRecoveryAt = Date.now() - 1;
+                await assert.rejects(() => instance.attemptRecovery('test'), /GCP permission error/);
+                assert.strictEqual(ensurePubsubCalls, 6);
+                assert.ok(instance._nextRecoveryAt - Date.now() > 19 * 60 * 1000, 'the next window is longer');
+
+                // and succeeds once the operator has fixed the permissions
+                instance._nextRecoveryAt = Date.now() - 1;
+                oauth2Apps.ensurePubsub = async () => {
+                    ensurePubsubCalls++;
+                };
+                await instance.attemptRecovery('test');
+                assert.strictEqual(ensurePubsubCalls, 7);
             }
         )();
     });
@@ -1538,7 +1641,7 @@ test('Pub/Sub subscription recovery tests', async t => {
 
 test('startLoop orchestration tests', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     t.beforeEach(() => {

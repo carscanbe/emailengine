@@ -6,11 +6,13 @@
 //
 // Run once:  npm run test:e2e:install   (fetch the Chromium browser)
 // Run suite: npm run test:e2e
+//
+// A single spec can be run on its own (`npx playwright test pages-admin`), but tests that need
+// the account happy-path.spec.js registers then fail; set EE_E2E_STANDALONE=1 to skip them.
 
 const { defineConfig, devices } = require('@playwright/test');
 
-const PORT = 7099;
-const BASE_URL = `http://127.0.0.1:${PORT}`;
+const { BASE_URL } = require('./test/e2e/helpers/bootstrap');
 
 module.exports = defineConfig({
     testDir: './test/e2e',
@@ -31,7 +33,7 @@ module.exports = defineConfig({
     projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
     webServer: {
         // Flush the isolated e2e Redis DB so every run starts from a clean, unconfigured instance.
-        command: 'node test/e2e/flush-redis.js && node server.js',
+        command: 'node test/helpers/flush-redis.js && node server.js',
         url: BASE_URL,
         timeout: 120000,
         // Always boot fresh: the suite asserts fresh-instance behaviour (enabling auth, activating

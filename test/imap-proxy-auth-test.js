@@ -9,13 +9,16 @@
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
-const { createImapProxyAuthHandler } = require('../lib/imap-proxy-auth');
+const { createImapProxyAuthHandler, classifyCredentialFailure, isImapResponseError, toImapResponseError } = require('../lib/imap-proxy-auth');
+const { AUTH_FAILURE_LIMIT, AUTH_FAILURE_ADDRESS_LIMIT, authFailureAddressKey, AUTH_FAILURE_WINDOW } = require('../lib/auth-token');
+const { rateLimitWindowKey } = require('../lib/rate-limit');
+const { trackedWindow, trackedAddressWindow, exhaustBudget } = require('./helpers/auth-throttle');
 const { oauth2Apps } = require('../lib/oauth2-apps');
 const tokens = require('../lib/tokens');
 const settings = require('../lib/settings');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
-const { REDIS_PREFIX } = require('../lib/consts');
+const { REDIS_PREFIX, AUTH_FAILURE_DISABLED_FIELD } = require('../lib/consts');
 
 const ACCOUNT = 'imap-proxy-acct';
 const API_ACCOUNT = 'imap-proxy-api-acct';
@@ -26,6 +29,8 @@ const session = (overrides = {}) => Object.assign({ remoteAddress: '127.0.0.1' }
 let proxyToken;
 let apiScopeToken;
 let ipRestrictedToken;
+let readOnlyToken;
+let fullMailToken;
 let apiAppId;
 let prevPassword;
 const accountKeys = [];
@@ -41,6 +46,23 @@ test.before(async () => {
 
     proxyToken = await tokens.provision({ account: ACCOUNT, scopes: ['imap-proxy'], description: 'proxy test', nolog: true });
     apiScopeToken = await tokens.provision({ account: ACCOUNT, scopes: ['api'], description: 'proxy wrong scope', nolog: true });
+    // The proxy is checked once at LOGIN and then pipes the sockets straight together, so a token
+    // narrowed to reading would get a session that can EXPUNGE and delete folders. It is refused at
+    // login instead, which is the only honest answer while there is no per-command gate.
+    readOnlyToken = await tokens.provision({
+        account: ACCOUNT,
+        scopes: ['imap-proxy'],
+        permissions: { actions: ['read'] },
+        description: 'proxy read-only permissions',
+        nolog: true
+    });
+    fullMailToken = await tokens.provision({
+        account: ACCOUNT,
+        scopes: ['imap-proxy'],
+        permissions: { groups: ['message', 'mailbox'] },
+        description: 'proxy full mail permissions',
+        nolog: true
+    });
     ipRestrictedToken = await tokens.provision({
         account: ACCOUNT,
         scopes: ['imap-proxy'],
@@ -59,7 +81,7 @@ test.before(async () => {
 });
 
 registerRedisTeardown(redis, async () => {
-    for (const tok of [proxyToken, apiScopeToken, ipRestrictedToken]) {
+    for (const tok of [proxyToken, apiScopeToken, ipRestrictedToken, readOnlyToken, fullMailToken]) {
         if (tok) {
             try {
                 await tokens.delete(tok);
@@ -84,6 +106,13 @@ registerRedisTeardown(redis, async () => {
     }
     try {
         await settings.set('imapProxyServerPassword', prevPassword || '');
+    } catch (err) {
+        // ignore
+    }
+    // The handler tests refuse non-token passwords from the default session address, which the
+    // per-address budget counts; do not leave that for the next run
+    try {
+        await redis.del(rateLimitWindowKey(authFailureAddressKey('127.0.0.1'), AUTH_FAILURE_WINDOW).windowKey);
     } catch (err) {
         // ignore
     }
@@ -136,9 +165,58 @@ test('IMAP proxy auth handler', async t => {
         }
     });
 
+    await t.test('rejects a token narrowed below what an IMAP session can do', async () => {
+        // Holds the imap-proxy scope, so only the permission check stands between this credential and
+        // a session that could STORE \\Deleted, EXPUNGE and delete folders. Admitting it as
+        // "read-only" would be a guarantee the surface cannot keep.
+        await assert.rejects(() => authenticate({ username: ACCOUNT, password: readOnlyToken }, session()), /permissions do not allow/);
+    });
+
     await t.test('accepts a valid scoped token bound to the account', async () => {
         const { accountData } = await authenticate({ username: ACCOUNT, password: proxyToken }, session());
         assert.strictEqual(accountData.account, ACCOUNT);
+    });
+
+    await t.test('accepts a narrowed token that holds everything the session can exercise', async () => {
+        // Narrowed to the two mail groups with every action, which is exactly what the proxy asks
+        // for - so the narrowing is real (it cannot send, export, or touch settings) without being a
+        // promise about what it does inside the IMAP session
+        const { accountData } = await authenticate({ username: ACCOUNT, password: fullMailToken }, session());
+        assert.strictEqual(accountData.account, ACCOUNT);
+    });
+
+    await t.test('rejects accounts whose IMAP is switched off or parked with ACCOUNTDISABLED', async () => {
+        // A proxy session is an IMAP connection made with the account's credentials, which is
+        // exactly what the send-only switch and the auth-failure park stop
+        await settings.set('imapProxyServerPassword', 'global-proxy-pass');
+        try {
+            const disabled = `${ACCOUNT}-disabled`;
+            await seedAccount(disabled, { imap: JSON.stringify({ host: 'imap.test', port: 993, secure: true, disabled: true }) });
+            await assert.rejects(
+                () => authenticate({ username: disabled, password: 'global-proxy-pass' }, session()),
+                err => {
+                    assert.strictEqual(err.serverResponseCode, 'ACCOUNTDISABLED');
+                    assert.match(err.message, /IMAP is disabled/);
+                    return true;
+                }
+            );
+
+            const parked = `${ACCOUNT}-parked`;
+            await seedAccount(parked, {
+                imap: JSON.stringify({ host: 'imap.test', port: 993, secure: true, disabled: true }),
+                [AUTH_FAILURE_DISABLED_FIELD]: new Date().toISOString()
+            });
+            await assert.rejects(
+                () => authenticate({ username: parked, password: 'global-proxy-pass' }, session()),
+                err => {
+                    assert.strictEqual(err.serverResponseCode, 'ACCOUNTDISABLED');
+                    assert.match(err.message, /repeated authentication failures/);
+                    return true;
+                }
+            );
+        } finally {
+            await settings.set('imapProxyServerPassword', '');
+        }
     });
 
     await t.test('rejects API-only accounts with ACCOUNTDISABLED', async () => {
@@ -153,6 +231,260 @@ test('IMAP proxy auth handler', async t => {
             );
         } finally {
             await settings.set('imapProxyServerPassword', '');
+        }
+    });
+});
+
+test('IMAP proxy auth failure throttle', async t => {
+    // TEST-NET-3 addresses, never a real client; one per case so the counters cannot interfere
+    await t.test('a refused login is recorded against the client address and username', async t => {
+        const ip = '203.0.113.21';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+
+        await assert.rejects(() => authenticate({ username: ACCOUNT, password: 'nope' }, session({ remoteAddress: ip })));
+
+        assert.strictEqual(await redis.get(windowKey), '1');
+    });
+
+    await t.test('an accepted login spends nothing', async t => {
+        const ip = '203.0.113.22';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+
+        const { accountData } = await authenticate({ username: ACCOUNT, password: proxyToken }, session({ remoteAddress: ip }));
+        assert.strictEqual(accountData.account, ACCOUNT);
+
+        assert.strictEqual(await redis.get(windowKey), null);
+    });
+
+    await t.test('a valid credential is refused once the budget is spent', async t => {
+        const ip = '203.0.113.23';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+        await exhaustBudget(windowKey);
+
+        await assert.rejects(
+            () => authenticate({ username: ACCOUNT, password: proxyToken }, session({ remoteAddress: ip })),
+            err => {
+                assert.match(err.message, /Too many failed authentication attempts/);
+                assert.strictEqual(err.serverResponseCode, 'AUTHENTICATIONFAILED');
+                assert.strictEqual(err.responseStatus, 'NO');
+                return true;
+            }
+        );
+
+        assert.strictEqual(await redis.get(windowKey), String(AUTH_FAILURE_LIMIT), 'a throttled attempt is not evaluated and not counted');
+    });
+
+    await t.test('the budget is per address: another address is unaffected', async t => {
+        await exhaustBudget(await trackedWindow(t, '203.0.113.24', ACCOUNT));
+
+        const { accountData } = await authenticate({ username: ACCOUNT, password: proxyToken }, session({ remoteAddress: '203.0.113.25' }));
+        assert.strictEqual(accountData.account, ACCOUNT);
+    });
+
+    await t.test('parallel attempts cannot spend more than the budget', async t => {
+        const ip = '203.0.113.27';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+        await trackedAddressWindow(t, ip);
+        // Five attempts left
+        await exhaustBudget(windowKey, AUTH_FAILURE_LIMIT - 5);
+
+        const results = await Promise.allSettled(
+            Array.from({ length: 20 }, () => authenticate({ username: ACCOUNT, password: 'nope' }, session({ remoteAddress: ip })))
+        );
+
+        const evaluated = results.filter(r => r.status === 'rejected' && !/Too many failed/.test(r.reason.message)).length;
+        // Checking and recording in two steps let all twenty through
+        assert.strictEqual(evaluated, 5);
+        assert.strictEqual(await redis.get(windowKey), String(AUTH_FAILURE_LIMIT));
+    });
+
+    await t.test('rotating usernames does not escape the per-address budget for the shared password', async t => {
+        const ip = '203.0.113.28';
+        const addressKey = await trackedAddressWindow(t, ip);
+        await exhaustBudget(addressKey, AUTH_FAILURE_ADDRESS_LIMIT);
+
+        await settings.set('imapProxyServerPassword', 'global-proxy-pass');
+        try {
+            // A fresh username, so its own budget is untouched, and the right shared password
+            await assert.rejects(
+                () => authenticate({ username: ACCOUNT, password: 'global-proxy-pass' }, session({ remoteAddress: ip })),
+                err => /Too many failed/.test(err.message)
+            );
+        } finally {
+            await settings.set('imapProxyServerPassword', '');
+        }
+
+        // A token is not a guess at the shared password, so an address that spent that budget
+        // still logs in with one
+        await trackedWindow(t, ip, ACCOUNT);
+        const { accountData } = await authenticate({ username: ACCOUNT, password: proxyToken }, session({ remoteAddress: ip }));
+        assert.strictEqual(accountData.account, ACCOUNT);
+    });
+
+    await t.test('the API-only refusal is about the account, not the credential, and spends nothing', async t => {
+        const ip = '203.0.113.26';
+        const windowKey = await trackedWindow(t, ip, API_ACCOUNT);
+
+        await settings.set('imapProxyServerPassword', 'global-proxy-pass');
+        try {
+            await assert.rejects(
+                () => authenticate({ username: API_ACCOUNT, password: 'global-proxy-pass' }, session({ remoteAddress: ip })),
+                err => err.serverResponseCode === 'ACCOUNTDISABLED'
+            );
+        } finally {
+            await settings.set('imapProxyServerPassword', '');
+        }
+
+        assert.strictEqual(await redis.get(windowKey), null);
+    });
+});
+
+// One authentication server serves every account on the instance, so its 429 or 503 must not reach
+// a desktop mail client as a rejected password - the user retypes a working credential and the
+// client keeps the login it was told was wrong. The status arrives in the `authRequest` record
+// resolveCredentials() attaches, never on err.statusCode, which is read further up as the status
+// of the request EmailEngine is itself serving.
+test('IMAP proxy credential failure classification', async t => {
+    await t.test('a throttled authentication server is a temporary failure', () => {
+        const err = classifyCredentialFailure(
+            Object.assign(new Error('Invalid response: 429 Too Many Requests'), { code: 'HTTPRequestError', authRequest: { status: 429 } })
+        );
+
+        assert.strictEqual(err.authenticationFailed, undefined, 'nothing refused the credential');
+        assert.strictEqual(err.serverResponseCode, 'UNAVAILABLE');
+        assert.strictEqual(err.responseStatus, 'NO');
+    });
+
+    await t.test('an authentication server 5xx is a temporary failure too', () => {
+        const err = classifyCredentialFailure(
+            Object.assign(new Error('Invalid response: 503 Service Unavailable'), { code: 'HTTPRequestError', authRequest: { status: 503 } })
+        );
+
+        assert.strictEqual(err.authenticationFailed, undefined);
+        assert.strictEqual(err.serverResponseCode, 'UNAVAILABLE');
+    });
+
+    await t.test('an unreachable authentication server is a temporary failure', () => {
+        const err = classifyCredentialFailure(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+
+        assert.strictEqual(err.serverResponseCode, 'UNAVAILABLE');
+        assert.strictEqual(err.responseStatus, 'NO');
+    });
+
+    await t.test('a refused account is still an authentication failure', () => {
+        const err = classifyCredentialFailure(
+            Object.assign(new Error('Invalid response: 401 Unauthorized'), { code: 'HTTPRequestError', authRequest: { status: 401 } })
+        );
+
+        assert.strictEqual(err.authenticationFailed, true);
+        assert.strictEqual(err.serverResponseCode, 'AUTHENTICATIONFAILED');
+        assert.strictEqual(err.responseStatus, 'NO');
+    });
+
+    await t.test('both failures are answered on the wire, neither as BAD', () => {
+        // imap-core renders an error with no `response` as BAD, which counts against the
+        // connection's bad-command budget instead of telling the client anything.
+        for (let failure of [
+            Object.assign(new Error('Invalid response: 503 Service Unavailable'), { statusCode: 503 }),
+            Object.assign(new Error('Invalid response: 403 Forbidden'), { statusCode: 403 })
+        ]) {
+            const tagged = classifyCredentialFailure(failure);
+            assert.ok(isImapResponseError(tagged), 'the proxy must answer this itself');
+
+            const response = toImapResponseError(tagged);
+            assert.strictEqual(response.response, 'NO');
+            assert.ok(response.message.startsWith(`[${tagged.serverResponseCode}] `), 'the response code rides in brackets');
+        }
+    });
+
+    await t.test('an internal fault is not answered as an IMAP response', () => {
+        assert.strictEqual(isImapResponseError(new Error('Missing or disabled OAuth2 app')), false);
+    });
+});
+
+test('IMAP proxy refusal text does not reveal the shared password', async t => {
+    await t.test('wrong password and right password for an unknown user read the same', async t => {
+        const ip = '203.0.113.29';
+        await trackedWindow(t, ip, ACCOUNT);
+        await trackedWindow(t, ip, 'no-such-account-xyz');
+        await trackedAddressWindow(t, ip);
+
+        await settings.set('imapProxyServerPassword', 'global-proxy-pass');
+        let wrongPassword;
+        let unknownUser;
+        try {
+            wrongPassword = await authenticate({ username: ACCOUNT, password: 'not-the-password' }, session({ remoteAddress: ip })).catch(err => err);
+            unknownUser = await authenticate({ username: 'no-such-account-xyz', password: 'global-proxy-pass' }, session({ remoteAddress: ip })).catch(
+                err => err
+            );
+        } finally {
+            await settings.set('imapProxyServerPassword', '');
+        }
+
+        assert.ok(wrongPassword instanceof Error && unknownUser instanceof Error);
+        assert.strictEqual(wrongPassword.message, unknownUser.message);
+        assert.strictEqual(wrongPassword.serverResponseCode, unknownUser.serverResponseCode);
+        assert.strictEqual(wrongPassword.responseStatus, unknownUser.responseStatus);
+    });
+});
+
+// A proxied session used to be checked only at LOGIN, so it outlived every way of revoking what
+// opened it. recheck() is what the proxy now asks of each open session.
+test('IMAP proxy session recheck', async t => {
+    await t.test('a token session ends when the token is deleted', async () => {
+        await settings.set('imapProxyServerPassword', '');
+        const token = await tokens.provision({ account: ACCOUNT, scopes: ['imap-proxy'], description: 'recheck token', nolog: true });
+        const auth = { username: ACCOUNT, password: token };
+        await authenticate(auth, session());
+        assert.strictEqual(await authenticate.recheck(auth, session()), true);
+        await tokens.delete(token);
+        assert.strictEqual(await authenticate.recheck(auth, session()), false);
+    });
+
+    await t.test('a shared-password session ends when the password is rotated', async () => {
+        await settings.set('imapProxyServerPassword', 'first-proxy-pass');
+        try {
+            const auth = { username: ACCOUNT, password: 'first-proxy-pass' };
+            assert.strictEqual(await authenticate.recheck(auth, session()), true);
+            await settings.set('imapProxyServerPassword', 'second-proxy-pass');
+            assert.strictEqual(await authenticate.recheck(auth, session()), false);
+        } finally {
+            await settings.set('imapProxyServerPassword', '');
+        }
+    });
+
+    await t.test('a session ends when the account has IMAP switched off or is deleted', async () => {
+        const account = 'imap-proxy-recheck-acct';
+        await seedAccount(account, { imap: JSON.stringify({ host: 'imap.test', port: 993, secure: true }) });
+        const token = await tokens.provision({ account, scopes: ['imap-proxy'], description: 'recheck account', nolog: true });
+        const auth = { username: account, password: token };
+        try {
+            assert.strictEqual(await authenticate.recheck(auth, session()), true);
+
+            await redis.hset(`${REDIS_PREFIX}iad:${account}`, 'imap', JSON.stringify({ host: 'imap.test', port: 993, secure: true, disabled: true }));
+            assert.strictEqual(await authenticate.recheck(auth, session()), false);
+
+            await redis.hset(`${REDIS_PREFIX}iad:${account}`, 'imap', JSON.stringify({ host: 'imap.test', port: 993, secure: true }));
+            assert.strictEqual(await authenticate.recheck(auth, session()), true);
+
+            await redis.del(`${REDIS_PREFIX}iad:${account}`);
+            assert.strictEqual(await authenticate.recheck(auth, session()), false);
+        } finally {
+            await tokens.delete(token).catch(() => false);
+        }
+    });
+
+    await t.test('a recheck records no token use', async () => {
+        await settings.set('imapProxyServerPassword', '');
+        const token = await tokens.provision({ account: ACCOUNT, scopes: ['imap-proxy'], description: 'recheck no use', nolog: true });
+        try {
+            const tokenData = await tokens.get(token, false, { allowExpired: true });
+            const before = await tokens.getAccess(tokenData.id);
+            await authenticate.recheck({ username: ACCOUNT, password: token }, session({ remoteAddress: '198.51.100.77' }));
+            const after = await tokens.getAccess(tokenData.id);
+            assert.deepStrictEqual(after, before);
+        } finally {
+            await tokens.delete(token).catch(() => false);
         }
     });
 });

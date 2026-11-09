@@ -21,7 +21,7 @@
 // returned not-found for a bogus id" (also 404). Those, plus all POST routes, are covered
 // by the route-table snapshot test instead.
 //
-// Runs against the shared test server started by the Grunt test task (config/test.toml,
+// Runs against the shared test server started by test/run-tests.js (config/test.toml,
 // port 7077), same harness as test/api-routes-smoke-test.js.
 
 require('dotenv').config({ quiet: true });
@@ -38,30 +38,42 @@ const baseUrl = `http://127.0.0.1:${config.api.port}`;
 const GET_ROUTES = [
     '/accounts/new',
     '/admin',
+    '/admin/account/passkeys',
     '/admin/account/password',
     '/admin/account/security',
     '/admin/accounts',
+    '/admin/accounts/suggestions',
     '/admin/config/ai',
-    '/admin/config/document-store',
-    '/admin/config/document-store/chat',
-    '/admin/config/document-store/mappings',
-    '/admin/config/document-store/mappings/new',
-    '/admin/config/document-store/pre-processing',
+    '/admin/config/branding',
+    '/admin/config/email-processing',
     '/admin/config/imap-proxy',
     '/admin/config/license',
     '/admin/config/logging',
+    '/admin/config/mcp',
     '/admin/config/network',
     '/admin/config/oauth',
     '/admin/config/oauth/new',
     '/admin/config/oauth/subscriptions',
+    '/admin/config/security',
     '/admin/config/service',
     '/admin/config/smtp',
+    '/admin/config/tls',
+    '/admin/config/tls/upload',
     '/admin/config/webhooks',
     '/admin/gateways',
     '/admin/gateways/new',
+    '/admin/bull-board',
     '/admin/internals',
     '/admin/legal',
+    '/admin/legal/sbom.json',
     '/admin/login',
+    '/admin/queues',
+    '/admin/queues/counts',
+    '/admin/queues/notify',
+    '/admin/queues/submit',
+    '/admin/queues/export',
+    '/admin/reference',
+    '/admin/suppression-lists',
     '/admin/swagger',
     '/admin/templates',
     '/admin/templates/new',
@@ -74,6 +86,8 @@ const GET_ROUTES = [
     '/unsubscribe'
 ];
 
+const { scriptTagAttrs, inlineScriptAttrs, NONCE_RE } = require('../helpers/inline-scripts');
+
 test('Admin UI routes smoke test', async t => {
     await t.test('every parameterless GET route is registered and does not crash', async () => {
         for (const path of GET_ROUTES) {
@@ -81,5 +95,77 @@ test('Admin UI routes smoke test', async t => {
             assert.notEqual(res.status, 404, `GET ${path} returned 404 - route is not registered (dropped or renamed during extraction)`);
             assert.ok(res.status < 500, `GET ${path} returned ${res.status} - handler crashed (likely a broken require or missing symbol after extraction)`);
         }
+    });
+
+    // The unit test proves the extension on a hand-built server; this proves the real worker
+    // wires it, seeds the nonce before rendering, and that every page's inline scripts carry the
+    // nonce the header names - the one mismatch a browser would answer with a dead page
+    await t.test('every admin page carries a Content-Security-Policy whose nonce its inline scripts use', async () => {
+        const nonces = new Set();
+
+        for (const path of GET_ROUTES.filter(path => path.startsWith('/admin'))) {
+            const res = await supertest(baseUrl).get(path);
+            const csp = res.headers['content-security-policy'];
+            assert.ok(csp, `GET ${path} (${res.status}) has no content-security-policy`);
+            assert.equal(res.headers['x-frame-options'], 'SAMEORIGIN', path);
+            assert.equal(res.headers['cache-control'], 'no-store', path);
+
+            if (res.status !== 200 || !/text\/html/.test(res.headers['content-type'])) {
+                // a redirect to the login page or a JSON body has no inline script to match
+                continue;
+            }
+
+            if (/'unsafe-inline'/.test(csp.match(/script-src ([^;]+)/)[1])) {
+                // a public-layout page on an admin path: relaxed on purpose, keeps admin framing
+                assert.match(csp, /frame-ancestors 'self'/, path);
+                continue;
+            }
+
+            const nonce = csp.match(NONCE_RE);
+            assert.ok(nonce, `GET ${path} policy names no nonce: ${csp}`);
+            nonces.add(nonce[1]);
+
+            for (const attrs of inlineScriptAttrs(res.text)) {
+                assert.match(attrs, new RegExp(`\\bnonce="${nonce[1]}"`), `GET ${path}: inline <script${attrs}> does not carry the header nonce`);
+            }
+
+            // The rendered page is where a missing opt-out actually reaches a browser: without it
+            // an HTML-rewriting CDN re-creates the element and the nonce above buys nothing
+            for (const attrs of scriptTagAttrs(res.text)) {
+                assert.match(attrs, /\bdata-cfasync="false"/, `GET ${path}: <script${attrs}> does not carry the data-cfasync opt-out`);
+            }
+        }
+
+        assert.ok(nonces.size > 1, 'every response carries its own nonce');
+    });
+
+    await t.test('a public page gets the relaxed policy and stays frameable', async () => {
+        // No signed form data, so this is the public error page - which is exactly the response
+        // an operator's own application would embed a failure of
+        const res = await supertest(baseUrl).get('/accounts/new');
+        const csp = res.headers['content-security-policy'];
+        assert.ok(csp);
+        assert.match(csp, /script-src 'self' https: 'unsafe-inline'/);
+        assert.doesNotMatch(csp, /nonce|frame-ancestors/);
+        assert.equal(res.headers['x-frame-options'], undefined);
+        assert.notEqual(res.headers['cache-control'], 'no-store');
+        assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    });
+
+    await t.test('the locale cookie follows the instance scheme like the session cookie', async () => {
+        // The test instance has no https serviceUrl, so the cookie must not be Secure - a
+        // browser would drop it and the chosen locale would never stick
+        const res = await supertest(baseUrl).get('/admin/login?locale=en');
+        const locale = (res.headers['set-cookie'] || []).find(cookie => cookie.startsWith('locale='));
+        assert.ok(locale, 'the locale cookie is set from the query argument');
+        assert.doesNotMatch(locale, /;\s*Secure/i);
+        assert.match(locale, /;\s*HttpOnly/i);
+    });
+
+    await t.test('static assets carry no policy', async () => {
+        const res = await supertest(baseUrl).get('/static/js/app.js');
+        assert.equal(res.status, 200);
+        assert.equal(res.headers['content-security-policy'], undefined);
+        assert.equal(res.headers['x-content-type-options'], 'nosniff');
     });
 });

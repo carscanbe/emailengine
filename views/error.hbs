@@ -1,22 +1,36 @@
-<div class="container mt-4">
-    <div class="card border-left-danger">
-        <div class="card-body">
-            <h1 class="h4 mb-3">{{_ "Something went wrong" templateLocale}}</h1>
-            <p class="mb-2">{{message}}</p>
-            <p class="text-muted small mb-3">{{_ "Error code: %s" templateLocale statusCode}}</p>
-            {{#if details}}
+{{!-- Generic error page: rendered for any non-API error response (missing
+pages, blocked access, failed form submissions without a friendlier page). --}}
+
+<div class="ee-error-card">
+    <div class="ee-error-card-content">
+        <h1>{{_ "Something went wrong" templateLocale}}</h1>
+        <p>{{message}}</p>
+        <p class="ee-muted">{{_ "Error code: %s" templateLocale statusCode}}</p>
+        {{#if details}}
+        <div class="ee-error-details">
             {{#each details}}
-            <div class="alert alert-danger mb-2">{{this}}</div>
+            <div class="ee-alert ee-alert-error">{{this}}</div>
             {{/each}}
-            {{/if}}
-            <div class="mt-3">
-                <a href="javascript:history.back()" class="btn btn-secondary btn-sm">
-                    <i class="fas fa-arrow-left"></i> {{_ "Go back" templateLocale}}
-                </a>
-                <a href="/admin" class="btn btn-primary btn-sm ml-2">
-                    <i class="fas fa-home"></i> {{_ "Dashboard" templateLocale}}
-                </a>
-            </div>
         </div>
+        {{/if}}
+        <div class="ee-form-actions">
+            {{!-- A button rather than a javascript: link: the Content-Security-Policy on the admin
+                 surface allows no javascript: URLs; static/js/public.js wires data-ee-back --}}
+            <button type="button" data-ee-back class="ee-btn ee-btn-neutral ee-btn-soft ee-btn-sm">
+                <span class="ee-icon ee-icon-arrow-left"></span> {{_ "Go back" templateLocale}}
+            </button>
+            {{!-- The dashboard is an admin destination. A mailbox owner on the hosted form or a
+                 list recipient on an unsubscribe link has no business there, so the button only
+                 shows for a requester who holds an admin session, or on an instance that has no
+                 admin login at all (showDashboardLink, set by the view context in workers/api.js). --}}
+            {{#if showDashboardLink}}
+            <a href="/admin" class="ee-btn ee-btn-primary ee-btn-sm">
+                <span class="ee-icon ee-icon-home"></span> {{_ "Dashboard" templateLocale}}
+            </a>
+            {{/if}}
+        </div>
+    </div>
+    <div class="ee-error-card-icon">
+        <span class="ee-icon ee-icon-alert-triangle ee-icon-lg"></span>
     </div>
 </div>

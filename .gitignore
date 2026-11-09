@@ -1,6 +1,13 @@
 .DS_Store
 node_modules
-.env
+# Cover every local env file, not just the exact name: setup-production.sh writes generated
+# EENGINE_SECRET/REDIS_PASSWORD/SMTP_PASSWORD into .env and then backs it up as
+# .env.backup.<timestamp>, which a bare `.env` rule does not match.
+.env*
+# ...except the two committed templates. They carry only self-labelled dev defaults and
+# CHANGE_ME placeholders, never real credentials, and are already tracked.
+!.env.development
+!.env.production
 dist/
 yarn.lock
 swagger.json
@@ -9,10 +16,9 @@ ee-dist/
 config/development*
 .vscode
 .okta.env
-system.env
 keylog.txt
-.claude
-.vscode
+.claude/*
+!.claude/rules/
 issue*
 patch*
 manual-test/
@@ -21,3 +27,15 @@ test-results/
 blob-report/
 playwright/.cache/
 *-plan.md
+*-review.md
+
+# Profiling and crash artifacts - never commit these, they capture process memory
+*.heapsnapshot
+*.cpuprofile
+*.heapprofile
+core.*
+
+# Local logs
+*.log
+# intermediate output of npm run gettext
+translations/messages.pot.tmp

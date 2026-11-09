@@ -1,0 +1,76 @@
+{{!--
+    API reference landing page (/admin/reference). Server-rendered from the same
+    OpenAPI document that /swagger.json serves - see lib/api-reference/.
+--}}
+{{> reference/token-alert}}
+
+{{> ui/page-header title="API Reference" icon="icon-[tabler--api]" class="mb-4"
+subtitle="Explore REST API endpoints, request examples, and response formats."}}
+
+{{#> ui/card title="Getting started" bodyClass="space-y-4"}}
+
+<dl class="ee-dl">
+    <dt>Base URL</dt>
+    <dd><code class="ee-chip">{{baseUrl}}</code></dd>
+    <dt>Endpoints</dt>
+    <dd>{{operationCount}} across {{tags.length}} groups</dd>
+    <dt>API version</dt>
+    <dd>{{version}}</dd>
+    <dt>Specification</dt>
+    <dd><a href="/swagger.json" class="link link-primary" target="_blank" rel="noopener noreferrer">/swagger.json</a>
+        for Postman and code generators</dd>
+</dl>
+
+{{!-- The document's own info.description, not a second copy of it. This page used to
+      restate authentication, errors and request processing in its own words, which meant
+      two places to keep in step and only one of them published. Pre-escaped by
+      lib/api-reference/format.js, hence the triple stash. --}}
+{{#if descriptionHtml}}
+<div class="text-base-content/70 text-sm"><p>{{{descriptionHtml}}}</p></div>
+{{/if}}
+
+<div>
+    <h3 class="text-base-content mb-1 font-semibold">Error response format</h3>
+    <pre class="ee-code-block"><code class="language-json">{
+  "statusCode": 400,
+  "error": "Bad Request",
+  "message": "Invalid request payload input"
+}</code></pre>
+</div>
+
+<div>
+    <h3 class="text-base-content mb-1 font-semibold">Code samples</h3>
+    <p class="text-base-content/70 text-sm">The snippets on each endpoint read the access token from an
+        <code class="ee-chip">EMAILENGINE_TOKEN</code> environment variable, and so does the command behind
+        <strong>Copy as curl</strong> in a Try it panel.</p>
+</div>
+
+<div class="flex flex-wrap gap-2">
+    {{> ui/btn href="/admin/tokens" variant="primary" size="sm" icon="icon-[tabler--key]" label="Access tokens"}}
+    {{> ui/btn href="https://learn.emailengine.app/" variant="neutral" style="soft" size="sm"
+    icon="icon-[tabler--book]" label="Documentation" external=true}}
+</div>
+
+{{/ui/card}}
+
+{{> ui/section-title label="Endpoint groups" class="mt-8 mb-3"}}
+
+<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    {{#each tags}}
+    <a href="{{url}}"
+        class="card bg-base-100 hover:border-primary/40 border border-transparent shadow-md transition-colors">
+        <div class="card-body gap-1 p-4">
+            <div class="flex items-baseline justify-between gap-2">
+                <h3 class="text-primary font-semibold">{{name}}</h3>
+                <span class="text-base-content/40 text-xs">{{operationCount}}</span>
+            </div>
+            {{#if descriptionHtml}}
+            <p class="text-base-content/70 text-sm">{{{descriptionHtml}}}</p>
+            {{/if}}
+        </div>
+    </a>
+    {{/each}}
+</div>
+
+{{!-- deferred highlighting, sidebar filter and try-it runner; the page content itself is server-rendered --}}
+<script data-cfasync="false" src="/static/js/reference.js" defer></script>

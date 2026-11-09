@@ -3,111 +3,266 @@ on:
         branches:
             - master
 
-permissions:
-    contents: write
-    pull-requests: write
-    packages: write
-    attestations: write
-    id-token: write
+# Every job declares the permissions it needs. A workflow-level grant reaches each job, so the
+# id-token the npm trusted publisher is bound to, and the package registry writes, used to be
+# available to the release-please job and to every third-party action any job ran
+permissions: {}
 
 name: Manage Release
+
+# Flow: release_please runs on every push to master as before, opening or updating the release PR
+# and, when that PR is merged, drafting the release and pushing its tag. Nothing is published at
+# that point. The tests job then waits for the "Run Tests" workflow (test.yml) to finish on the
+# same commit, and the npm and Docker jobs need it, so a release whose tests are red or were
+# cancelled never reaches a registry. When the tests fail, fix or re-run them and then use
+# "Re-run failed jobs" here: the tests job reads the latest attempt of the test run, so the
+# publish jobs go ahead once it is green. The release stays a draft until upload.sh publishes it,
+# as before.
+#
+# Waiting in a job, rather than triggering this workflow with workflow_run, keeps the release
+# PR updated on every push and keeps the npm job in a push-triggered run of this file, which is
+# what npm trusted publishing is bound to (see the publish job).
 jobs:
     release_please:
         name: Create or prepare release
         runs-on: ubuntu-latest
+        permissions:
+            # the release PR, the tag and the draft release
+            contents: write
+            pull-requests: write
         outputs:
             major: ${{ steps.release.outputs.major }}
             minor: ${{ steps.release.outputs.minor }}
             patch: ${{ steps.release.outputs.patch }}
             release_created: ${{ steps.release.outputs.release_created }}
         steps:
-            - uses: googleapis/release-please-action@v4
+            # Configured through release-please-config.json (manifest mode) rather than a
+            # `release-type` input here - the two are mutually exclusive, and only the config
+            # file can set `draft`, which the action exposes no input for. The release is drafted
+            # so users never see a version whose binaries do not exist yet, and `force-tag-creation`
+            # makes the tag anyway: GitHub withholds the tag for a draft, and upload.sh builds
+            # from the tag (falling back to HEAD behind an interactive prompt without it).
+            - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
               id: release
+
+    tests:
+        name: Wait for tests
+        runs-on: ubuntu-latest
+        needs: release_please
+        if: needs.release_please.outputs.release_created
+        # The test workflow's integration job alone may take 15 minutes, and it can queue first
+        timeout-minutes: 60
+        permissions:
+            actions: read
+            # the wait step is a local composite action, read from the checkout below
+            contents: read
+        steps:
+            - name: Checkout the wait-for-tests action
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
-                  release-type: node
+                  sparse-checkout: .github/actions/wait-for-tests
 
-            # The logic below handles the npm publication:
-            - uses: actions/checkout@v6
-              # these if statements ensure that a publication only occurs when
-              # a new release is created:
-              if: ${{ steps.release.outputs.release_created }}
-
-            - uses: actions/setup-node@v6
+            - name: Wait for the test workflow on this commit
+              uses: ./.github/actions/wait-for-tests
               with:
-                  node-version: 24
-                  registry-url: "https://registry.npmjs.org"
-              if: ${{ steps.release.outputs.release_created }}
-
-            - run: npm install
-              if: ${{ steps.release.outputs.release_created }}
-
+                  token: ${{ github.token }}
+                  sha: ${{ github.sha }}
     publish:
         name: Publish NPM package
         runs-on: ubuntu-latest
-        needs: release_please
-        if: ${{needs.release_please.outputs.release_created}}
+        needs: [release_please, tests]
+        # Fires as soon as release-please creates the release, which it does even though the
+        # release is a draft - `release_created` reports the release object, not its visibility.
+        #
+        # Deliberately NOT deferred until the draft is published. Doing that would mean waiting
+        # on a `release` event, and that event only exists because upload.sh publishes with a
+        # real user's credentials: draft releases raise no event, and one raised inside Actions
+        # by GITHUB_TOKEN never triggers a workflow. Several conditions all having to hold for a
+        # publish to happen makes the failure mode a silent non-publication, discovered late.
+        # Publishing here is one workflow run with nothing to choreograph.
+        #
+        # Publishing before the binaries exist is not shipping something broken: the npm package
+        # is the Node source and works on its own - it does not carry the pkg binaries, so it
+        # does not depend on the part of a release that can fail late.
+        #
+        # This job also has to stay in this file: npm trusted publishing (OIDC, which is why
+        # there is no token secret) is bound to the repository AND the workflow filename.
+        if: needs.release_please.outputs.release_created
         permissions:
             contents: read
             id-token: write
         steps:
-            - uses: actions/checkout@v6
-            - uses: actions/setup-node@v6
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
               with:
                   node-version: 24
                   registry-url: "https://registry.npmjs.org"
-            - run: npm ci
+                  # No dependency cache in the job that holds the publishing identity: a poisoned
+                  # cache entry would run next to it
+                  package-manager-cache: false
+            # Without lifecycle scripts: this job holds the identity the npm trusted publisher
+            # accepts, and the only script the install would run is the repository's own git hook
+            # setup, which a checkout in CI has no use for. A compromised dependency's install
+            # script must not run next to that identity
+            - run: npm ci --ignore-scripts
             - run: npm publish --provenance --access public
 
     publish_docker:
-        name: Publish Tagged Docker Image
-        runs-on: ubuntu-latest
-        needs: release_please
-        if: ${{needs.release_please.outputs.release_created}}
-        # Multi-arch builds run the arm64 leg under QEMU emulation, which can
-        # hang indefinitely on a misbehaving step. A normal build finishes in
-        # ~4 minutes, so fail fast instead of burning the 6-hour default limit.
+        name: Publish Tagged Docker Image (${{ matrix.arch }})
+        needs: [release_please, tests]
+        if: needs.release_please.outputs.release_created
+        # One job per architecture, each on a runner of that architecture. The arm64 leg used to be
+        # emulated through QEMU on an x86 runner, where `npm ci` hit an illegal instruction and then
+        # hung until this timeout - and a release commit is the worst case for it, because the
+        # version bump busts the cached layer and forces the install to run in full. A native runner
+        # takes the emulator out of the picture.
+        runs-on: ${{ matrix.runner }}
         timeout-minutes: 30
+        permissions:
+            contents: read
+            # GHCR, and the registry login of the digest push
+            packages: write
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      platform: linux/amd64
+                      runner: ubuntu-24.04
+                    - arch: arm64
+                      platform: linux/arm64
+                      runner: ubuntu-24.04-arm
         steps:
             - run: echo version v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}.${{needs.release_please.outputs.patch}}
 
-            - uses: actions/checkout@v6
-
-            - name: Set up QEMU
-              uses: docker/setup-qemu-action@v4
-              with:
-                  platforms: "arm64,arm"
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Set up Docker Buildx
-              id: buildx
-              uses: docker/setup-buildx-action@v4
-              with:
-                  platforms: linux/amd64,linux/arm64/v8
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
             - name: Login to DockerHub
-              uses: docker/login-action@v4
+              uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
               with:
                   username: ${{ secrets.DOCKERHUB_USERNAME }}
                   password: ${{ secrets.DOCKERHUB_TOKEN }}
 
             - name: Login to GHCR
-              uses: docker/login-action@v4
+              uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
               with:
                   registry: ghcr.io
                   username: ${{ github.repository_owner }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Build and push
-              uses: docker/build-push-action@v7
+            # Build locally and exercise the CLI BEFORE anything is published, so a broken image is
+            # never pushed to the tags users pull. The push below replays from this build's local
+            # layer cache, so paying for the build twice costs almost nothing.
+            - name: Build for smoke test (local)
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
               with:
                   context: .
-                  platforms: ${{ steps.buildx.outputs.platforms }}
-                  push: true
-                  tags: |
-                      ${{ github.repository }}:latest
-                      ${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}.${{needs.release_please.outputs.patch}}
-                      ${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}
-                      ${{ github.repository }}:v${{needs.release_please.outputs.major}}
-                      ghcr.io/${{ github.repository }}:latest
-                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}.${{needs.release_please.outputs.patch}}
-                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}
-                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}
+                  platforms: ${{ matrix.platform }}
+                  load: true
+                  tags: emailengine:smoke-test
+                  cache-from: type=gha,scope=${{ matrix.arch }}
+                  build-args: |
+                      EE_COMMIT_HASH=${{ github.sha }}
+
+            - name: Smoke test the CLI inside the image
+              run: bash .github/docker-smoke-test.sh emailengine:smoke-test
+
+            # Pushed by digest and left untagged: the release tags can only be attached once both
+            # architectures exist, which is what the manifest job below does. Both registries are
+            # written here so the blobs are already in place and the manifest job never has to copy
+            # them between registries.
+            - name: Build and push by digest
+              id: build
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+              with:
+                  context: .
+                  platforms: ${{ matrix.platform }}
+                  outputs: type=image,"name=docker.io/${{ github.repository }},ghcr.io/${{ github.repository }}",push-by-digest=true,name-canonical=true,push=true
+                  cache-from: type=gha,scope=${{ matrix.arch }}
+                  cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+                  build-args: |
+                      EE_COMMIT_HASH=${{ github.sha }}
+
+            - name: Export digest
+              run: |
+                  mkdir -p /tmp/digests
+                  digest="${{ steps.build.outputs.digest }}"
+                  touch "/tmp/digests/${digest#sha256:}"
+
+            - name: Upload digest
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: digests-${{ matrix.arch }}
+                  path: /tmp/digests/*
+                  if-no-files-found: error
+                  # Long enough for "Re-run failed jobs" on a later working day to still find the
+                  # digest of the leg that passed; the check below refuses to publish without it
+                  retention-days: 7
+
+    publish_docker_manifest:
+        name: Publish Tagged Docker Manifest
+        runs-on: ubuntu-24.04
+        needs: [release_please, publish_docker]
+        # A dependent job is skipped when its needs are, so this is belt and braces - but it keeps
+        # the gate visible in the job itself rather than only in the job it depends on.
+        if: needs.release_please.outputs.release_created
+        timeout-minutes: 15
+        permissions:
+            contents: read
+            packages: write
+        steps:
+            - name: Download digests
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  path: /tmp/digests
+                  pattern: digests-*
+                  merge-multiple: true
+
+            # One digest file per platform in the build matrix. With fail-fast off, one leg can
+            # push its digest while the other fails, and a re-run that finds only the surviving
+            # artifact (or none, once they expire) would otherwise publish a single-platform
+            # manifest list under every tag as if it were complete.
+            - name: Check that every platform produced a digest
+              working-directory: /tmp/digests
+              run: |
+                  count=$(ls -1 | wc -l)
+                  if [ "$count" -ne 2 ]; then
+                      echo "Expected 2 digests (linux/amd64, linux/arm64), found $count:"
+                      ls -1
+                      exit 1
+                  fi
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+            - name: Login to DockerHub
+              uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+              with:
+                  username: ${{ secrets.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Login to GHCR
+              uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.repository_owner }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Create and push the manifest list
+              working-directory: /tmp/digests
+              env:
+                  MAJOR: ${{ needs.release_please.outputs.major }}
+                  MINOR: ${{ needs.release_please.outputs.minor }}
+                  PATCH: ${{ needs.release_please.outputs.patch }}
+              run: |
+                  for image in "docker.io/${{ github.repository }}" "ghcr.io/${{ github.repository }}"; do
+                      docker buildx imagetools create \
+                          -t "${image}:latest" \
+                          -t "${image}:v${MAJOR}.${MINOR}.${PATCH}" \
+                          -t "${image}:v${MAJOR}.${MINOR}" \
+                          -t "${image}:v${MAJOR}" \
+                          $(printf "${image}@sha256:%s " *)
+                  done

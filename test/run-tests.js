@@ -1,0 +1,289 @@
+#!/usr/bin/env node
+'use strict';
+
+// Runs one of the test tiers described in .claude/rules/testing.md:
+//
+//   node test/run-tests.js unit         flush Redis, then run test/*-test.js in parallel
+//   node test/run-tests.js integration  flush Redis, boot a live server, then run
+//                                       test/integration/*-test.js serially against it
+//   node test/run-tests.js dovecot      the same for test/dovecot/*-test.js, with the SMTP server
+//                                       and IMAP proxy enabled; called by
+//                                       test/dovecot/run-dovecot-tests.sh once the container is up
+//
+// NODE_ENV is defaulted below before anything requires the config: @zone-eu/wild-config picks the
+// Redis database from it, so without it the development database would be flushed instead of the
+// test one. The e2e tier orchestrates itself (the Playwright webServer block) and does not go
+// through here.
+
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
+const fs = require('node:fs');
+const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
+
+const config = require('@zone-eu/wild-config');
+
+const { flushRedis } = require('./helpers/flush-redis');
+const { waitForServer } = require('./helpers/wait-for-server');
+
+const PROJECT_ROOT = path.join(__dirname, '..');
+
+// Per-test timeout for both tiers. Some IMAP and OAuth2 flows in the integration tier legitimately
+// take minutes against live providers.
+const TEST_TIMEOUT = 180000;
+
+// --test-force-exit ends every test file through process.exit(), and on Node 24 that can deadlock
+// (nodejs/node#64274): the exit joins V8's background threads while one of them, a concurrent
+// Maglev or Sparkplug compile, waits for a garbage collection that only the exiting main thread
+// could run. The file's tests have all reported and its process sleeps forever, which the stall
+// watchdog then reports as a file that never finished. Seen on CI for files that hold no handle at
+// all (test/stream-encrypt-test.js). Reproduced on Linux with two CPUs, 24 files per run: 3 of 30
+// runs stalled, the backtraces showing exactly those two threads, and 0 of 30 with these flags,
+// which keep the compiles on the main thread and leave the exit nothing to wait for. V8 flags given
+// to `node --test` are passed on to every test file's process, which is where the exit happens
+const EXIT_SAFE_V8_FLAGS = ['--no-concurrent-recompilation', '--no-concurrent-sparkplug'];
+
+// Holds every forced exit, the runner's and each file's, until stdout has flushed, so no result is
+// discarded on its way out, see test/helpers/drain-results.js
+const DRAIN_RESULTS_FLAGS = ['--require', path.join(__dirname, 'helpers', 'drain-results.js')];
+
+const TIERS = {
+    unit: {
+        dir: 'test',
+        // Default --test concurrency: the unit suite is verified to pass in parallel
+        args: [],
+        // Every unit test is fast and the whole tier finishes in seconds, so a full minute in which
+        // no file anywhere reports anything is a stalled file rather than a slow one
+        stallTimeout: 60000
+    },
+    integration: {
+        dir: 'test/integration',
+        // Serial - every file talks to the same live server and the same Redis database
+        args: ['--test-concurrency=1'],
+        // Must stay above TEST_TIMEOUT: a single integration test may legitimately run for minutes
+        // against a live provider, and a running test reports nothing until it finishes, so anything
+        // shorter would read a slow provider as a stall
+        stallTimeout: TEST_TIMEOUT + 60000,
+        // Presence of this field is what makes the tier boot a server
+        serverEnv: {
+            // Short Gmail fallback-poll interval so gmail-polling-test can exercise the poller
+            // quickly. Harmless for push-based Gmail accounts in api-test: notifications keep
+            // resetting the timer, and a stray fallback sync is coalesced/idempotent.
+            EENGINE_GMAIL_FALLBACK_POLL_INTERVAL: '15000',
+            // The same for the Graph periodic recovery pass and outlook-polling-test. A pass that
+            // finds a message api-test's Outlook account already saw does not announce it again
+            EENGINE_OUTLOOK_FALLBACK_POLL_INTERVAL: '15000'
+        }
+    },
+    dovecot: {
+        dir: 'test/dovecot',
+        args: ['--test-concurrency=1'],
+        // Account connects, sends and an export each wait on a real IMAP server
+        testTimeout: 240000,
+        // Above testTimeout for the same reason as the integration tier
+        stallTimeout: 240000 + 60000,
+        // Both listeners are only spawned at boot, so they have to be switched on in the settings
+        // the server starts with. EENGINE_SETTINGS replaces the prepared settings from the config
+        // file rather than adding to them, hence the merge.
+        serverEnv: () => ({
+            EENGINE_SETTINGS: JSON.stringify(Object.assign(JSON.parse(config.settings || '{}'), require('./dovecot/listener-settings')))
+        }),
+        // Every IMAP exchange is logged at trace level; keep it out of the job output unless the
+        // run fails
+        serverLog: true
+    }
+};
+
+// Non-recursive and sorted, matching the shell globs these tiers have always used
+// (`test/*-test.js`, `test/integration/*-test.js`). Resolved here rather than handed to
+// `node --test` as a glob because glob expansion only landed in Node 22 and package.json declares
+// engines >=20.x. The *-test.js suffix is what keeps test/helpers/* and
+// test/integration/test-config.js from being executed as tests.
+function findTestFiles(dir) {
+    let files = fs
+        .readdirSync(path.join(PROJECT_ROOT, dir))
+        .filter(name => name.endsWith('-test.js'))
+        .sort()
+        .map(name => path.join(dir, name));
+
+    if (!files.length) {
+        // `node --test` with no file arguments falls back to its own recursive discovery, so an
+        // empty list would silently run a different suite instead of failing
+        throw new Error(`No *-test.js files found in ${dir}`);
+    }
+
+    return files;
+}
+
+let server = null;
+
+// Runs as an exit hook, so the server is reaped even when the tests fail or the run is interrupted.
+// Without it a failed integration run leaves a listener on port 7077 that answers /health and
+// silently serves stale code to the next run. EmailEngine's workers are worker_threads rather than
+// child processes, so killing the one process takes the whole server down with it.
+function stopServer() {
+    if (!server) {
+        return;
+    }
+    let proc = server;
+    server = null;
+    try {
+        proc.kill('SIGKILL');
+    } catch (err) {
+        // already gone
+    }
+}
+
+// A listener already on the API port would answer /health in place of the server this run boots,
+// and the tier would run against old code on a freshly flushed database. Typically a leftover test
+// server: EmailEngine renames its process title, so `pkill -f 'node server.js'` misses it and
+// `pkill -x emailengine` is what finds it.
+function assertPortFree(port) {
+    return new Promise((resolve, reject) => {
+        let socket = net.connect(port, '127.0.0.1');
+        socket.setTimeout(1000);
+        socket.once('connect', () => {
+            socket.destroy();
+            reject(new Error(`Port ${port} is already in use - stop the process holding it first (lsof -nP -iTCP:${port} -sTCP:LISTEN)`));
+        });
+        socket.once('timeout', () => {
+            socket.destroy();
+            resolve();
+        });
+        socket.once('error', () => resolve());
+    });
+}
+
+let serverLogPath = null;
+
+function startServer(env, { serverLog } = {}) {
+    let stdio = ['ignore', 'inherit', 'inherit'];
+    if (serverLog) {
+        serverLogPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'emailengine-test-server-')), 'server.log');
+        let fd = fs.openSync(serverLogPath, 'w');
+        stdio = ['ignore', fd, fd];
+    }
+
+    server = spawn(process.execPath, ['server.js'], {
+        cwd: PROJECT_ROOT,
+        stdio,
+        env: { ...process.env, ...env }
+    });
+    if (typeof stdio[1] === 'number') {
+        // The child holds its own copy
+        fs.closeSync(stdio[1]);
+    }
+    server.on('exit', () => {
+        server = null;
+    });
+    // Do not hold the event loop open - stopServer() owns the teardown
+    server.unref();
+
+    process.on('exit', stopServer);
+    // A signal with no listener at all terminates the process without firing the exit hook
+    process.on('SIGINT', () => process.exit(130));
+    process.on('SIGTERM', () => process.exit(143));
+}
+
+async function main() {
+    let name = process.argv[2];
+    let tier = TIERS[name];
+    if (!tier) {
+        console.error(`Usage: node test/run-tests.js <${Object.keys(TIERS).join('|')}>`);
+        process.exitCode = 1;
+        return;
+    }
+
+    let files = findTestFiles(tier.dir);
+
+    if (tier.serverEnv) {
+        // Before the flush: a stale server on the port would be left running on an emptied database
+        await assertPortFree(config.api.port);
+    }
+
+    await flushRedis();
+
+    if (tier.serverEnv) {
+        startServer(typeof tier.serverEnv === 'function' ? tier.serverEnv() : tier.serverEnv, tier);
+        // Handing over the process makes a server that dies during boot fail the run at once,
+        // instead of after the full readiness timeout
+        await waitForServer({ child: server });
+    }
+
+    // --test-force-exit: requiring the lib/db chain opens a Redis client and a BullMQ connection that
+    // nothing closes, so a file whose tests have all passed can still keep its process alive and, since
+    // `node --test` waits for every child, hang the whole tier. Individual files have always worked
+    // around it by force-exiting themselves (test/helpers/redis-teardown.js), but that only covers the
+    // files that remember to, and it covered nothing at all when a file's teardown sat inside a test
+    // that got skipped: test/account-revoke-on-delete-test.js used to skip without Gmail credentials, and on
+    // dependabot pull requests - where `${{ secrets.X }}` expands to an empty string - the unit tier
+    // hung until the job timeout instead of skipping one suite. Forcing the exit here ends the class
+    // for both tiers and for files that do not exist yet. A failing test still fails: the flag only
+    // takes effect once the run has finished, and the exit code is preserved.
+    // test/helpers/stall-reporter.js is the stock spec reporter plus a watchdog for the one failure
+    // --test-force-exit and --test-timeout cannot reach: a file that blocks its event loop, where the
+    // per-test timer cannot fire and the run never finishes. The watchdog lives in a reporter because
+    // a reporter runs inside the runner process, whose own event loop is still healthy, and it is the
+    // only thing there that knows which files have reported.
+    //
+    // It has to be ONE reporter that extends spec, not a second reporter running beside it: with
+    // --test-force-exit, two reporters truncate the run summary - the process exits before they have
+    // drained, and results go missing with `fail 0` still reported. See the reporter's own comment
+    // for the measurements. Passing spec separately here would reintroduce exactly that.
+    let reporterArgs = [`--test-reporter=${path.join(__dirname, 'helpers', 'stall-reporter.js')}`, '--test-reporter-destination=stdout'];
+
+    let testTimeout = tier.testTimeout || TEST_TIMEOUT;
+
+    let runArgs = [`--test-timeout=${testTimeout}`, ...reporterArgs, ...tier.args];
+    let runner = spawn(process.execPath, ['--test', '--test-force-exit', ...EXIT_SAFE_V8_FLAGS, ...DRAIN_RESULTS_FLAGS, ...runArgs, ...files], {
+        cwd: PROJECT_ROOT,
+        stdio: 'inherit',
+        env: {
+            ...process.env,
+            // Read by the stall reporter: the files to account for, and how long a silence has to
+            // last before it gives up on them. A result lost on the way to the runner fails the run
+            // there (DRAIN_RESULTS_FLAGS is what keeps that from happening)
+            EE_TEST_FILES: JSON.stringify(files),
+            EE_TEST_STALL_TIMEOUT: String(tier.stallTimeout || 0)
+        }
+    });
+
+    // A child killed by a signal reports code=null; treat that as a failure
+    let [code, signal] = await once(runner, 'exit');
+    if (signal || code !== 0) {
+        process.exitCode = 1;
+    }
+}
+
+function printServerLogTail() {
+    if (!serverLogPath) {
+        return;
+    }
+    try {
+        let lines = fs.readFileSync(serverLogPath, 'utf-8').trimEnd().split('\n');
+        console.error(`\nLast ${Math.min(lines.length, 50)} lines of the server log (${serverLogPath}):`);
+        console.error(lines.slice(-50).join('\n'));
+    } catch (err) {
+        console.error(`Could not read the server log at ${serverLogPath}: ${err.message}`);
+    }
+}
+
+// Required by test/test-runner-server-guards-test.js for assertPortFree(); only a direct run
+// starts a tier
+if (require.main === module) {
+    main()
+        .catch(err => {
+            console.error(err.stack || err.message);
+            process.exitCode = 1;
+        })
+        .finally(() => {
+            if (process.exitCode) {
+                printServerLogTail();
+            }
+        });
+}
+
+module.exports = { assertPortFree, TIERS, EXIT_SAFE_V8_FLAGS, DRAIN_RESULTS_FLAGS };

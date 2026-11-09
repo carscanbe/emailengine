@@ -6,8 +6,9 @@ const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
 const { REDIS_PREFIX } = require('../lib/consts');
+const { assignRelayStatus } = require('../lib/email-client/imap/connection-errors');
 
-const { getDuration, getBoolean, emitChangeEvent, readEnvValue, hasEnvValue, threadStats, maybeReloadHttpProxyAgent } = require('../lib/tools');
+const { getDuration, getBoolean, emitChangeEvent, readEnvValue, hasEnvValue, threadStats } = require('../lib/tools');
 
 const { initSentry } = require('../lib/sentry');
 initSentry('imap');
@@ -18,15 +19,16 @@ const { OutlookClient } = require('../lib/email-client/outlook-client');
 const { BaseClient } = require('../lib/email-client/base-client');
 const { Account } = require('../lib/account');
 const { oauth2Apps, isApiBasedApp } = require('../lib/oauth2-apps');
-const { redis, notifyQueue, submitQueue, documentsQueue, getFlowProducer } = require('../lib/db');
-const { MessagePortWritable, pipeToMessagePort } = require('../lib/message-port-stream');
-const { getESClient } = require('../lib/document-store');
+const { redis, notifyQueue, submitQueue, watchRedisReconnect } = require('../lib/db');
+const { sendToMessagePort, MessagePortWritable } = require('../lib/message-port-stream');
+const { describeRpcCommand } = require('../lib/worker-rpc-error');
+const { createRpcClient, respond, isCall } = require('../lib/worker-rpc');
 const settings = require('../lib/settings');
-const msgpack = require('msgpack5')();
+const msgpack = require('../lib/msgpack');
 
 const getSecret = require('../lib/get-secret');
-
-const flowProducer = getFlowProducer();
+const { getSharedLock } = require('../lib/lock-run');
+const { sendQueuedOnce } = require('../lib/submit-lock');
 
 config.service = config.service || {};
 
@@ -48,45 +50,41 @@ const DEFAULT_STATES = {
     disconnected: 0
 };
 
+// Minimum interval between reports about failed account log writes, see getAccountLogger()
+const LOG_FAILURE_REPORT_INTERVAL = 60 * 1000;
+
 const NO_ACTIVE_HANDLER_RESP_ERR = new Error('No active handler for requested account. Try again later.');
 NO_ACTIVE_HANDLER_RESP_ERR.statusCode = 503;
 NO_ACTIVE_HANDLER_RESP_ERR.code = 'WorkerNotAvailable';
 
 class ConnectionHandler {
     constructor() {
-        this.callQueue = new Map();
-        this.mids = 0;
+        this.rpc = createRpcClient({ port: parentPort, defaultTimeout: EENGINE_TIMEOUT, timeoutTag: 'T3' });
 
         this.accounts = new Map();
+
+        // account -> token of the latest assign. An unassign or a newer assign replaces or drops it,
+        // which is how an assign still awaiting its setup learns it has been superseded. The one
+        // supersession check there is: the identity of the this.accounts entry cannot serve, because
+        // nothing is registered there until the Account object exists, so an unassign that lands
+        // during the loads before that leaves nothing to compare against. Entry identity is only
+        // consulted to decide whether a cleanup or an init retry still concerns the entry this
+        // assign registered.
+        this.assignTokens = new Map();
     }
 
     async init() {
-        // Track Redis connection state for reconnection detection
-        let hasSeenStableConnection = false;
-        let redisWasDisconnected = false;
-
-        // Check initial Redis state
-        if (redis.status === 'ready') {
-            hasSeenStableConnection = true;
-        }
-
-        redis.on('ready', () => {
-            if (redisWasDisconnected && hasSeenStableConnection) {
-                // Redis reconnected after being disconnected during our lifetime
+        // Redis reconnected after being disconnected during our lifetime. In-memory account state
+        // may no longer match Redis (a restart or a flush), so exit cleanly: the main thread
+        // treats exit code 0 as this case, respawns the worker and reassigns its accounts.
+        watchRedisReconnect(
+            redis,
+            () => {
                 logger.info({ msg: 'Redis reconnected after disconnection, exiting worker for clean restart', worker: 'imap' });
-                // Exit gracefully - the main process will restart this worker
                 process.exit(0);
-            }
-            // Mark that we've seen a stable connection
-            hasSeenStableConnection = true;
-        });
-
-        redis.on('end', () => {
-            if (hasSeenStableConnection) {
-                logger.warn({ msg: 'Redis connection lost', worker: 'imap' });
-                redisWasDisconnected = true;
-            }
-        });
+            },
+            () => logger.warn({ msg: 'Redis connection lost', worker: 'imap' })
+        );
 
         // indicate that we are ready to process connections
         parentPort.postMessage({ cmd: 'ready' });
@@ -115,11 +113,42 @@ class ConnectionHandler {
         let logKey = this.getLogKey(account);
         let logging = await settings.getLoggingInfo(account);
 
-        return {
+        // log() runs once per protocol line, so a persistent write failure (Redis OOM, MISCONF,
+        // READONLY) would report itself on every single line. Report the first failure, then at
+        // most one summary per interval, otherwise a failing account log floods the main log.
+        let lastFailureReport = 0;
+        let suppressedFailures = 0;
+        let reportFailure = (msg, err) => {
+            let now = Date.now();
+            if (now - lastFailureReport < LOG_FAILURE_REPORT_INTERVAL) {
+                suppressedFailures++;
+                return;
+            }
+
+            // ioredis attaches the failed command to the error, and the arguments of these
+            // writes include the encoded log entry itself (protocol traces, and even raw
+            // credentials when EENGINE_LOG_RAW is set), so such errors are summarized instead
+            // of being handed to the log serializer, which copies all enumerable properties
+            let reported = err && (err.command || err.previousErrors) ? { name: err.name, code: err.code, message: err.message } : err;
+
+            let payload = { msg, account, err: reported };
+            if (suppressedFailures) {
+                payload.suppressed = suppressedFailures;
+            }
+            logger.error(payload);
+
+            lastFailureReport = now;
+            suppressedFailures = 0;
+        };
+
+        // Members are referenced by name instead of through `this` as this object is passed
+        // around to client classes that might call log() detached from its receiver
+        let accountLogger = {
             enabled: logging.enabled,
             maxLogLines: logging.maxLogLines,
+
             log(entry) {
-                if (!this.maxLogLines || !this.enabled) {
+                if (!accountLogger.maxLogLines || !accountLogger.enabled) {
                     return;
                 }
 
@@ -133,23 +162,54 @@ class ConnectionHandler {
                     redis
                         .multi()
                         .rpush(logKey, logRow)
-                        .ltrim(logKey, -this.maxLogLines, -1)
+                        .ltrim(logKey, -accountLogger.maxLogLines, -1)
                         .exec()
-                        .catch(err => this.logger.error({ msg: 'Failed to update log entries', account, err }));
+                        .catch(err => reportFailure('Failed to update log entries', err));
                 } catch (err) {
-                    this.logger.error({ msg: 'Failed to encode log entry', account, entry, err });
+                    reportFailure('Failed to encode log entry', err);
                 }
             },
+
             async reload() {
-                logging = await settings.getLoggingInfo(account);
-                this.enabled = logging.enabled;
-                this.maxLogLines = logging.maxLogLines;
+                let updated = await settings.getLoggingInfo(account);
+                accountLogger.enabled = updated.enabled;
+                accountLogger.maxLogLines = updated.maxLogLines;
             }
         };
+
+        return accountLogger;
+    }
+
+    /**
+     * Closes an account connection this worker no longer tracks. Nothing is deleted, the account
+     * is only moving to another worker or being assigned here again
+     * @param {string} account - Account ID
+     * @param {Object} accountObject - The entry that was removed from this.accounts
+     */
+    async closeReleasedConnection(account, accountObject) {
+        if (!accountObject || !accountObject.connection) {
+            return;
+        }
+        try {
+            await accountObject.connection.close();
+        } catch (err) {
+            logger.error({ msg: 'Failed to close released account connection', account, err });
+        }
+    }
+
+    // The main thread takes an account back after an `assign` it gave up waiting for, or to move
+    // it onto another worker. An assignment still being set up notices the missing entry and stops.
+    async unassignConnection(account) {
+        logger.info({ msg: 'Account unassign requested', account });
+        this.assignTokens.delete(account);
+        let accountObject = this.accounts.get(account);
+        this.accounts.delete(account);
+        await this.closeReleasedConnection(account, accountObject);
+        return true;
     }
 
     async assignConnection(account, runIndex, initOpts) {
-        logger.info({ msg: 'Assigned account to worker', account });
+        logger.debug({ msg: 'Assigned account to worker', account });
 
         if (!this.runIndex) {
             this.runIndex = runIndex;
@@ -159,17 +219,77 @@ class ConnectionHandler {
             runIndex = this.runIndex;
         }
 
+        const token = Symbol(account);
+        this.assignTokens.set(account, token);
+        const isCurrent = () => this.assignTokens.get(account) === token;
+
         let accountLogger = await this.getAccountLogger(account);
         let secret = await getSecret();
         let accountObject = new Account({
             redis,
             account,
             secret,
-            esClient: await getESClient(logger)
+            // Needed so Account.update() can dispatch reconnect/update commands back to
+            // this worker (e.g. auto-reconnect after OAuth re-auth in an error state).
+            call: msg => this.call(msg)
         });
 
-        this.accounts.set(account, accountObject);
+        if (!isCurrent()) {
+            logger.info({ msg: 'Dropped superseded account assignment', account });
+            return false;
+        }
 
+        // Assigning an account this worker already runs replaces the connection. A retried assign
+        // (the main thread timed out on the first one) used to overwrite the map entry and leave the
+        // first connection running with nothing able to reach it. Swapped without an await in
+        // between, so two overlapping assigns cannot both keep a connection.
+        let previous = this.accounts.get(account);
+        this.accounts.set(account, accountObject);
+        await this.closeReleasedConnection(account, previous);
+
+        let current;
+        try {
+            current = await this.setupConnection(account, accountObject, { runIndex, accountLogger, secret, isCurrent });
+        } catch (err) {
+            // Leave no connection-less entry behind: it answered commands with "no active handler"
+            // and counted as a disconnected account for as long as the worker lived. Only the entry
+            // this assign registered is its to remove, a newer assign may have replaced it
+            if (this.accounts.get(account) === accountObject) {
+                this.accounts.delete(account);
+            }
+            if (isCurrent()) {
+                this.assignTokens.delete(account);
+            }
+            if (err.isBoom && !err.statusCode && err.output) {
+                // Lets the main thread tell an account that is gone (404) from a transient failure
+                err.statusCode = err.output.statusCode;
+            }
+            throw err;
+        }
+
+        if (!current) {
+            // Unassigned or assigned again while this was being set up; the client was never
+            // started, so there is nothing to close
+            if (this.accounts.get(account) === accountObject) {
+                this.accounts.delete(account);
+            }
+            logger.info({ msg: 'Dropped superseded account assignment', account });
+            return false;
+        }
+
+        // do not wait before returning as it may take forever
+        this.startConnection(account, accountObject, initOpts);
+    }
+
+    /**
+     * Loads the account and builds its client, without starting it
+     * @param {string} account - Account ID
+     * @param {Object} accountObject - The entry assignConnection() registered
+     * @param {Object} opts - runIndex, accountLogger, secret and isCurrent, the assign's own
+     *   supersession check (see the assignTokens comment in the constructor)
+     * @returns {Promise<boolean>} false when the assign was superseded in the meantime
+     */
+    async setupConnection(account, accountObject, { runIndex, accountLogger, secret, isCurrent }) {
         const accountData = await accountObject.loadAccountData();
 
         if (accountData.oauth2 && accountData.oauth2.auth) {
@@ -203,8 +323,6 @@ class ConnectionHandler {
 
                             notifyQueue,
                             submitQueue,
-                            documentsQueue,
-                            flowProducer,
 
                             call: msg => this.call(msg)
                         });
@@ -223,8 +341,6 @@ class ConnectionHandler {
 
                             notifyQueue,
                             submitQueue,
-                            documentsQueue,
-                            flowProducer,
 
                             call: msg => this.call(msg)
                         });
@@ -249,8 +365,6 @@ class ConnectionHandler {
 
                 notifyQueue,
                 submitQueue,
-                documentsQueue,
-                flowProducer,
 
                 call: msg => this.call(msg),
                 logRaw: EENGINE_LOG_RAW
@@ -258,30 +372,82 @@ class ConnectionHandler {
             accountObject.logger = accountObject.connection.logger;
         }
 
-        if (accountData.state) {
-            await redis.hSetExists(accountObject.connection.getAccountKey(), 'state', accountData.state);
-            await emitChangeEvent(this.logger, account, 'state', accountData.state);
+        if (!isCurrent()) {
+            return false;
         }
 
-        // do not wait before returning as it may take forever
-        accountObject.connection.init(initOpts).catch(err => {
-            logger.error({ account, err });
-        });
+        if (accountData.state) {
+            await redis.hSetExists(accountObject.connection.getAccountKey(), 'state', accountData.state);
+            await emitChangeEvent(logger, account, 'state', accountData.state);
+        }
+
+        return isCurrent();
+    }
+
+    /**
+     * Runs init() without waiting for it. A client that retries its own init() (the API
+     * clients, see BaseClient.scheduleInitRetry()) gets another attempt when it fails on
+     * something other than a refused credential; a client that was replaced in the meantime
+     * is left alone when the timer fires
+     * @param {string} account - Account ID
+     * @param {Object} accountObject - Account instance holding the connection
+     * @param {Object} initOpts - Options passed to init()
+     */
+    startConnection(account, accountObject, initOpts) {
+        const connection = accountObject.connection;
+
+        connection
+            .init(initOpts)
+            .then(() => connection.resetInitRetry())
+            .catch(err => {
+                logger.error({ msg: 'Failed to initialize account connection', account, err });
+
+                if (!connection.retriesInit || err.authenticationFailed) {
+                    return;
+                }
+
+                connection.scheduleInitRetry(() => {
+                    if (this.accounts.get(account) !== accountObject) {
+                        return;
+                    }
+                    this.startConnection(account, accountObject, initOpts);
+                });
+            });
     }
 
     async deleteConnection(account) {
         logger.info({ msg: 'Deleting connection', account });
+        this.assignTokens.delete(account);
         if (this.accounts.has(account)) {
             let accountObject = this.accounts.get(account);
-            if (accountObject.connection) {
-                await accountObject.connection.delete();
+            try {
+                if (accountObject.connection) {
+                    await accountObject.connection.delete();
+                }
+            } finally {
+                // The account record is already gone and nothing retries the delete, so an entry
+                // left behind by a failed teardown would stay registered for the worker's lifetime
+                if (this.accounts.get(account) === accountObject) {
+                    this.accounts.delete(account);
+                }
             }
-            this.accounts.delete(account);
         }
     }
 
+    /**
+     * Removes what the provider keeps for the account, ahead of its deletion, see
+     * BaseClient.releaseRemoteResources()
+     */
+    async teardownConnection(account) {
+        const accountObject = this.accounts.get(account);
+        if (!accountObject?.connection) {
+            return false;
+        }
+        return await accountObject.connection.releaseRemoteResources();
+    }
+
     async updateConnection(account) {
-        logger.info({ msg: 'Account reconnect requested', account });
+        logger.info({ msg: 'Account update requested', account });
         if (this.accounts.has(account)) {
             let accountObject = this.accounts.get(account);
             if (accountObject.connection) {
@@ -289,19 +455,19 @@ class ConnectionHandler {
                     level: 'info',
                     t: Date.now(),
                     cid: accountObject.connection.cid,
-                    msg: 'Account reconnect requested'
+                    msg: 'Account update requested'
                 });
 
                 let state = 'connecting';
                 await redis.hSetExists(accountObject.connection.getAccountKey(), 'state', state);
                 accountObject.connection.state = state;
-                await emitChangeEvent(this.logger, account, 'state', state);
+                await emitChangeEvent(logger, account, 'state', state);
                 await accountObject.connection.reconnect(true);
             }
         }
     }
 
-    async syncConnection(account) {
+    async syncConnection(account, opts = {}) {
         logger.info({ msg: 'Account sync requested', account });
         if (this.accounts.has(account)) {
             let accountObject = this.accounts.get(account);
@@ -313,7 +479,8 @@ class ConnectionHandler {
                     msg: 'Account sync requested'
                 });
 
-                await accountObject.connection.syncMailboxes();
+                // only the Graph client reads the options, the others sync their own way
+                await accountObject.connection.syncMailboxes(opts);
 
                 return true;
             }
@@ -370,7 +537,12 @@ class ConnectionHandler {
                     msg: 'Account reconnection requested'
                 });
 
-                await accountObject.connection.close();
+                try {
+                    await accountObject.connection.close();
+                } catch (err) {
+                    // a failed state write during close must not stop the reconnect
+                    logger.error({ msg: 'Failed to close connection', account, err });
+                }
             }
 
             await this.assignConnection(account, false, { forceWatchRenewal: true });
@@ -557,7 +729,16 @@ class ConnectionHandler {
             throw NO_ACTIVE_HANDLER_RESP_ERR;
         }
 
-        return await accountData.connection.submitMessage(message.data);
+        // A queued message is sent under a lock, so a retry never runs next to a send still in
+        // progress (lib/submit-lock.js)
+        return await sendQueuedOnce({
+            lock: getSharedLock(),
+            redis,
+            logger,
+            account: message.account,
+            queueId: message.data && message.data.queueId,
+            send: () => accountData.connection.submitMessage(message.data)
+        });
     }
 
     async queueMessage(message) {
@@ -639,8 +820,9 @@ class ConnectionHandler {
                 return true;
 
             case 'missed':
+                // the API worker already stored the recovery request, see Account.queueMissedRecovery()
                 logger.info({ msg: 'Handling missed notification lifecycle event', account: message.account });
-                return await connection.syncMissedMessages();
+                return connection.recoverMissedNotifications();
 
             default:
                 logger.warn({ msg: 'Unknown subscription lifecycle event', event: message.event, account: message.account });
@@ -700,105 +882,102 @@ class ConnectionHandler {
     }
 
     async getRawMessage(message) {
-        if (!this.accounts.has(message.account)) {
-            throw NO_ACTIVE_HANDLER_RESP_ERR;
-        }
+        // Built before the fetch rather than after it: the fetch can take minutes, and a consumer
+        // whose thread dies in the meantime closes the port with nothing queued, which only reaches
+        // a listener that was already attached. See the MessagePortWritable constructor.
+        const writable = new MessagePortWritable(message.port);
+        try {
+            if (!this.accounts.has(message.account)) {
+                throw NO_ACTIVE_HANDLER_RESP_ERR;
+            }
 
-        let accountData = this.accounts.get(message.account);
-        if (!accountData.connection) {
-            throw NO_ACTIVE_HANDLER_RESP_ERR;
-        }
-        let source = await accountData.connection.getRawMessage(message.message);
-        if (!source) {
-            let err = new Error('Requested file not found');
-            err.statusCode = 404;
+            let accountData = this.accounts.get(message.account);
+            if (!accountData.connection) {
+                throw NO_ACTIVE_HANDLER_RESP_ERR;
+            }
+            let source = await accountData.connection.getRawMessage(message.message);
+            if (!source) {
+                let err = new Error('Requested file not found');
+                err.statusCode = 404;
+                throw err;
+            }
+
+            sendToMessagePort(writable, source, accountData.connection.logger);
+
+            return {
+                headers: {
+                    'content-type': 'message/rfc822',
+                    'content-disposition': `attachment; filename=message.eml`
+                },
+                contentType: 'message/rfc822'
+            };
+        } catch (err) {
+            // Nothing to send, so the port goes back untouched - the consumer is about to be handed
+            // this error, and a closed port would reach it as a failed transfer instead.
+            writable.releaseListeners();
             throw err;
         }
-
-        // Build the cross-thread writable only after we know there is content to send.
-        // Constructing it earlier leaks the transferred MessagePort (and its message
-        // listener) whenever the lookup above throws (e.g. a 404).
-        let stream = new MessagePortWritable(message.port);
-
-        setImmediate(() => {
-            if (Buffer.isBuffer(source)) {
-                // The consumer may have aborted and destroyed the writable (via a cancel
-                // message) before this runs; ending a destroyed stream would emit an
-                // unhandled 'error' and take down the worker. The streaming branch is
-                // safe because pipeline() tears down a destroyed destination cleanly.
-                if (!stream.destroyed) {
-                    stream.end(source);
-                }
-            } else {
-                pipeToMessagePort(source, stream, accountData.connection.logger);
-            }
-        });
-
-        return {
-            headers: {
-                'content-type': 'message/rfc822',
-                'content-disposition': `attachment; filename=message.eml`
-            },
-            contentType: 'message/rfc822'
-        };
     }
 
     async getAttachment(message) {
-        if (!this.accounts.has(message.account)) {
-            throw NO_ACTIVE_HANDLER_RESP_ERR;
-        }
+        // Built before the download starts, not after: an attachment is the longest wait on this
+        // worker, and a consumer thread that dies during it closes the port with nothing queued -
+        // which only a listener attached beforehand ever sees. See the MessagePortWritable
+        // constructor.
+        const writable = new MessagePortWritable(message.port);
+        try {
+            if (!this.accounts.has(message.account)) {
+                throw NO_ACTIVE_HANDLER_RESP_ERR;
+            }
 
-        let accountData = this.accounts.get(message.account);
-        if (!accountData.connection) {
-            throw NO_ACTIVE_HANDLER_RESP_ERR;
-        }
+            let accountData = this.accounts.get(message.account);
+            if (!accountData.connection) {
+                throw NO_ACTIVE_HANDLER_RESP_ERR;
+            }
 
-        let source = await accountData.connection.getAttachment(message.attachment);
-        if (!source) {
-            let err = new Error('Requested file not found');
-            err.statusCode = 404;
+            let source = await accountData.connection.getAttachment(message.attachment);
+            if (!source) {
+                let err = new Error('Requested file not found');
+                err.statusCode = 404;
+                throw err;
+            }
+
+            // IMAP resolves an attachment to the download stream itself, Gmail and Graph to a Buffer
+            // wrapped alongside the headers.
+            let payload = Buffer.isBuffer(source.data) ? source.data : source;
+
+            sendToMessagePort(writable, payload, accountData.connection.logger);
+
+            return {
+                headers: source.headers,
+                contentType: source.contentType
+            };
+        } catch (err) {
+            // Nothing to send, so the port goes back untouched - the consumer is about to be handed
+            // this error, and a closed port would reach it as a failed transfer instead.
+            writable.releaseListeners();
             throw err;
         }
-
-        // Build the cross-thread writable only after we know there is content to send.
-        // Constructing it earlier leaks the transferred MessagePort (and its message
-        // listener) whenever the lookup above throws (e.g. a 404).
-        let stream = new MessagePortWritable(message.port);
-
-        setImmediate(() => {
-            if (Buffer.isBuffer(source.data)) {
-                // The consumer may have aborted and destroyed the writable (via a cancel
-                // message) before this runs; ending a destroyed stream would emit an
-                // unhandled 'error' and take down the worker. The streaming branch is
-                // safe because pipeline() tears down a destroyed destination cleanly.
-                if (!stream.destroyed) {
-                    stream.end(source.data);
-                }
-            } else {
-                pipeToMessagePort(source, stream, accountData.connection.logger);
-            }
-        });
-
-        return {
-            headers: source.headers,
-            contentType: source.contentType
-        };
     }
 
-    async kill() {
-        if (this.killed) {
+    // Shutdown teardown: closes every account connection this worker owns. The main thread owns
+    // the worker's lifetime and terminates it once the drain returns, so this deliberately does
+    // not exit the process itself.
+    async closeConnections() {
+        if (this.connectionsClosed) {
             return;
         }
-        logger.error({ msg: 'Terminating process' });
-        this.killed = true;
+        logger.info({ msg: 'Closing account connections', accounts: this.accounts.size });
+        this.connectionsClosed = true;
 
-        this.accounts.forEach(accountObject => {
+        this.accounts.forEach((accountObject, account) => {
             if (accountObject && accountObject.connection) {
-                accountObject.connection.close();
+                // Gmail and Graph close() write state to Redis; a rejection here is only worth a log line
+                Promise.resolve()
+                    .then(() => accountObject.connection.close())
+                    .catch(err => logger.error({ msg: 'Failed to close connection', account, err }));
             }
         });
-
-        logger.flush(() => process.exit());
     }
 
     // some general message
@@ -810,8 +989,6 @@ class ConnectionHandler {
 
         switch (message.cmd) {
             case 'settings':
-                maybeReloadHttpProxyAgent(message.data);
-
                 if (message.data && message.data.logs) {
                     for (let [account, accountObject] of this.accounts) {
                         // update log handling
@@ -841,9 +1018,20 @@ class ConnectionHandler {
             case 'resource-usage':
                 return threadStats.usage();
 
-            case 'delete':
-            case 'update':
+            // Shutdown drain. Signals reach the main thread only, so this worker cannot notice
+            // SIGTERM itself; server.js forwards it here on the way down so accounts get a chance
+            // to close their connections cleanly instead of having the sockets cut.
+            case 'close':
+                await this.closeConnections();
+                return true;
+
             case 'sync':
+                return await this.syncConnection(message.account, { since: message.since });
+
+            case 'delete':
+            case 'teardown':
+            case 'unassign':
+            case 'update':
             case 'pause':
             case 'resume':
             case 'reconnect':
@@ -913,27 +1101,8 @@ class ConnectionHandler {
         }
     }
 
-    async call(message) {
-        return new Promise((resolve, reject) => {
-            let mid = `${Date.now()}:${++this.mids}`;
-
-            let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
-            let timer = setTimeout(() => {
-                let err = new Error('Timeout waiting for command response [T3]');
-                err.statusCode = 504;
-                err.code = 'Timeout';
-                err.ttl = ttl;
-                this.callQueue.delete(mid);
-                reject(err);
-            }, ttl);
-
-            this.callQueue.set(mid, { resolve, reject, timer });
-            parentPort.postMessage({
-                cmd: 'call',
-                mid,
-                message
-            });
-        });
+    call(message) {
+        return this.rpc.call(message);
     }
 
     metrics(key, method, ...args) {
@@ -957,68 +1126,36 @@ async function main() {
 }
 
 parentPort.on('message', message => {
-    if (message && message.cmd === 'resp' && message.mid && connectionHandler.callQueue.has(message.mid)) {
-        let { resolve, reject, timer } = connectionHandler.callQueue.get(message.mid);
-        clearTimeout(timer);
-        connectionHandler.callQueue.delete(message.mid);
-        if (message.error) {
-            let err = new Error(message.error);
-            if (message.code) {
-                err.code = message.code;
-            }
-            if (message.statusCode) {
-                err.statusCode = message.statusCode;
-            }
-            return reject(err);
-        } else {
-            return resolve(message.response);
-        }
+    if (connectionHandler.rpc.handleResponse(message)) {
+        return;
     }
 
-    if (message && message.cmd === 'call' && message.mid) {
-        return connectionHandler
-            .onCommand(message.message)
-            .then(response => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    response
-                });
-            })
-            .catch(err => {
-                if (message.message && message.message.data && message.message.data.raw) {
-                    message.message.data.raw = message.message.data.raw.length;
-                }
-                logger.error(Object.assign({ msg: 'Command failed' }, message, { err }));
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    error: err.message,
-                    code: err.code,
-                    statusCode: err.statusCode,
-                    info: err.info
-                });
-            });
+    if (isCall(message)) {
+        return respond(parentPort, message, command => connectionHandler.onCommand(command), {
+            logger,
+            onError(err) {
+                // Anything with a client-facing status (404 not found, 503 no active handler) is
+                // reported back to the caller as the command response, so it is not a server fault.
+                // 503 is excluded from the error branch on purpose: both "no active handler" and
+                // IMAPConnectionClosing carry it, and a worker taking over accounts answers every
+                // in-flight command with one until the reassignment settles.
+                // ImapFlow's codes for "throttled" and "the connection went away" carry no HTTP
+                // status of their own (429 and 503, see assignRelayStatus())
+                assignRelayStatus(err);
+                let isServerFault = !err || !err.statusCode || (err.statusCode >= 500 && err.statusCode !== 503);
+                logger[isServerFault ? 'error' : 'debug'](Object.assign(describeRpcCommand(message), { msg: 'Command failed', err }));
+            }
+        });
     }
 
     connectionHandler.onMessage(message).catch(err => logger.error({ msg: 'Failed to process IPC message', err }));
 });
 
-process.on('SIGTERM', () => {
-    connectionHandler.kill().catch(err => {
-        logger.error({ msg: 'Execution failed', err });
-        logger.flush(() => process.exit(4));
-    });
-});
-
-process.on('SIGINT', () => {
-    connectionHandler.kill().catch(err => {
-        logger.error({ msg: 'Execution failed', err });
-        logger.flush(() => process.exit(5));
-    });
-});
+// NB! No SIGTERM/SIGINT handlers here. Node delivers signals to the main thread only, so handlers
+// registered in a worker thread never run. Shutdown reaches this worker as a 'close' command from
+// server.js instead; see onCommand().
 
 main().catch(err => {
-    logger.fatal({ msg: 'Execution failed', err });
+    logger.fatal({ msg: 'IMAP worker startup failed', err });
     logger.flush(() => process.exit(6));
 });

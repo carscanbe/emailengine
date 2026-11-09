@@ -1,143 +1,17 @@
-<div class="float-right">
-    <button type="button" class="btn btn-primary btn-icon-split" data-toggle="modal" data-target="#addAccount">
-        <span class="icon text-white-50">
-            <i class="fas fa-user-plus"></i>
-        </span>
-        <span class="text">Add an account</span>
-    </button>
-</div>
+{{#> ui/page-header title="Accounts" icon="icon-[tabler--users]" subtitle="Connect and manage email accounts for syncing and sending email." badgeLabel=total badgeVariant="neutral" class="mb-6"}}
+{{> ui/btn label="Add account" icon="icon-[tabler--user-plus]" overlay="#addAccount"}}
+{{/ui/page-header}}
 
-{{> accounts_header}}
-
-{{#if query}}
-<nav aria-label="breadcrumb" class="mt-4 mb-4">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="/admin/accounts">Accounts</a></li>
-        <li class="breadcrumb-item active" aria-current="page">Results for "{{query}}"</li>
-    </ol>
-</nav>
-{{/if}}
+{{> ui/search-crumb parentHref="/admin/accounts" parentLabel="Accounts" query=query}}
 
 {{#if accounts}}
-<div class="card mb-4 mt-4">
-
-    <div class="table-responsive">
-        <table class="table table-hover">
-            <thead class="">
-                <tr>
-                    <th class="p-0">
-                        <div class="p-2">ID</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Name</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Email</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Type</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">
-                            Status
-                        </div>
-                    </th>
-                </tr>
-            </thead>
-
-            <tbody>
-                {{#each accounts}}
-                <tr>
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/accounts/{{account}}" class="stretched-link"></a>
-                            {{account}}
-                        </div>
-                    </td>
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/accounts/{{account}}" class="stretched-link"></a><strong>{{name}}</strong>
-                        </div>
-                    </td>
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/accounts/{{account}}" class="stretched-link"></a>{{email}}
-                        </div>
-                    </td>
-
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/accounts/{{account}}" class="stretched-link"></a>
-                            {{#if type.icon}}
-                            <i class="{{type.icon}} fa-fw"
-                                title="{{type.name}}{{#if type.comment}} ({{type.comment}}){{/if}}"
-                                data-toggle="tooltip" data-placement="top"></i>
-                            {{else}}
-                            {{type.name}}
-                            {{#if type.comment}}
-                            <span class="text-muted">({{type.comment}})</span>
-                            {{/if}}
-                            {{/if}}
-                        </div>
-                    </td>
-
-                    <td style="width: 120px;" class="p-0">
-                        <div class="position-relative  p-2">
-                            <a href="/admin/accounts/{{account}}" class="stretched-link">
-
-                                <span class="badge badge-pill badge-{{stateLabel.type}} state-info"
-                                    data-account="{{account}}" style="cursor:default;" data-toggle="popover"
-                                    data-trigger="hover" {{#if stateLabel.error}}data-title="Connection error"
-                                    data-content="{{stateLabel.error}}" {{/if}}>
-
-                                    {{#if stateLabel.spinner}}
-                                    <i class="fas fa-spinner fa-spin fa-fw"></i>
-                                    {{/if}}
-
-                                    {{stateLabel.name}}</span>
-                            </a>
-                        </div>
-                    </td>
-                </tr>
-                {{/each}}
-            </tbody>
-        </table>
-    </div>
-
-    {{#if showPaging}}
-    <div class="card-footer">
-
-        <nav aria-label="Page navigation">
-            <ul class="pagination" style="flex-wrap: wrap;">
-
-                {{#if prevPage}}
-                <li class="page-item"><a class="page-link" href="{{prevPage}}">Previous</a></li>
-                {{else}}
-                <li class="page-item disabled"><a class="page-link" href="#">Previous</a></li>
-                {{/if}}
-
-                {{#each pageLinks}}
-                <li class="page-item {{#if active}}active{{/if}}"><a class="page-link" href="{{url}}">{{title}}</a>
-                </li>
-                {{/each}}
-
-                {{#if nextPage}}
-                <li class="page-item"><a class="page-link" href="{{nextPage}}">Next</a></li>
-                {{else}}
-                <li class="page-item disabled"><a class="page-link" href="#">Next</a></li>
-                {{/if}}
-
-            </ul>
-        </nav>
-    </div>
-    {{/if}}
-</div>
+{{> accounts_table showActions=true}}
 {{else}}
-<div class="list-group mt-4 mb-4">
-    <div class="list-group-item">
-No accounts found.
-    </div>
-</div>
+{{> ui/list-empty noun="accounts" query=query filterActive=state firstPage=firstPage createOverlay="#addAccount" createLabel="Add your first account" clearHref="/admin/accounts"}}
 {{/if}}
+
+{{#> ui/delete-modal id="deleteAccount" noun="account" action="/admin/accounts"}}
+Delete <strong class="delete-target-name"></strong> from EmailEngine? This removes its synced data, account-specific templates, access tokens, and queued emails. Emails on the mail server are not deleted. This action cannot be undone.
+{{/ui/delete-modal}}
 
 {{>add_account_modal}}

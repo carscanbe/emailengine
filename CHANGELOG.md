@@ -1,5 +1,1018 @@
 # Changelog
 
+## [2.87.2](https://github.com/postalsys/emailengine/compare/v2.87.1...v2.87.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* bind admin sessions to the signing-in device (beta, off by default) ([a62a421](https://github.com/postalsys/emailengine/commit/a62a421eb26ada313c5f556d49477082c5f639b4))
+* bind admin sessions to the signing-in device (beta, off by default) ([da02403](https://github.com/postalsys/emailengine/commit/da02403b4f386af47324cfdcf9d505fe5a91ccf7))
+
+## [2.87.1](https://github.com/postalsys/emailengine/compare/v2.87.0...v2.87.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* bind export encryption chunks to their position in the file ([c138b61](https://github.com/postalsys/emailengine/commit/c138b6145ad0dab33b92d8d5f1571ffd32fc96c3))
+* export recovery ownership and sent-marker durability (2.87.1 review) ([5c24113](https://github.com/postalsys/emailengine/commit/5c2411311ee1652ed4580fd53d40f0fdc81bd7f4))
+* keep the sent marker until the submit job is recorded as completed ([aecf19f](https://github.com/postalsys/emailengine/commit/aecf19f6ac7a431f87441102e3302228ab1728ad))
+* make the Docker health check follow the API's TLS setting, port and bind address ([957dec0](https://github.com/postalsys/emailengine/commit/957dec0923ab359355761bd531d6d08003a3dd05))
+* never fail an export another export worker is still running ([74d1755](https://github.com/postalsys/emailengine/commit/74d1755aa2fec63565bae64fcad55153e5294c5d))
+* read the TLS mode from &lt;Encryption&gt; in Exchange autodiscover answers ([5a1b7e9](https://github.com/postalsys/emailengine/commit/5a1b7e9e3df33a38b65b80447e6628a8e908223e))
+* report a template id with an out-of-range timestamp as not found ([ac043db](https://github.com/postalsys/emailengine/commit/ac043db8d1540a025d8143d1d261cf3d2f1400cb))
+* set text.hasMore when an IMAP text part is cut at maxBytes ([f070b5e](https://github.com/postalsys/emailengine/commit/f070b5ea91ad3763936c975a302a23d20d768e69))
+* share the worker RPC, token check and new-message steps instead of copies ([ac4cf28](https://github.com/postalsys/emailengine/commit/ac4cf28ae3925bcf4a01373f3c05d51a5c4da8f3))
+* standalone fixes for new-folder ids, Redis-refused work, duplicate sends, CLI password and queued exports ([#685](https://github.com/postalsys/emailengine/issues/685)) ([8e934c0](https://github.com/postalsys/emailengine/commit/8e934c0cf9cda2e33cfbdb7a42cfe2a77172523d))
+* update dependencies ([56df020](https://github.com/postalsys/emailengine/commit/56df02073fb6a76e984531710fd97fee0163e58b))
+* update dependencies ([25ee28f](https://github.com/postalsys/emailengine/commit/25ee28fc5bd5623c4b73b55e0890c027832825cf))
+* update dependencies (bullmq 6.5.4, fast-xml-parser 5.12.0) ([5624ee1](https://github.com/postalsys/emailengine/commit/5624ee1844c6ed2f377bbbe7161f21f035d7c943))
+
+## [2.87.0](https://github.com/postalsys/emailengine/compare/v2.86.0...v2.87.0) (2026-10-29)
+
+
+### Features
+
+* send and read one-time passcodes through the OTP-Token header ([ad2f388](https://github.com/postalsys/emailengine/commit/ad2f388e7fb5532bbd581f5c37c0f5c65525cc96))
+
+
+### Bug Fixes
+
+* bump bullmq to 6.5.0 and @sentry/node-core to 10.77.1 ([250ec90](https://github.com/postalsys/emailengine/commit/250ec9060e1c392977961f6617e884071e426f86))
+* bump nodemailer to 10.3.0, mailparser to 3.13.0 and other dependencies ([ad88bc7](https://github.com/postalsys/emailengine/commit/ad88bc79f5f1c4958ffb3012b09ce7f7f533824b))
+* let the AI summary trust Google's authentication header on Gmail API accounts ([78038c5](https://github.com/postalsys/emailengine/commit/78038c5d7828050fd1c94af8d268e7c50081d8df))
+* move the Docker image to Node 24.22.2 for the Brotli decoder fix (CVE-2026-111497) ([b6efd8e](https://github.com/postalsys/emailengine/commit/b6efd8e4dc81199cf427185c17e0ffb0933f08be))
+* point support links at emailengine.app/support and support@postalsys.com ([795b217](https://github.com/postalsys/emailengine/commit/795b217458cf379699f68e333935ae8066310c1b))
+* report the OAuth2 revocation outcome on account delete, and add revoke=required ([cc5908d](https://github.com/postalsys/emailengine/commit/cc5908de9e286ade29e1ad50a835d81f144c827c))
+* separate the admin footer links into a labelled link list ([65aa96d](https://github.com/postalsys/emailengine/commit/65aa96d1b4ca540b670ae5c11ca441afa09b67e7))
+* update @postalsys/certs to 2.0.3 and smtp-server to 3.21.2 ([d4a1946](https://github.com/postalsys/emailengine/commit/d4a194607a083a47fcc7b9ca772fa52c5d0b67d6))
+* update bullmq to 6.4.2 ([4af5825](https://github.com/postalsys/emailengine/commit/4af582514507306dd7b677ad7d3ca4fe3f557e1c))
+* update ee-client to 1.10.0 ([6595d46](https://github.com/postalsys/emailengine/commit/6595d46f23dd7cfd7e388641f763d1310c6a3883))
+* update imapflow to 2.10.0 ([06928a5](https://github.com/postalsys/emailengine/commit/06928a507fb52696ecae1204e0641a24b43f9359))
+* update nodemailer to 10.3.1, mailparser to 3.14.1, ee-client to 1.9.0 and email-ai-tools to 2.4.0 ([8aeafb4](https://github.com/postalsys/emailengine/commit/8aeafb498f663fc749e13da7f1f497a7d577b9ba))
+
+## [2.86.0](https://github.com/postalsys/emailengine/compare/v2.85.0...v2.86.0) (2026-10-22)
+
+
+### Features
+
+* make the failed-job retention, token log and thread collapse limits settings ([6d297cf](https://github.com/postalsys/emailengine/commit/6d297cf18701827a32ce8ec80a717c289975f781))
+* per-account outbox endpoints and account and state filters on GET /v1/outbox ([9536c3d](https://github.com/postalsys/emailengine/commit/9536c3dfba6bf81aed0ac0f01742684e275d594b))
+* REST endpoints for failed webhook deliveries ([3dfd5cf](https://github.com/postalsys/emailengine/commit/3dfd5cfe2fa307ed54dd78c7f3f1a7661f8dae19))
+* REST endpoints for the admin UI actions that had none ([7a0bc67](https://github.com/postalsys/emailengine/commit/7a0bc6749f683af2e804dc96500774352b2383f3))
+* webhooksDeliveryAttempts and webhooksRetryDelay settings for the webhook retry policy ([4e54e99](https://github.com/postalsys/emailengine/commit/4e54e9911cad156ee24f16c77c7b0a2034baedc3))
+
+
+### Bug Fixes
+
+* accept a duration for EENGINE_GMAIL_FALLBACK_POLL_INTERVAL ([431be3a](https://github.com/postalsys/emailengine/commit/431be3a2e98299f3772727aa2b48cb856b17a524))
+* announce that the pre-2.79 token endpoints and legacy SMTP options go after 2027-01-01 ([1a81df4](https://github.com/postalsys/emailengine/commit/1a81df4e67a89b537f12aaf41b66caa66eec1b88))
+* announce the removal of the leftover deprecated request fields and the bull-board redirects ([531c411](https://github.com/postalsys/emailengine/commit/531c411d96a1fd2e5e6f6dfd5fca72b3df6a5068))
+* answer every API 404 with code NotFound ([ff9c5c9](https://github.com/postalsys/emailengine/commit/ff9c5c9f399a9b55cd6c1f32569d8198e84cfd13))
+* bump bullmq to 6.4.0 ([e687a87](https://github.com/postalsys/emailengine/commit/e687a877d644961a7a75447867412b76e59807f6))
+* clean failed queue jobs by EENGINE_QUEUE_KEEP_FAILED_AGE instead of a fixed week ([3a404a5](https://github.com/postalsys/emailengine/commit/3a404a5fcd94fed1c1466a5fc69a7fa4fb8477df))
+* clean failed queue jobs by the failed-job retention setting ([95fc040](https://github.com/postalsys/emailengine/commit/95fc04085e88a2c22b9a586eb849427847ad426f))
+* close the IMAP command connection within the IDLE restart interval ([a659c26](https://github.com/postalsys/emailengine/commit/a659c266b9fb8d48004f1b3022e7dcb5d4229a54))
+* count each queue's failed jobs in the same read and the three queues at once for /metrics ([7c47e8d](https://github.com/postalsys/emailengine/commit/7c47e8dcda6d86db626d0a01f8c566a5743304a1))
+* cut per-account and per-message Redis round trips on the sync paths ([7e2cefe](https://github.com/postalsys/emailengine/commit/7e2cefed2470a49b2ca4e03466cacf8737c99081))
+* declare Node 20.19.0 in engines and warn at startup on an older 20.x ([95b8d53](https://github.com/postalsys/emailengine/commit/95b8d53f7d131eb637cfc878858dad3f957a9d9e))
+* decode outbound text parts with libmime and leave a part it can not decode untouched ([efa6406](https://github.com/postalsys/emailengine/commit/efa6406f8d44e8d01c5212e49fd213bb451e9859))
+* derive account credential keys off the event loop when loading account data ([a530179](https://github.com/postalsys/emailengine/commit/a53017938e22bc26a8fda4d34664c253f7f0af2b))
+* encode custom headers on the raw send path and use nodemailer's own delivery details ([d59b382](https://github.com/postalsys/emailengine/commit/d59b382427ae449907e364b92bef59bdb5691bf6))
+* end an IMAP sync pass when ImapFlow finds no mailbox selected, and use its public client API ([8521aeb](https://github.com/postalsys/emailengine/commit/8521aebbd791115f08fbc47ec0f05197547effab))
+* extend the export job lock per message, not per batch of 100 ([f22b1d1](https://github.com/postalsys/emailengine/commit/f22b1d1015830e4831f406b94f876a8e37db586f))
+* filter a queue listing by account or route on the job data alone ([08300f9](https://github.com/postalsys/emailengine/commit/08300f9e44427fc1a82af267d42b5148548f7f2f))
+* give the Docker image a health check and keep its application tree read-only ([0c0b70d](https://github.com/postalsys/emailengine/commit/0c0b70d014645f513ab8db261c0ad8c23265cb14))
+* index a full sync's changed messages a chunk at a time and drop deleted ones in the same round trip ([8b49c09](https://github.com/postalsys/emailengine/commit/8b49c0996eb4c73ba9bf3eefd07db501e01166db))
+* keep retrying account assignment after the quick retries at startup ([de1c8d6](https://github.com/postalsys/emailengine/commit/de1c8d6b38e436fe01e05def11315a0f713b60db))
+* learn the IDLE restart interval of a server that drops idle sessions ([19c3844](https://github.com/postalsys/emailengine/commit/19c384493261881af18f58053191f1850257072c))
+* let EENGINE_REDIS_PREFIX and the other lib/consts.js variables be read from a file ([de9ba70](https://github.com/postalsys/emailengine/commit/de9ba705dfa3653f84e3dccf8e91a93fb4579f36))
+* let POST /v1/settings clear the overridable settings, and parse their values in one place ([7bcd190](https://github.com/postalsys/emailengine/commit/7bcd1902de9ea078dc947bf64e48304c466a46c4))
+* list the GET /v1/settings include flags as chips again in the API reference ([7b5c122](https://github.com/postalsys/emailengine/commit/7b5c122d658eea0bbcaeeb217acc6bf26095e0c0))
+* make account flush and delete complete on Gmail API and MS Graph accounts ([7484bdc](https://github.com/postalsys/emailengine/commit/7484bdc9b8976e6502cd628d496cf74f4ab493e8))
+* MCP tools for the new endpoints, server signatures and raw message source ([aeb1ae5](https://github.com/postalsys/emailengine/commit/aeb1ae57aaf99ac84a6762316835971ef1bcb9d3))
+* name every OpenAPI schema deliberately and describe the terse operations ([4e7bddc](https://github.com/postalsys/emailengine/commit/4e7bddc4f392196190788775b20dc116d1d5d7a9))
+* parse envelope recipients and header addresses with mailparser ([378b003](https://github.com/postalsys/emailengine/commit/378b003800d5c9ba0e7b3bc7dec6639cd661f124))
+* queue a message through outbox.enqueue() and read its queue settings in one round trip ([54c66d4](https://github.com/postalsys/emailengine/commit/54c66d4407a26fc53d9495feaf5ed88a419b8e61))
+* queue export messages a page at a time and write export progress once per batch ([d22d9f0](https://github.com/postalsys/emailengine/commit/d22d9f0e052f0abfbf264051fe0d53b757d207e3))
+* queue new messages of an IMAP fast sync in one transaction instead of two round trips each ([ed8cc3f](https://github.com/postalsys/emailengine/commit/ed8cc3f1966615871d4d551eced2c50f467e4a86))
+* read only the jobs of the page shown when listing one account's outbox ([2ffbcfe](https://github.com/postalsys/emailengine/commit/2ffbcfe034d705b3e2128638b414ebf1a29e049a))
+* read only what the category lookup, webhook clears and account teardown need ([6c3d081](https://github.com/postalsys/emailengine/commit/6c3d081d019a1790b6d14dd3b06efd1b375d180e))
+* read the IMAP message index once per chunk in a full sync and stop deleting the wrong entries ([34ca00b](https://github.com/postalsys/emailengine/commit/34ca00bd5d444b9125130263590725747451c317))
+* refresh an open IMAP folder before searching it and share waiting sync passes ([2e5c436](https://github.com/postalsys/emailengine/commit/2e5c43693ce7bd5588ddf6fcc8167e42ee3bc3dd))
+* refresh the public suffix list ([c72b1e1](https://github.com/postalsys/emailengine/commit/c72b1e1603f9a983557225a147f0383f35e79184))
+* refresh the public suffix list ([eed6753](https://github.com/postalsys/emailengine/commit/eed67531b5cbeef1d313fff4f5bbd5bec70051c1))
+* report export queue depth, failed jobs, API latency and per-thread heap in /metrics ([269876c](https://github.com/postalsys/emailengine/commit/269876c37366bce9916d771471f97fa01accfb5c))
+* report missing IMAP workers from /health and add liveness and readiness endpoints ([f30f561](https://github.com/postalsys/emailengine/commit/f30f5611497b7627c10843283394beb75cad5825))
+* resolve a sent message's tracking flags in one place ([1873f3c](https://github.com/postalsys/emailengine/commit/1873f3cabdcf3b000c8fecd1a0b833a9abec2073))
+* resolve Gmail categories over IMAP for a whole pass of new messages at once ([710fc6b](https://github.com/postalsys/emailengine/commit/710fc6b9f2e0bd84b58c11b2175a6bb68c9c631a))
+* restore the newer public suffix list, and never replace it with an older download ([3f2399a](https://github.com/postalsys/emailengine/commit/3f2399a1f558bad11ed56e386f5b478dcde8ae44))
+* resume IDLE after an upload only once the connection is free ([1276c48](https://github.com/postalsys/emailengine/commit/1276c48ca81c6453df7b30da0744711ac296298e))
+* search webhook routes by their target URL without its credentials ([c155541](https://github.com/postalsys/emailengine/commit/c155541254209605f11b9b903ed36fb16aee2ce6))
+* send an API call's latency with its counter instead of a second message per request ([2822fe2](https://github.com/postalsys/emailengine/commit/2822fe262bc5c4b9f256cf5ae871f5d9f8999d2a))
+* show why a first TLS certificate order failed instead of a guessed reason ([43bbdf5](https://github.com/postalsys/emailengine/commit/43bbdf5c6a66dd636cd67a8e0c468f0e228c4a68))
+* skip messages deleted mid-listing on Gmail and stop leaking outbox content and download streams ([048b7d6](https://github.com/postalsys/emailengine/commit/048b7d61a2472d955305c5ed91f86d8ce2cd0648))
+* stop a full Redis from turning into a worker restart loop ([936b937](https://github.com/postalsys/emailengine/commit/936b9379e22e73668765d48ed97bf9461fcc31bc))
+* switch SMTP server authentication per session instead of for every open connection ([2a7c9de](https://github.com/postalsys/emailengine/commit/2a7c9deab05cb0099d848e0a5df181fef0a29936))
+* the Gmail watch check reads the stored field through the account's own decoding ([5cbb53d](https://github.com/postalsys/emailengine/commit/5cbb53dd7c009f3f545717e677c88d48956b5765))
+* the learned IDLE interval holds on hosts with several accounts and no longer reads its own side effects as a session cap ([808dd58](https://github.com/postalsys/emailengine/commit/808dd58969d8a5497bc2747c2852d019479e0567))
+* update dependencies ([e2adc4f](https://github.com/postalsys/emailengine/commit/e2adc4f911e7745ec56ecd9ddb1361f7b222ee64))
+* update dotenv to 18.0.9 ([ba55217](https://github.com/postalsys/emailengine/commit/ba55217b67d8682aa1a904265c8e80c742edec87))
+* update ImapFlow to 2.6.0, nodemailer to 10.2.0, mailparser to 3.11.0 and the other libraries we own ([a98b458](https://github.com/postalsys/emailengine/commit/a98b458764e25c377379d3d6455f8bc86e17130c))
+* update ImapFlow to 2.7.0 and ioredfour to 2.2.0 ([6bed980](https://github.com/postalsys/emailengine/commit/6bed980c867e64707d23b124a4c416df5c68f6e5))
+* update ImapFlow to 2.8.0 and mailparser to 3.12.0 ([18023a1](https://github.com/postalsys/emailengine/commit/18023a185024615bad5e28844c4b284bd689a6d1))
+* update ImapFlow to 2.9.0 ([1ec9a62](https://github.com/postalsys/emailengine/commit/1ec9a621df418554bc7981d5727e2ffa9ace3f52))
+* update mailparser to 3.12.2 ([55cc131](https://github.com/postalsys/emailengine/commit/55cc1310f962bdd99c1e9de2815de5be5978d761))
+* write a full sync's new and deleted messages a chunk at a time, and share the new-message enrichment ([bd60313](https://github.com/postalsys/emailengine/commit/bd603135dd1bf81df61f04de9c3614bc2e30e1ba))
+
+## [2.85.0](https://github.com/postalsys/emailengine/compare/v2.84.2...v2.85.0) (2026-10-20)
+
+
+### Features
+
+* add an API endpoint to resume an account switched off after authentication failures ([6914729](https://github.com/postalsys/emailengine/commit/69147294647ba61dda1554aa67a0f402fa1ab3d9))
+
+
+### Bug Fixes
+
+* accept cpus for the webhook, submit and export worker counts ([dc19eae](https://github.com/postalsys/emailengine/commit/dc19eaeaf8a6ee364d987b2683daa5e8a2ff4607))
+* add resume_account to the MCP tools ([2c61fb2](https://github.com/postalsys/emailengine/commit/2c61fb2ffb180558b52eab13146f67abb92734c8))
+* bump imapflow to 2.5.6 and bullmq to 6.3.17 ([5d9dccd](https://github.com/postalsys/emailengine/commit/5d9dccdba899d8e28929f47924feba91b8563cdb))
+* bump imapflow to 2.5.8, gettext to 4.2.0, joi-messages to 1.4.0 and templates to 2.1.0 ([8891e9f](https://github.com/postalsys/emailengine/commit/8891e9f67ffa5fd87f1ad6e8954bdbab3314655d))
+* bump imapflow to 2.5.9, bullmq to 6.3.19 and email-ai-tools to 2.3.1 ([a9ad209](https://github.com/postalsys/emailengine/commit/a9ad20985a0565d37999b8567298650e5c3ccf1a))
+* bump ioredfour to 2.0.0, certs to 2.0.0 and pubface to 1.2.0 ([ec5ae18](https://github.com/postalsys/emailengine/commit/ec5ae18afb371a38f92b1c94c0f652b8a02feede))
+* bump libmime to 5.5.2, gettext to 4.1.2, wild-config to 1.7.10 and bounce-classifier to 3.0.2 ([40482cd](https://github.com/postalsys/emailengine/commit/40482cd9558295f10512f29fcb2a7f28ac314f27))
+* bump templates to 2.1.1, which formats dates without moment ([63bb897](https://github.com/postalsys/emailengine/commit/63bb89709b7130cd340113fc78000dca9ccb2b1c))
+* cap the V8 young generation in the Docker image and the binaries ([7864aa5](https://github.com/postalsys/emailengine/commit/7864aa5a725b93edb60aa365b35a607605e51af0))
+* complete the OAuth2 account setup the way the hosted form does ([1a33ecc](https://github.com/postalsys/emailengine/commit/1a33ecc987001e3205a251f8161c89acda76e045))
+* decide webhook queueing before formatting the payload ([1b96844](https://github.com/postalsys/emailengine/commit/1b9684485a8c8541b80fc432bab7008a216c1985))
+* drop psl and timezones-list for the source data and Intl ([55d9c7b](https://github.com/postalsys/emailengine/commit/55d9c7b8216c9afd2080bfe406165aa1cf8bb7e3))
+* expose drafts, bulk message operations and more as MCP tools ([68ef849](https://github.com/postalsys/emailengine/commit/68ef8495b39858b14ada898e613218beaf34cae4))
+* expose mailbox create, rename and delete as MCP tools ([faece57](https://github.com/postalsys/emailengine/commit/faece57b4525aa02ad5b799b629216252ec60077))
+* log a resumed account once, with the reason it was re-enabled ([d752ed3](https://github.com/postalsys/emailengine/commit/d752ed3d9e1299eb13c3110afc9163ee1ef080a8))
+* point the documentation links at the pages' current addresses ([7ce2ca8](https://github.com/postalsys/emailengine/commit/7ce2ca8bf6deb9f4c2df7b0f28ce24cc229eacb9))
+* read .mo catalogs with @postalsys/gettext and bump owned packages ([5cf93a9](https://github.com/postalsys/emailengine/commit/5cf93a90f56c00f640a5c9340a83413bef398a6f))
+* replace five small dependencies with in-house modules ([93da438](https://github.com/postalsys/emailengine/commit/93da43887c733fe09ea2d722eef4bfb40b3d4b21))
+* report the event loop delay of every thread ([2b001fc](https://github.com/postalsys/emailengine/commit/2b001fcf5e1d352a0baeab3f9e2e7846d1db8382))
+* stop downloading inline images for messageNew when nothing uses them ([7d63a88](https://github.com/postalsys/emailengine/commit/7d63a881259540c51fabd66fc05c43a49e542b9b))
+* stop queueing webhook events that no delivery would send ([5a4921c](https://github.com/postalsys/emailengine/commit/5a4921c06a527ec5911eef78fed1019a07fedc5c))
+* use a placeholder for the OAuth2 client secret example ([cd96134](https://github.com/postalsys/emailengine/commit/cd96134fdbd2a396d66f25f0261cf5dbe2166204))
+
+## [2.84.2](https://github.com/postalsys/emailengine/compare/v2.84.1...v2.84.2) (2026-10-18)
+
+
+### Bug Fixes
+
+* bound what hostile message content and mail servers can make a worker do ([02daa27](https://github.com/postalsys/emailengine/commit/02daa27df82680dfa59c572258c88a576d74d2ad))
+* bump @postalsys/email-text-tools to 2.4.24 and @postalsys/ee-client to 1.8.2, embed cid: images only in image attributes ([3d40506](https://github.com/postalsys/emailengine/commit/3d405060828e529156b4df954a3f6b8a5d8e25ae))
+* bump @zone-eu/mailsplit to 5.4.24, mailparser to 3.9.41 and imapflow to 2.5.3 ([3266d8d](https://github.com/postalsys/emailengine/commit/3266d8d2518e37b3c40c947a87d258a68e364497))
+* bump @zone-eu/mailsplit to 5.4.25, mailparser to 3.9.42 and imapflow to 2.5.4 ([76415b0](https://github.com/postalsys/emailengine/commit/76415b0dd58ea202a671e198f6fe9cae9d35d6f0))
+* bump libmime to 5.5.1, libqp to 3.0.1, libbase64 to 1.4.1 and nodemailer to 10.1.7 ([a934ba7](https://github.com/postalsys/emailengine/commit/a934ba79964c2b58abae056adcb0a4544f872eb4))
+* bump node from `ebfe2f9` to `44fce69` ([#676](https://github.com/postalsys/emailengine/issues/676)) ([54a6b87](https://github.com/postalsys/emailengine/commit/54a6b87ad04a9dbad0e91ed20bc179dd11235c48))
+* bump nodemailer to 10.1.5, joi to 18.3.0 and the owned packages that pinned the previous releases ([8faa692](https://github.com/postalsys/emailengine/commit/8faa6926c6d025e77ba17eac027e671782d7b527))
+* bump nodemailer to 10.1.6, smtp-server to 3.20.1 and mailparser to 3.9.45 ([bcf583e](https://github.com/postalsys/emailengine/commit/bcf583e94390c90574733e76ec04f7ac78558402))
+* bump the owned dependencies to the releases of the 2026-10-16 security scan ([2cbd569](https://github.com/postalsys/emailengine/commit/2cbd5691cfed2a9103e021b334c62451228504fe))
+* close the paths a bound or narrowed API token could use to reach other accounts ([c87c861](https://github.com/postalsys/emailengine/commit/c87c8612e41e92bc5abf79c8d3e42978b4d91364))
+* derive a separate signing key per purpose from the service secret ([1fa3368](https://github.com/postalsys/emailengine/commit/1fa336891015dab0b184689412fd02d263dcb6c2))
+* document the TLS options in the API reference and keep the admin modules within their size budgets ([9d96a0c](https://github.com/postalsys/emailengine/commit/9d96a0c5d2f5a17f7a2bbc4beff6869f3be919c1))
+* give admin sessions a lifetime, count only failed sign-ins and ask for the password before enabling TOTP ([d08d3ab](https://github.com/postalsys/emailengine/commit/d08d3ab6c0af99652699b9d007a3e8678f97b115))
+* harden the IMAP proxy and the SMTP listener against unauthenticated clients ([34ebdad](https://github.com/postalsys/emailengine/commit/34ebdad6201ba7ba73d3c20e25bf029782e80beb))
+* keep account ids apart in Redis keys and URLs, and bound licenses, mail merges and stored secrets ([c9d3547](https://github.com/postalsys/emailengine/commit/c9d3547ddf06033022eb8833186efeb00b78847a))
+* keep narrowed tokens off the webhook target, bound slow webhook targets and stop secrets leaking through logs and error payloads ([40ce6cb](https://github.com/postalsys/emailengine/commit/40ce6cbac9b77ea47adf0dc62f9146c5df3842f2))
+* keep STARTTLS opportunistic for an IMAP account that opts out of requiring it ([42cac3a](https://github.com/postalsys/emailengine/commit/42cac3ab1a96cf6e0d6d93389dec06e01cdabc4b))
+* penalise only timed-out webhook targets, log hapi's internal request errors and run the integration tier against cleartext mocks ([4578cc6](https://github.com/postalsys/emailengine/commit/4578cc674215a09b3d98cc28640007c883eec62a))
+* save the webhook and OAuth2 app forms when a list field is not sent ([8157671](https://github.com/postalsys/emailengine/commit/81576712c91ead5374631e16d864bfd6a9856ddc))
+* share the helpers the security fixes duplicated and move each rule to where it covers every caller ([b9ba3ec](https://github.com/postalsys/emailengine/commit/b9ba3ecf44599c861741e50b7f3940eaa54a3c56))
+* treat an unreachable network as a transient connection failure ([b0b4dd5](https://github.com/postalsys/emailengine/commit/b0b4dd5cb56658a8d48f62392bb83a369db265d0))
+* trim the line ends of a text body in linear time when rendering it as html ([d5d30cd](https://github.com/postalsys/emailengine/commit/d5d30cd12bc141c7aeb8d4d2f0f254e550519dd4))
+
+## [2.84.1](https://github.com/postalsys/emailengine/compare/v2.84.0...v2.84.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* assign accounts again when every IMAP worker restarts after a Redis reconnection ([2200319](https://github.com/postalsys/emailengine/commit/22003191c041f03346031518d3a5a8aec715ba91))
+
+## [2.84.0](https://github.com/postalsys/emailengine/compare/v2.83.2...v2.84.0) (2026-10-15)
+
+
+### Features
+
+* **admin:** replace bull-board with an in-house queue browser ([4215616](https://github.com/postalsys/emailengine/commit/4215616552c92762212c021ab2c0768884aa487b))
+* per-account IDLE restart interval (imap.maxIdleTime) ([25e5cb7](https://github.com/postalsys/emailengine/commit/25e5cb761d39a33304f9219dccad4f9bc0c336a6))
+
+
+### Bug Fixes
+
+* **admin:** format the queue help panel and keep a leading kebab menu on the page ([ed51305](https://github.com/postalsys/emailengine/commit/ed513050da555d195ba9937a82f216bff053cd9e))
+* **admin:** move a queue entry's actions to the page header and explain what the queues keep ([9ace194](https://github.com/postalsys/emailengine/commit/9ace19484818f6f0951bb53bbfb8ea0826a23f40))
+* **admin:** post queue entry actions as plain forms ([e335331](https://github.com/postalsys/emailengine/commit/e335331a56c994f08c2e051444378d93e1cefa67))
+* **admin:** say which bound decides the failed-entry count on the queue page ([7224cd7](https://github.com/postalsys/emailengine/commit/7224cd742cd3760bca46b4a748eb54bd73020ec8))
+* **deps:** update bullmq to 6.3.15 ([b58b632](https://github.com/postalsys/emailengine/commit/b58b63233aa0aedad57c4816ad3d937089161e56))
+* **deps:** update imapflow to 2.4.3 and dotenv to 18.0.8 ([c28955b](https://github.com/postalsys/emailengine/commit/c28955bbcedc20748745016fcec397e2603e85c3))
+* **deps:** update nodemailer to 10.1.1, imapflow to 2.4.2 and libmime to 5.4.8 ([ff766dd](https://github.com/postalsys/emailengine/commit/ff766dd89ea1de9cdb72673cec14adb7c9bb90ff))
+* skip DSN parsing when the message was expunged before it was downloaded ([44113d5](https://github.com/postalsys/emailengine/commit/44113d55fd2f89902536a3ef3074b9fa27a4838b))
+
+## [2.83.2](https://github.com/postalsys/emailengine/compare/v2.83.1...v2.83.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* close connection and error handling gaps from the TLS/TCP audit ([c858c05](https://github.com/postalsys/emailengine/commit/c858c059eb26be91f485ba0841c306e2fcfae232))
+* **deps:** update nodemailer, imapflow, mailparser and smtp-server ([5e9ef89](https://github.com/postalsys/emailengine/commit/5e9ef89e3a2bb2ff56f8a4b2c355470d2adff171))
+* **deps:** update smtp-server to 3.19.21 ([c53de63](https://github.com/postalsys/emailengine/commit/c53de63f025281ba64e740895a9076097a15c8ae))
+* treat a stalled response body as a transient network failure ([a33a161](https://github.com/postalsys/emailengine/commit/a33a161a71bb795bf8bf8de49d2afd9cac52fe92))
+
+## [2.83.1](https://github.com/postalsys/emailengine/compare/v2.83.0...v2.83.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* ask a service account app's purpose before its authentication method ([42ac521](https://github.com/postalsys/emailengine/commit/42ac521021fabe8976fd86f13da6e8c6d1707ac3))
+* close the attached service account review findings ([d567ad8](https://github.com/postalsys/emailengine/commit/d567ad866f90e0ced6b2b1d8fa722e7a74d6ac25))
+* drop the beta label from the export API ([21df0b0](https://github.com/postalsys/emailengine/commit/21df0b0e4ad5bb1ef18ce3eb916fa77e9028075d))
+* keep the OAuth2 app routes inside their size budget ([8a72c20](https://github.com/postalsys/emailengine/commit/8a72c20188aad62d7cb32401d98869c1ed96a75a))
+* rework the OAuth2 app form around what each app connects with ([a000412](https://github.com/postalsys/emailengine/commit/a000412ecc2c233f9fb4cc50fe8486904692a8ba))
+
+## [2.83.0](https://github.com/postalsys/emailengine/compare/v2.82.2...v2.83.0) (2026-10-08)
+
+
+### Features
+
+* **oauth2:** authenticate Cloud Pub/Sub apps as the attached Google Cloud service account ([0b3e433](https://github.com/postalsys/emailengine/commit/0b3e43345c905b5f8afa5eea716bd56ec703d60b))
+
+
+### Bug Fixes
+
+* accept sender and recipient addresses with a local part over 64 octets ([96e813d](https://github.com/postalsys/emailengine/commit/96e813dae325648e954b607276471e87789cf3cd))
+* **deps:** update imapflow to 2.3.0 ([a2a0097](https://github.com/postalsys/emailengine/commit/a2a00970ba93a88bdd3da337eb225ec192b569a4))
+* **deps:** update imapflow, nodemailer, mailparser, smtp-server and templates ([27b1690](https://github.com/postalsys/emailengine/commit/27b169034c5743303daca354f0b30c1805d8a0e9))
+* label the local address strategies by the traffic they cover ([a116220](https://github.com/postalsys/emailengine/commit/a1162205bb3365ac997b5d5830631eb643fbf375))
+* route API account HTTP traffic through the account proxy and local address ([a3884e1](https://github.com/postalsys/emailengine/commit/a3884e15e6c7e7cf747f515ebb647785d01007e8))
+* **security:** keep the global webhook headers off account-level targets, and close the other findings of the 2026-10-06 review ([8b89a61](https://github.com/postalsys/emailengine/commit/8b89a612b85f0d645d16fde56452719a4dd68f6a))
+* show the TLS page's Check reachability and Request buttons as busy while they run ([173b72c](https://github.com/postalsys/emailengine/commit/173b72c5712ff89bc167630334241803b4c1d844))
+
+## [2.82.2](https://github.com/postalsys/emailengine/compare/v2.82.1...v2.82.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* **outlook:** keep polling an account whose subscription fails but whose mailbox can be read ([a563624](https://github.com/postalsys/emailengine/commit/a563624137b14c66b0c10bf431139656c5da0c7c))
+
+## [2.82.1](https://github.com/postalsys/emailengine/compare/v2.82.0...v2.82.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* carry the GatewayNotFound code in the 404 response body ([43af659](https://github.com/postalsys/emailengine/commit/43af65915bc6daa77bbf1612860eb40e62ed93ef))
+* check every PTR record when filtering scanner opens and clicks ([ebcd78b](https://github.com/postalsys/emailengine/commit/ebcd78b7957c925b5dc454415f7d9706b17d4a21))
+* classify a wrapped transport failure as the outage it is ([a8d63a8](https://github.com/postalsys/emailengine/commit/a8d63a841fcdb55faa619656bb43d2008c0ce3e2))
+* correct the descriptions and comments that disagreed with the behavior ([dcdc3e9](https://github.com/postalsys/emailengine/commit/dcdc3e9b994ab137afe5769790d8c9cd5a227233))
+* declare the token-request fields the error record actually carries ([23fd0e4](https://github.com/postalsys/emailengine/commit/23fd0e4f8ad2de79bb251cc72eefb2736f1a541e))
+* **deps:** hold pino at 10.3.x, which 10.4.0 made unbundlable ([4c4e7e3](https://github.com/postalsys/emailengine/commit/4c4e7e32bfde6a079bce796a15b2b85f6374c312))
+* **deps:** update @sentry/node-core, pino, eslint and supertest ([9c5b9d5](https://github.com/postalsys/emailengine/commit/9c5b9d51c7a1e8ffd11adecd5181c9b4461bb34c))
+* **deps:** update imapflow, mailparser, nodemailer and smtp-server ([ef14661](https://github.com/postalsys/emailengine/commit/ef1466115acc3dc727e1b46b08fd194dd3f90beb))
+* **deps:** update imapflow, nodemailer, mailparser and the libbase64 chain ([9c8971e](https://github.com/postalsys/emailengine/commit/9c8971e345cfada10f875ca1086ea010b10ada91))
+* describe hasMore the way both backends behave ([8b0bc19](https://github.com/postalsys/emailengine/commit/8b0bc19b32adf8fdb3c5095551ad75417430ba8a))
+* document progress.networkRouting where the outbox entry carries it ([593e390](https://github.com/postalsys/emailengine/commit/593e390e38964e8f57359b421a2d2825a50be1cb))
+* follow an autodiscovery in-response redirect anonymously ([554068e](https://github.com/postalsys/emailengine/commit/554068e322bc7f2daf67ad1841900c420e9d3da1))
+* hold MCP text results to the result cap, newest-first for a log ([d44c648](https://github.com/postalsys/emailengine/commit/d44c64834bf86b36ee0ffe4cdd56da96a8733718))
+* let POST /v1/gateway generate the gateway id ([6901349](https://github.com/postalsys/emailengine/commit/6901349bcfb25fe2c3995a1c0d2a8fe54fd10ba7))
+* let the CLI issue the mcp-manage scope, with explicit grants ([84565d1](https://github.com/postalsys/emailengine/commit/84565d149d7661390c8c75e8a737fa14a628f238))
+* make the export retention and per-message size limits settable ([c6e6930](https://github.com/postalsys/emailengine/commit/c6e6930d6619ae8ceb96a70ac151707db86de7d6))
+* move the nextAttempt retry timing into the module that owns the job phase ([24defb8](https://github.com/postalsys/emailengine/commit/24defb839c725f0f6abdee3bd7f08a395f92aa77))
+* name the token endpoint when a credential request cannot reach it ([a0748bc](https://github.com/postalsys/emailengine/commit/a0748bc61943f107fdaf18d01cf02e9f1b899c8b))
+* offer all five special-use folder overrides on the account form ([d7faa2d](https://github.com/postalsys/emailengine/commit/d7faa2d6a39984fb4ccbf0e41026abcc279aec13))
+* offer the Gmail API base scope to a service-account app ([fc23ea2](https://github.com/postalsys/emailengine/commit/fc23ea2a39142c0cb561d687b4d0be862068a6bc))
+* **outlook:** recover messages whose Graph notification was silently dropped ([f0ea5c1](https://github.com/postalsys/emailengine/commit/f0ea5c19fd6835d23a6665c1431bc3f0a054dde2))
+* perform the autodiscovery steps that name another endpoint ([83a4f6c](https://github.com/postalsys/emailengine/commit/83a4f6cd43ad523062acfed4674a0e8bde194891))
+* print the api.proxy default the server actually applies ([c611661](https://github.com/postalsys/emailengine/commit/c6116611b607dd0e7011e3ed93eefaa45e80c4f4))
+* read EENGINE_WORKERS_EXPORT, which the Workers page already named ([f397492](https://github.com/postalsys/emailengine/commit/f397492cbfd6a05a55b31ce1c1e0518f6a7e7743))
+* read every EENGINE_ variable through the one helper ([b58bfec](https://github.com/postalsys/emailengine/commit/b58bfeccfc18ff39ec841e4e737a4a1299cc499d))
+* record a delivery failure the SMTP error table cannot describe ([01d749f](https://github.com/postalsys/emailengine/commit/01d749f7c3d67d54af0a5abbdfab0f52ec69e233))
+* report a parked IMAP account as an IMAP account ([0be8f56](https://github.com/postalsys/emailengine/commit/0be8f568719143919c2fa67300969a300050a15c))
+* run the Docker Compose command setup-production.sh checked for ([e0e7272](https://github.com/postalsys/emailengine/commit/e0e7272bd481ca5ce6362ee559fdaca04f3730b1))
+* say that a Graph subscription failure is what connectError can mean ([a073622](https://github.com/postalsys/emailengine/commit/a0736226cdb4b7ef59bbb6f1b9221035575280f7))
+* say what happens to the workers when there is no active license ([0b97e05](https://github.com/postalsys/emailengine/commit/0b97e056bda19904b385b8441c5c72eca74d8392))
+* say what makes an OAuth2 app API-based ([d54f8eb](https://github.com/postalsys/emailengine/commit/d54f8eb51ada78844418ee0d09509339f8a2f2ae))
+* say when a file-backed secret resolves differently than it used to ([f4712fa](https://github.com/postalsys/emailengine/commit/f4712fa1b58608a4141f0b3e8c9c7231307db477))
+* stop a failed quota lookup from failing the account it belongs to ([dd45dac](https://github.com/postalsys/emailengine/commit/dd45dac933dbb11f27eb2ad41b6eba2ca2e4985d))
+* stop advertising verify_oauth2_app to an account-bound MCP credential ([441dc3f](https://github.com/postalsys/emailengine/commit/441dc3f00b3290355e49e295795c36b576fe2f04))
+* stop the account form wiping the folder overrides it does not show ([fc3d5eb](https://github.com/postalsys/emailengine/commit/fc3d5eb7ccc74ef3d3a2d01416fce0641828ef1a))
+* strip skipped scopes on every Microsoft cloud, not just the global one ([d74ab26](https://github.com/postalsys/emailengine/commit/d74ab260347424d9cd3b95954ddd09a18a06d513))
+* tighten the MCP account binding, result cap, outbox retry time and CLI scopes ([a54a448](https://github.com/postalsys/emailengine/commit/a54a448294b17eaa84635ffc1ebb6e7f03561b37))
+* verify the hd claim for a Workspace-only OAuth2 application ([5fbb322](https://github.com/postalsys/emailengine/commit/5fbb3228d634f65dab654bd9370d54611e2f0981))
+
+## [2.82.0](https://github.com/postalsys/emailengine/compare/v2.81.2...v2.82.0) (2026-10-01)
+
+
+### Features
+
+* check incoming mail in code before the AI reads it, and pick the model from a list that says what each is for ([cf6f3a6](https://github.com/postalsys/emailengine/commit/cf6f3a6fda2d7c67a7f178b9c10e5014fc497e48))
+* deliver the AI summary as the model returned it, and count its usage ([854ef18](https://github.com/postalsys/emailengine/commit/854ef18f1f8969bdcabe34b5a3a99c6ee2fc71e8))
+* remove embeddings generation ([f4ddd90](https://github.com/postalsys/emailengine/commit/f4ddd908326bf6489ebbbdbf3421a291043ce8f0))
+* remove the Document Store ([56df159](https://github.com/postalsys/emailengine/commit/56df159e4838d7b3052dadb8c30d8ac1e85f4e12))
+
+
+### Bug Fixes
+
+* assert the literal cap on the continuations sent before the refusal ([1aa24dc](https://github.com/postalsys/emailengine/commit/1aa24dc9d6cbd2a2b8b33b4dc8f5fd328ab435bb))
+* close the findings of the 2026-09-28 codebase audit ([2db748f](https://github.com/postalsys/emailengine/commit/2db748fc9879d577d3a9634fd6676149c91c1219))
+* count announced literals against the IMAP proxy cap at continuation time ([51b73d2](https://github.com/postalsys/emailengine/commit/51b73d2f498e2d1fcd85861104ad89f65f184879))
+* **deps:** update libmime, mailsplit, imapflow, mailparser and email-ai-tools ([943d2f5](https://github.com/postalsys/emailengine/commit/943d2f5891a88ff040fc2b7b3eb590c16cc498c6))
+* **deps:** update nodemailer, smtp-server, mailparser, email-content and email-ai-tools ([af7aa9f](https://github.com/postalsys/emailengine/commit/af7aa9f5a46fb20409c9d8a3bd64be63c6593700))
+* drop the trusted authentication servers setting from the AI page ([0b01c7e](https://github.com/postalsys/emailengine/commit/0b01c7e04c80e4dc60bf3bcf6b11e3114e9bd9ff))
+* **imap:** measure the stale view quiet period from the UIDNEXT the primary knows ([a3044a1](https://github.com/postalsys/emailengine/commit/a3044a1ddbdae50298ebc3f61a909102360548dd))
+* **imap:** reconnect a primary connection whose view of the main mailbox stopped moving ([442955c](https://github.com/postalsys/emailengine/commit/442955c41ef2f0fa4898e089056d2ee9fa7a2fdd))
+* match the model picker's search term by term and rank the answers ([632754e](https://github.com/postalsys/emailengine/commit/632754e3e2110431caedb6f6ba391a3367b58df9))
+* **outlook:** keep draft replies threaded on MS Graph accounts ([1ec3c6a](https://github.com/postalsys/emailengine/commit/1ec3c6a1485ee4fd649060e6fd2f137b01d87975))
+* read the browse page session token from its hidden input in the e2e spec ([eea4a58](https://github.com/postalsys/emailengine/commit/eea4a58d5d15779c322fa52b9cc03b14284f2104))
+* update ImapFlow to 2.2.1 ([a007b46](https://github.com/postalsys/emailengine/commit/a007b46ab68add12486ad11e6bef84db53777974))
+* use only FIPS-approved primitives, so an instance runs on a host whose OpenSSL is in FIPS mode ([5070de0](https://github.com/postalsys/emailengine/commit/5070de07d5ac4c64bfa252766b965e9602407497))
+
+## [2.81.2](https://github.com/postalsys/emailengine/compare/v2.81.1...v2.81.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* **api:** check isBounce for messages in the Inbox only ([de05eff](https://github.com/postalsys/emailengine/commit/de05eff7d684cd7beeb227a912afa6aa0988b421))
+* **api:** decide isBounce at fetch time instead of storing a marker ([2c81311](https://github.com/postalsys/emailengine/commit/2c813117f95757c6cf656ae3f904042c3b458a7a))
+* **api:** remove the bounces field and the store behind it ([b67acb9](https://github.com/postalsys/emailengine/commit/b67acb9618754a108e32e4bafbef0b05d4773ade))
+* **api:** report isBounce and relatedMessageId in message responses ([b551bfd](https://github.com/postalsys/emailengine/commit/b551bfd7457466e8f51ff77540d0bb4afd59eb21))
+* **deps:** update dependencies, hold @sentry/node at 10.x ([6c74381](https://github.com/postalsys/emailengine/commit/6c7438108559fa5eef36a022756515f623ac965f))
+* **deps:** update imapflow to 2.0.6 ([07d5ea7](https://github.com/postalsys/emailengine/commit/07d5ea7eb42cdb01fd9a091db043837ecd8e58d3))
+* **deps:** update imapflow to 2.1.0, dedupe nodemailer and undici ([13da944](https://github.com/postalsys/emailengine/commit/13da944e7ffee2943a91bfd4a0ade21b60c8f2b1))
+* **docker:** bump the node:24-alpine base image digest ([0cb6d23](https://github.com/postalsys/emailengine/commit/0cb6d23a8e975e09bce10158434332b3f1131e89))
+* **gmail:** retry new messages that fail on a transient API error ([f7d45f9](https://github.com/postalsys/emailengine/commit/f7d45f9edc1afaaf44b0d145caddb13aef0e76c1))
+* **imap:** run the shared arrival checks instead of IMAP wrappers ([26cd53c](https://github.com/postalsys/emailengine/commit/26cd53c771ed8f6abbd740c22ef62319b54401a8))
+* **imap:** share the bounce shape check with the API clients ([a0302a2](https://github.com/postalsys/emailengine/commit/a0302a2ff40ab62f8fd5dfc68f26cbc9175d0059))
+* **imap:** share the complaint shape check with the API clients ([90a9825](https://github.com/postalsys/emailengine/commit/90a9825044fc024cf5977c5c56ccf5a484973cd4))
+* **imap:** share the delivery-report shape check with the API clients ([aa777df](https://github.com/postalsys/emailengine/commit/aa777dfefbe8047f7b7a6df7000fb95b89189a2c))
+* keep assigning accounts when an IMAP worker exits mid-assignment ([ed87eee](https://github.com/postalsys/emailengine/commit/ed87eee43ff6eba3b53d6556d7fc33e6ebfca0dc))
+* keep throttled IMAP arrivals and harden the deferred change retries ([4830bb4](https://github.com/postalsys/emailengine/commit/4830bb451c5ee166c2ee0e6beef9cc759424341a))
+* **outlook:** recover missed Graph notifications durably ([ff0eca6](https://github.com/postalsys/emailengine/commit/ff0eca6dbdfdbda34776b0b5c92b9c07cfbe5d04))
+* **outlook:** retry change notifications that fail on a transient Graph error ([9d1301c](https://github.com/postalsys/emailengine/commit/9d1301cff3bd2b505e0d3402c40c2eefaf1c44ed))
+* **submit:** warn when the sent copy is skipped for lack of a Sent mailbox ([47fd10b](https://github.com/postalsys/emailengine/commit/47fd10bdef5dc732265b10619122456d574942de))
+* **sync:** defer Gmail and Graph changes that fail on a transient error ([b778adf](https://github.com/postalsys/emailengine/commit/b778adfab637ce7b2afc801e7eedd4f31f3a50a9))
+
+## [2.81.1](https://github.com/postalsys/emailengine/compare/v2.81.0...v2.81.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* update dependencies to latest versions ([cd8b72c](https://github.com/postalsys/emailengine/commit/cd8b72c21aa07f8437aa0aebaccbbb40c7ea9c0a))
+
+## [2.81.0](https://github.com/postalsys/emailengine/compare/v2.80.1...v2.81.0) (2026-09-13)
+
+
+### Features
+
+* **autodiscovery:** let the API carry credentials and the hosted form skip the settings step ([f78b62e](https://github.com/postalsys/emailengine/commit/f78b62ec910899f7de83fbc972a44858f024b6ac))
+
+
+### Bug Fixes
+
+* **api:** skip the server settings step by default for minted setup links ([2c43c60](https://github.com/postalsys/emailengine/commit/2c43c6075614e9765160628a49d1e97f0f94f1c6))
+* **deps:** move the packages that pin nodemailer onto 10.0.9 and dedupe the tree ([db2abd8](https://github.com/postalsys/emailengine/commit/db2abd80319f9ab61406b1d222e357ffbd9ec8b0))
+* **deps:** update bull-board and simplewebauthn ([66ab196](https://github.com/postalsys/emailengine/commit/66ab196f623041a048b32817ad28352e97b3b336))
+* **deps:** update joi-messages to 1.1.3 for the Joi 18 validation messages ([c62b34c](https://github.com/postalsys/emailengine/commit/c62b34cc56fd9ca221cdf1e990ac6145c7536236))
+* **deps:** update nodemailer to 10.0.8 across the packages that pin it ([6dc08f7](https://github.com/postalsys/emailengine/commit/6dc08f7ae47db4a7f537d8a13c3004aa9983a690))
+* **docker:** bump the node:24-alpine base image digest ([7e6808b](https://github.com/postalsys/emailengine/commit/7e6808be64cc099611746492c71fad2b701bdfcf))
+* **docker:** health-check the container over 127.0.0.1, not localhost ([31ab205](https://github.com/postalsys/emailengine/commit/31ab2051ca22d2da45c2079f6581babbdebb0659))
+* **docker:** pass the commit hash as a build arg instead of reading a branch ref ([c2c03c8](https://github.com/postalsys/emailengine/commit/c2c03c884ce061ad215ae612eaaafef00bf513ba))
+* **i18n:** fill the empty plural forms in the certificate count ([d51803d](https://github.com/postalsys/emailengine/commit/d51803d89125f962235d05cac5c2f5a1e80900e2))
+* **i18n:** improve translation wording and consistency ([576e692](https://github.com/postalsys/emailengine/commit/576e6924432beef0d0261a578494d703cf04d397))
+* **i18n:** translate the remaining hosted form labels and refresh the catalogs ([b04784c](https://github.com/postalsys/emailengine/commit/b04784ce7eed212b324b4e4dd39a9afcafd47da3))
+* **sentry:** report the release with its package prefix so Sentry can order versions ([7bda29f](https://github.com/postalsys/emailengine/commit/7bda29fdeb6b59bade892570971c0ca12f892a44))
+* **sso:** stop the forced-SSO hand-off flashing the login page before it leaves ([9e64618](https://github.com/postalsys/emailengine/commit/9e646188feaced2ea77342abd4e6de49ad6ed169))
+* **test:** fail a stalled test run instead of waiting for the CI job to be killed ([9631512](https://github.com/postalsys/emailengine/commit/9631512af363dd0b33b28f4c2ce4e2f996042b9d))
+* **test:** follow the admin copy pass into the two specs it broke ([1524368](https://github.com/postalsys/emailengine/commit/1524368de4b49a176b4338e810503bdca08fac3d))
+* **test:** force the test runner to exit so one leaked handle cannot hang a tier ([bbdccdb](https://github.com/postalsys/emailengine/commit/bbdccdb6af747ff96ee70ce688c275886d528d8c))
+* **translations:** add Spanish, Italian and Turkish for the public UI ([d2089c3](https://github.com/postalsys/emailengine/commit/d2089c3c6ab0a4b0c49e2d76a4fa62dc642bdd58))
+* **translations:** add Swedish for the public UI ([048c086](https://github.com/postalsys/emailengine/commit/048c0869b1645548be61cb77c0149963a8ac21af))
+* **ui:** make the admin copy consistent and say what each screen actually does ([d7bb57d](https://github.com/postalsys/emailengine/commit/d7bb57d949c8836c6946d3a9f53d3147e3e89ccb))
+* **ui:** make the admin pages read on a phone and stop badges printing over their neighbours ([46e6d49](https://github.com/postalsys/emailengine/commit/46e6d49424a55bb31bbcfe01e759e29484965642))
+* **ui:** refine admin form labels and guidance ([eaa7d00](https://github.com/postalsys/emailengine/commit/eaa7d0060f771136c0f248b8e906a628ce98795b))
+
+## [2.80.1](https://github.com/postalsys/emailengine/compare/v2.80.0...v2.80.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **accounts:** stop a delete in the startup window from reporting a failure ([b41896b](https://github.com/postalsys/emailengine/commit/b41896b6706a8165b5481db39abff2f4e3299a13))
+* **admin:** keep the admin UI working behind an HTML-rewriting CDN ([c2e6596](https://github.com/postalsys/emailengine/commit/c2e659687f909e8eaa416407b0fb0b4e5c19ba09))
+* **deps:** update imapflow to 2.0.1 for the Exchange Online IMAP4rev2 advertisement ([a6b1b8f](https://github.com/postalsys/emailengine/commit/a6b1b8f0408a404aca76c8d89e894538eb97f00f))
+* **deps:** update imapflow to 2.0.2, bull-board to 9.10.0 and @postalsys/certs to 1.4.1 ([2817f41](https://github.com/postalsys/emailengine/commit/2817f4134437f75e8c1a27049c850d28adc6351c))
+* **deps:** update nodemailer to 10.0.3 across the packages that pin it ([a791216](https://github.com/postalsys/emailengine/commit/a7912162425c8d7e5bcd3ae020ca875b9d950c91))
+* **imap:** report a login the server could not serve as a connection failure, and announce a repeated failure once ([832d6ab](https://github.com/postalsys/emailengine/commit/832d6ab966e0ad0f490aa3137f8130520d12de13))
+* **mcp:** add the mcp-manage surface scope ([4f5043c](https://github.com/postalsys/emailengine/commit/4f5043c0dc118e73fe90cc0851cb110856d6239e))
+* **mcp:** expose the instance management tools ([08f35a8](https://github.com/postalsys/emailengine/commit/08f35a8a1433bfbf1c14d4f03051876bd7bd2571))
+* **mcp:** keep the connection check out of the Observe level and the service URL out of a settings grant ([e85de25](https://github.com/postalsys/emailengine/commit/e85de254950f6d65e8c342f4f7b371fb96428704))
+* **mcp:** keep the TLS mode and mail certificate checking out of a settings grant ([ad6428f](https://github.com/postalsys/emailengine/commit/ad6428ff5c4bdee1421fc1568a6b1810a9598894))
+* **mcp:** offer instance management first on the consent prompt, the generator and the token form ([6022a5c](https://github.com/postalsys/emailengine/commit/6022a5cfa3d792d8b3fe0e08bfa3bfa324d7a500))
+* **mcp:** read every MCP access decision off one section table ([136c860](https://github.com/postalsys/emailengine/commit/136c860f7586a23c644899526c995ff2533034cd))
+* **tls:** let each listener choose the certificate it presents by default ([056ff8f](https://github.com/postalsys/emailengine/commit/056ff8feb4b9cc990b08c8c0484bac0c044a1e28))
+* **tokens:** accept a per-section grant list on token permissions ([ca6ff34](https://github.com/postalsys/emailengine/commit/ca6ff34f8a13cab3f65c614ab5df4644b3bdfa09))
+* **tokens:** keep a record that names no groups out of the sections the admin split created ([d817416](https://github.com/postalsys/emailengine/commit/d81741690a32c26329f0e993bb1f0ce16414f2dc))
+* **tokens:** keep the built-in listeners and the AI endpoint out of a settings grant ([d069dd7](https://github.com/postalsys/emailengine/commit/d069dd7e706f39791e0591e134286cb17e699f66))
+* **tokens:** make the management endpoints grantable in their own sections ([4f975bf](https://github.com/postalsys/emailengine/commit/4f975bf72aeb818bcb3b64c98473f7eef92d040b))
+* **ui:** rebuild the stylesheet so the MCP configuration page gets its section spacing ([e99bd30](https://github.com/postalsys/emailengine/commit/e99bd30644442ced19bfa82f4139076352db7c17))
+
+## [2.80.0](https://github.com/postalsys/emailengine/compare/v2.79.9...v2.80.0) (2026-09-09)
+
+
+### Features
+
+* **tls:** manage certificates on their own page, with a real self-signed fallback ([42a1546](https://github.com/postalsys/emailengine/commit/42a154616fdb63b7c3c38de89cffd73110a45526))
+
+
+### Bug Fixes
+
+* **accounts:** keep the authentication server's status out of API and IMAP proxy answers ([79264b0](https://github.com/postalsys/emailengine/commit/79264b0ce471b0dcbc6764e7b1b51b637d2b49f7))
+* **accounts:** stop a credential-service blip from flooding auth webhooks ([51f4f35](https://github.com/postalsys/emailengine/commit/51f4f35c95b6527a9c93ef30eda8b55c629369fc))
+* **admin:** let the account page re-authenticate an OAuth2 account again ([56245f7](https://github.com/postalsys/emailengine/commit/56245f7224eaa998143773a6847d83a9cb39b108))
+* **admin:** stop forced SSO from silently swallowing admin form submissions ([9653c2d](https://github.com/postalsys/emailengine/commit/9653c2db2c1ed6ef0557396b673b2b8a32c94af0))
+* **api:** reload the TLS listeners only when a settings write changed a value ([b2052ac](https://github.com/postalsys/emailengine/commit/b2052acb52cec2063b66af00dab94246edcfffeb))
+* **autodiscovery:** keep a usable server entry when a hostless sibling follows it ([3796668](https://github.com/postalsys/emailengine/commit/37966686762ce7435314e8da25d7ba26add42c6f))
+* **autodiscovery:** make Exchange autodiscovery work at all ([271d85c](https://github.com/postalsys/emailengine/commit/271d85c76349c5ee7259dd18da9d4a132caee0c1))
+* **autodiscovery:** stop a result that names no server from ending a lookup ([e698c3c](https://github.com/postalsys/emailengine/commit/e698c3c2737f464e1d10be2099fb18a8640c7708))
+* **deps:** update @bull-board/api and @bull-board/hapi to 9.9.0 ([14720fb](https://github.com/postalsys/emailengine/commit/14720fbd84a58d405119f865715a672f9b319091))
+* **deps:** update @postalsys/certs to 1.2.1 ([eb2c958](https://github.com/postalsys/emailengine/commit/eb2c9580e2437a317eeea8742ddf9af5c88434e5))
+* **deps:** update @postalsys/certs to 1.3.0 ([08c2d1b](https://github.com/postalsys/emailengine/commit/08c2d1b27ed4aa13bb8130a611dfa73ab164d82b))
+* **gmail:** clear a stale watch failure once push is no longer configured ([b5884fe](https://github.com/postalsys/emailengine/commit/b5884fe886260cb6578db91a7425a37be7261f34))
+* **gmail:** report no watch for an account whose application has no Pub/Sub app ([7e53a20](https://github.com/postalsys/emailengine/commit/7e53a20c45017e8a6484910507ecfd72c0ef75c6))
+* **gmail:** stop a dead Pub/Sub watch from being invisible and self-perpetuating ([206e17d](https://github.com/postalsys/emailengine/commit/206e17da9c74ce10146df51ba40db7dab94aa273))
+* **imap:** announce a folder that appeared while the primary was down ([2afd207](https://github.com/postalsys/emailengine/commit/2afd2070d69e6bb3b791a06a8a14b40ea0696641))
+* **imap:** announce the deletion of a tracked folder missing from the stored listing ([2ead02f](https://github.com/postalsys/emailengine/commit/2ead02f858ac3472f1e86a2984d6fdaf0163a33f))
+* **imap:** answer a malformed message identifier instead of throwing at it ([9be0c9c](https://github.com/postalsys/emailengine/commit/9be0c9ca12a2e7c960b25eb971e405756a766ab6))
+* **imap:** collect the connection-closed error and the attachment download ([8d0e589](https://github.com/postalsys/emailengine/commit/8d0e58946b47054aaac626ec72b0a59ad0f0682a))
+* **imap:** keep a folder found by a pass that could not register it ([0971a4d](https://github.com/postalsys/emailengine/commit/0971a4dee15c7d10dc31f02b5e01e67bb8192e3d))
+* **imap:** match configured folder paths against the spelling the server reports ([328e56a](https://github.com/postalsys/emailengine/commit/328e56a3684530b94b056abbf25d7881417cd470))
+* **imap:** restore the first-sync backfill and the return to the main mailbox ([b0b229c](https://github.com/postalsys/emailengine/commit/b0b229c12f41a0a8313462bafc638e22020673f0))
+* **imap:** stop a disconnect mid-sync from announcing a message without its images ([fab2c15](https://github.com/postalsys/emailengine/commit/fab2c1560a1782e708967afb8bf916bd5e634574))
+* **imap:** stop a read-only folder listing from swallowing the mailboxNew event ([ab76f0d](https://github.com/postalsys/emailengine/commit/ab76f0ddc77bbcc321d1cb207695a2d4e145ecba))
+* **imap:** stop the duplicate mailboxDeleted and the dropped inbox counters ([edd0b0c](https://github.com/postalsys/emailengine/commit/edd0b0cf9e7d2073ab7623bcd6e7fe60bf5dc4c1))
+* **outlook:** keep retrying a subscription the fast retries gave up on ([9583780](https://github.com/postalsys/emailengine/commit/9583780427310e9acdbdbf8351edfc7d5e97bf3d))
+* **outlook:** report an account that can no longer subscribe to changes ([9da07ad](https://github.com/postalsys/emailengine/commit/9da07adc5f9b21aab827f609c6ae1cb98120cdbe))
+* **outlook:** stop a subscription recovery from dropping a newer failure ([bd613fe](https://github.com/postalsys/emailengine/commit/bd613fe829bfa0dd51875752d584947ed623956f))
+* **outlook:** take a subscription report back when the subscription is healthy, keep it across a login ([9bccba8](https://github.com/postalsys/emailengine/commit/9bccba8537c3da969588a0b720b8f5fa2413b3d5))
+* **tls:** let an operator point ACME at a different CA without editing source ([13b382f](https://github.com/postalsys/emailengine/commit/13b382f6e501a3ec34985b3dd3f0c4c542d8716f))
+* **tls:** order a first certificate only for a listener that would serve it ([950185f](https://github.com/postalsys/emailengine/commit/950185fbaed09f050020f136d6673f4e4cf83fc8))
+* **tls:** read the failed renewal from the certificate library instead of inferring it ([c0e4bfd](https://github.com/postalsys/emailengine/commit/c0e4bfd167b3783dcb9d25db9b83a15208779d53))
+* **tls:** redesign the certificates page around what each listener serves ([7dc42ba](https://github.com/postalsys/emailengine/commit/7dc42ba524f91310a36d991d7535e8a0837d6537))
+* **tls:** replace the abandoned ACME stack and ask the CA when to renew ([9364eeb](https://github.com/postalsys/emailengine/commit/9364eebb30921675f3b3f95a03de66504e9ef342))
+* **tls:** report a failed renewal, converge concurrent self-signed replacement ([b1ac9e3](https://github.com/postalsys/emailengine/commit/b1ac9e3102827036a717de695f5c24697f51c5b3))
+* **tls:** report a half-set ACME override, drop the unused listener restart ([fe7771e](https://github.com/postalsys/emailengine/commit/fe7771eb38e2d8cdfb62353d1375d0b52df90eac))
+* **tls:** say plainly that the API listener serves HTTP by default ([31e75ae](https://github.com/postalsys/emailengine/commit/31e75ae8f0a124890b6727e733cdaa17ddda5ec4))
+* **tls:** serve an encrypted operator key, keep the listener settings on reload ([75d16d9](https://github.com/postalsys/emailengine/commit/75d16d93527606708cf0b19ba89288f54382b4e6))
+* **tls:** stop a repeated request from starting a second order, report the listener's own state ([845d4e7](https://github.com/postalsys/emailengine/commit/845d4e7729ff05c8e042607c4639b2c808f88d10))
+
+## [2.79.9](https://github.com/postalsys/emailengine/compare/v2.79.8...v2.79.9) (2026-09-07)
+
+
+### Bug Fixes
+
+* **admin-ui:** remove the unreferenced static landing page ([eea5024](https://github.com/postalsys/emailengine/commit/eea5024e701d9633d1d19e14fc16f9512b73327f))
+* **admin-ui:** render the delivery-test and address-list fragments server-side ([4443c32](https://github.com/postalsys/emailengine/commit/4443c3211c76548ac00041752b22ce52b4e6f479))
+* **deps:** collapse the duplicate nodemailer copies onto version 10 ([661a2ed](https://github.com/postalsys/emailengine/commit/661a2ed29325e775ecdbd86861428e1bf26c45a4))
+* **deps:** update dependencies ([2f32929](https://github.com/postalsys/emailengine/commit/2f32929fe2624a393516701aad48b41a13b78c8e))
+* **deps:** update dependencies and collapse the duplicate nodemailer copies ([09553a3](https://github.com/postalsys/emailengine/commit/09553a35817b3da040eca8fa3795ed5b9dcf470a))
+* **deps:** update dependencies and drop the message browser stylesheet exception ([1933e5d](https://github.com/postalsys/emailengine/commit/1933e5d9952fab26fbd3f4a630adfc0ca341717a))
+* **deps:** update dependencies, picking up the dispatcher options of certs and email-ai-tools ([28ecf49](https://github.com/postalsys/emailengine/commit/28ecf499362d02bcfb7c7811e12757093e856667))
+* **docker:** move the image to Node 24 and drop npm from the runtime layer ([ad190d3](https://github.com/postalsys/emailengine/commit/ad190d34972004216a612d25f32403054bd5639e))
+* **proxy:** route every outbound HTTP request through the global proxy ([2ac1fb6](https://github.com/postalsys/emailengine/commit/2ac1fb65bb2db9143747cb160e4c3dc5e8b89086))
+* refuse to start below Node 20, the floor package.json declares ([1bf24eb](https://github.com/postalsys/emailengine/commit/1bf24eb5988164236ced87f64a528b12ac9af9f3))
+* **security:** require a nonce on stylesheets and tag the machine-facing routes ([cbcd4cb](https://github.com/postalsys/emailengine/commit/cbcd4cb16896aac91bce0c58feb112d809828cd5))
+* **security:** send a nonce-based Content-Security-Policy and the remaining security headers ([4f2900e](https://github.com/postalsys/emailengine/commit/4f2900e5de6d6aeac2333d774ea3977793f99e22))
+* **security:** vet autodiscovery egress, throttle proxy logins and add response headers ([74856cf](https://github.com/postalsys/emailengine/commit/74856cf64a0231ee7e38bbfb140639e29632aaa9))
+* **submit:** drop an outbox entry that does not decode to a message ([e7e6618](https://github.com/postalsys/emailengine/commit/e7e6618ec31032c3d88c2bec3f89ffa70c13970d))
+
+## [2.79.8](https://github.com/postalsys/emailengine/compare/v2.79.7...v2.79.8) (2026-09-02)
+
+
+### Bug Fixes
+
+* **admin-ui:** keep form input on a failed save and fix the misrouted webhook form ([e01d8a2](https://github.com/postalsys/emailengine/commit/e01d8a2021fde0e0122b5dc98a8f539128c8a4af))
+* **api:** keep template formats on update and answer malformed ids with 4xx ([3eb9868](https://github.com/postalsys/emailengine/commit/3eb9868fd5f2639e1ad40a26ec2e7a91e308c2e3))
+* **auth:** secure every API worker on the first password and tighten the admin second factor ([0adb3b4](https://github.com/postalsys/emailengine/commit/0adb3b46baf29d7125a81b9ec61a7e091b7826da))
+* **config:** stop prepared configuration from surprising operators on restart ([0f4ab9a](https://github.com/postalsys/emailengine/commit/0f4ab9ab78e4fa4e648c9384c6d0a7fc8b80a937))
+* **delivery:** treat delay notices as delays and unwrap embedded IPv4 in the egress filter ([37ccc5c](https://github.com/postalsys/emailengine/commit/37ccc5c2ccab1c5ca301fec482d2e09cb2c9b352))
+* **deps:** update imapflow to 1.7.8 for the download teardown worker deaths ([18d68b2](https://github.com/postalsys/emailengine/commit/18d68b29893c20a59ccec91526e4e5a420e73c0d))
+* **deps:** update nodemailer to 9.1.1 across the dependency tree ([e67641e](https://github.com/postalsys/emailengine/commit/e67641e54c655a4a71b61919ed4098deb908b2b5))
+* **email-client:** close the gaps between the IMAP, Gmail and Graph clients ([47f4623](https://github.com/postalsys/emailengine/commit/47f4623ac0ef3f483fbebbb33d935e141f17d4b4))
+* **submit:** do not send a message again when a stalled job is re-run ([91c7c00](https://github.com/postalsys/emailengine/commit/91c7c0045d858b987a18a92afd934afdf8b0f3d1))
+* **tracking:** route a text-node decoder failure to the rewrite's rejection path ([13e9f9f](https://github.com/postalsys/emailengine/commit/13e9f9fd71a5933677adb428d17c77af3a0ee691))
+* **webhooks:** send Basic-auth credentials verbatim and deliver each attempt once ([c6d1242](https://github.com/postalsys/emailengine/commit/c6d1242b737bc215d35284f70493afa064b8cde7))
+
+## [2.79.7](https://github.com/postalsys/emailengine/compare/v2.79.6...v2.79.7) (2026-08-31)
+
+
+### Bug Fixes
+
+* bind WebAuthn challenges to the ceremony that minted them ([6b2073b](https://github.com/postalsys/emailengine/commit/6b2073b5c8e50ab75a02d2c6a0f54a43d2c295e6))
+* **deps:** collapse encoding-japanese to a single copy for the CP932 areas ([8ae2109](https://github.com/postalsys/emailengine/commit/8ae21099dd86a3dd9467dc0ca4ead9880e147e27))
+* **deps:** update dependencies and collapse nodemailer to a single copy ([cf814e9](https://github.com/postalsys/emailengine/commit/cf814e9e4c91c4430fce01687ead6bdb38bc3879))
+* retry OIDC discovery instead of disabling SSO for the process lifetime ([dbbbf43](https://github.com/postalsys/emailengine/commit/dbbbf432ed6593b7fd5457e8fc6d2f8d03316ea6))
+* **tls:** renew certificates before they expire, not a month after ([fa150e8](https://github.com/postalsys/emailengine/commit/fa150e87bbe7aa317847f3d676053ecc99dc69f1))
+* **ui:** disable the stored-log download when an account has no logs ([5137b71](https://github.com/postalsys/emailengine/commit/5137b71bbaf9a935b91437a53b7b369237a445a2))
+* **ui:** move the passkey list onto a page of its own ([7cb42c4](https://github.com/postalsys/emailengine/commit/7cb42c4dc1a8ece1468f8754f37cd9f763c97130))
+* **ui:** show a busy state on the buttons that start slow work ([6c63479](https://github.com/postalsys/emailengine/commit/6c6347946bed0c06f836826de0425b328740bf81))
+* **ui:** stop offering to clear stored logs an account does not have ([e02f09a](https://github.com/postalsys/emailengine/commit/e02f09a596b5d0a1f40e37297d86aea7a046b813))
+
+## [2.79.6](https://github.com/postalsys/emailengine/compare/v2.79.5...v2.79.6) (2026-08-27)
+
+
+### Bug Fixes
+
+* **deps:** update nodemailer to 9.0.6 and refresh dependencies ([85ce711](https://github.com/postalsys/emailengine/commit/85ce7116d766d3c9b81b77b3d39496ca6119c2d2))
+* **imap:** recover addresses when the ENVELOPE reports an unusable one ([78d5fbd](https://github.com/postalsys/emailengine/commit/78d5fbd62211d79b4c108622e1ad771b34156d06))
+* **reference:** correct three wrong provider claims in the API documentation ([df9fa95](https://github.com/postalsys/emailengine/commit/df9fa95bf542cf086f34d215edd48bb2007e84d6))
+
+## [2.79.5](https://github.com/postalsys/emailengine/compare/v2.79.4...v2.79.5) (2026-08-26)
+
+
+### Bug Fixes
+
+* **accounts:** bring back the OAuth2 accounts 2.79.3 switched off ([e55520c](https://github.com/postalsys/emailengine/commit/e55520c8a669677a5af3e4ed726ecc0e329ad84a))
+* **accounts:** close the gaps in the auth-failure park for OAuth2 accounts ([6a015b6](https://github.com/postalsys/emailengine/commit/6a015b6ba10a1e6a39575fa96539d311c00aa958))
+
+## [2.79.4](https://github.com/postalsys/emailengine/compare/v2.79.3...v2.79.4) (2026-08-25)
+
+
+### Bug Fixes
+
+* **accounts:** let re-authorization bring back an account the safety net switched off ([b4f04f5](https://github.com/postalsys/emailengine/commit/b4f04f54ce37342c69bbcda65f8b5eb1a331423c))
+* **accounts:** report a switched-off account, and stop pretending to reconnect it ([6c19ea2](https://github.com/postalsys/emailengine/commit/6c19ea2cf05ea49d212b8fdbcd12aa9d8a6e36f5))
+* **admin:** serve the SBOM download from the admin surface ([96aa63e](https://github.com/postalsys/emailengine/commit/96aa63ee1aaa409d1f279b4fffa89e1e04317484))
+
+## [2.79.3](https://github.com/postalsys/emailengine/compare/v2.79.2...v2.79.3) (2026-08-24)
+
+
+### Upgrade note
+
+The authentication-failure safety net now applies to OAuth2 accounts. It is
+supposed to stop an account retrying after `EENGINE_MAX_IMAP_AUTH_FAILURE_TIME`
+of continuous authentication failures (3 days by default), but it was gated on
+an IMAP configuration block that OAuth2 accounts do not have, so for Gmail and
+Microsoft accounts it never fired and a revoked refresh token was retried
+indefinitely.
+
+On an instance that has accumulated such accounts, every one already past the
+threshold is disabled on its next failed refresh, so expect a burst of
+`authenticationError` webhooks shortly after the restart and a matching drop in
+token-endpoint traffic. A disabled account stops connecting and shows in the
+admin UI as "Connection failed"; re-authorizing it lifts the flag and reconnects
+it, with no manual cleanup. If you would rather stage that, raise
+`EENGINE_MAX_IMAP_AUTH_FAILURE_TIME` before upgrading.
+
+### Bug Fixes
+
+* **accounts:** make the auth-failure auto-disable work for OAuth2 accounts ([ad52d95](https://github.com/postalsys/emailengine/commit/ad52d9526142d9c84c024dd1e78926c2055e3ded))
+* **imap:** keep a connection-scoped rejection from silently killing an IMAP worker ([481c181](https://github.com/postalsys/emailengine/commit/481c181b7ab6d59e87d2c2a5b653dedb229340d7))
+* **logger:** keep the late-handler diagnostic when error tracking is on ([8c5def2](https://github.com/postalsys/emailengine/commit/8c5def28cf53238bd43ae413e809ab64ce89fee6))
+
+
+### Dependencies
+
+Bundled library updates carrying fixes of their own, which the commit prefixes
+above do not surface:
+
+* **imapflow 1.7.2 -> 1.7.6.** Connection errors now name the connection and the
+  site that rejected them, the guard against an unobserved teardown rejection is
+  structural rather than per-site, and an IDLE-break waiter is no longer reported
+  under the command's marker. Also normalizes search dates so an invalid value
+  cannot throw or emit NaN.
+* **mailparser 3.9.15 -> 3.9.16.** Bounds linkify-it scanning of untrusted text
+  bodies, and handles stream-flush errors.
+* **ioredfour 1.4.2 -> 1.4.3.** Moves to ioredis 6, which removes a second copy
+  of ioredis from the dependency tree.
+* **@postalsys/certs 1.0.18, @postalsys/email-ai-tools 1.13.19,
+  @postalsys/email-text-tools 2.4.14, @bull-board 9.4.0**, plus html-to-text and
+  joi deduplication across the tree.
+
+## [2.79.2](https://github.com/postalsys/emailengine/compare/v2.79.1...v2.79.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **api:** confine browse-page session tokens and gate the SBOM ([7f3fc6e](https://github.com/postalsys/emailengine/commit/7f3fc6e464a6161286e1fa3ccd3cc933db7cf874))
+* **api:** end browse-page session tokens when every session is logged out ([4040773](https://github.com/postalsys/emailengine/commit/40407733c79c4d65a223cc594b925015e201862a))
+* **attachments:** collect cid references in one pass instead of scanning the HTML per attachment ([9dd6b0c](https://github.com/postalsys/emailengine/commit/9dd6b0c17ab6db174ef6cc6777fdee506e57bc3d))
+* **deps:** refresh dependencies ([6e11a55](https://github.com/postalsys/emailengine/commit/6e11a55cd66e2609efb524e3494ad2ee5bcf0a11))
+* **gmail:** stop a killer history entry from looping forever and apply the text size limit on API accounts ([cb6ca8a](https://github.com/postalsys/emailengine/commit/cb6ca8aab406cefbba3fbb9c973c0de30036fc1f))
+* **imap:** recover addresses when the ENVELOPE reports none ([1e83178](https://github.com/postalsys/emailengine/commit/1e83178de8ba3f00250eb5fc90d0d869d294c3ec))
+* **mcp:** advertise only the tools a credential can actually call ([abeb137](https://github.com/postalsys/emailengine/commit/abeb13749fbd103f4d9ef1cf438c13f789780300))
+* **mcp:** carry the required cache hints on modern-era results ([6dd70b9](https://github.com/postalsys/emailengine/commit/6dd70b99d6158d9e0dabc3c9ea3dc3750c4fbf8a))
+* **mcp:** close the defects a deep review found in the MCP surface ([c3fc7ba](https://github.com/postalsys/emailengine/commit/c3fc7ba2dc8b8f8d4eea379ddbdcc788fbf1a9c6))
+* **mcp:** make connecting an agent a one-step operation ([914dff5](https://github.com/postalsys/emailengine/commit/914dff58d423b8e84a29332e74cf023cfbbabfa8))
+* **mcp:** make token restrictions work over MCP and tighten the OAuth edges ([b1f1dc0](https://github.com/postalsys/emailengine/commit/b1f1dc09902a2a68924fd5cec3dbeed070cd871f))
+* **mcp:** narrow the agent tool schemas, and let webSafeHtml skip inlined images ([e381af0](https://github.com/postalsys/emailengine/commit/e381af01e4494532396879651025193ccd0ab969))
+* **mcp:** offer three access levels when connecting an agent, and make its tokens findable ([15e7bda](https://github.com/postalsys/emailengine/commit/15e7bda7a012096785ca2c87f6b580e2eaab8dac))
+* **mcp:** position MCP support as a labeled beta ([a19a612](https://github.com/postalsys/emailengine/commit/a19a6123c5a4f794325ac96d8bade18d473a68fe))
+* **mcp:** return web-safe bodies and infer the bound account ([923bb25](https://github.com/postalsys/emailengine/commit/923bb25d02471fd9e98a8dc7a2008d794682990f))
+* **mcp:** serve the Model Context Protocol at /mcp as an opt-in beta ([1907015](https://github.com/postalsys/emailengine/commit/190701506978df65d410c3652f09e48bb723dfa0))
+* **mcp:** show the tool count wherever an mcp token is minted ([a85d8f6](https://github.com/postalsys/emailengine/commit/a85d8f67f043a01bebdc969401244d95fbbd116c))
+* **mcp:** tell agents how to reply to and forward a message ([a3f17ad](https://github.com/postalsys/emailengine/commit/a3f17adb0ee5ce276347f5cb883bb984e6eeb0a2))
+* **mcp:** update the consent integration test for the access-level radio ([f4b6b18](https://github.com/postalsys/emailengine/commit/f4b6b1877aa1073c3b3b5cbd9144f7c3fe13d6e1))
+* **submit:** stop a reply borrowing recipients it should not have ([1032605](https://github.com/postalsys/emailengine/commit/10326056db2df7839463789215757c36bf45c34d))
+* **ui:** count the MCP tools a bound token actually receives ([5bbdee3](https://github.com/postalsys/emailengine/commit/5bbdee3beb425887d1cc52846252034bf673da80))
+* **ui:** explain the OAuth connector form on the MCP config page ([b7db99a](https://github.com/postalsys/emailengine/commit/b7db99a03a2b466c7b43b0e324441ad851ece6d1))
+* **ui:** give MCP tokens their own access-level editor on the token form ([308a217](https://github.com/postalsys/emailengine/commit/308a2178e994e656ea88674b1dc0b6372723f51a))
+* **ui:** make the MCP pages vendor-neutral and the consent wording plain ([f0f0e8e](https://github.com/postalsys/emailengine/commit/f0f0e8e5c5a49c2add8688eb746b42e1b51a9e4f))
+* **ui:** nest the MCP OAuth switch under the endpoint switch ([bb619b4](https://github.com/postalsys/emailengine/commit/bb619b4e3329b576a7ccae1787687e3f78922191))
+* **ui:** pick an account in the send-test dialog too ([6dcdbb5](https://github.com/postalsys/emailengine/commit/6dcdbb54918dbfcfc3ff78304d80f45fa64436a4))
+* **ui:** pick an account instead of typing its id ([11be805](https://github.com/postalsys/emailengine/commit/11be8057cd8415ed083349ed40f74c390e1ece3a))
+* **ui:** render the MCP client consent page as an authorization prompt ([4626123](https://github.com/postalsys/emailengine/commit/4626123fc72936ea79d6319010b9f181e6ed06b0))
+* **ui:** separate the collapsible cards on the MCP config page ([691f0d4](https://github.com/postalsys/emailengine/commit/691f0d46eec36927fc128c2f72e785401413b4d7))
+* **ui:** show each app's client id in the OAuth2 apps listing ([0cc36e0](https://github.com/postalsys/emailengine/commit/0cc36e0ee7e067ed54df6c04c3c16e048585d02e))
+* **ui:** split the MCP connect tab into connection-method sub-tabs ([ec632bd](https://github.com/postalsys/emailengine/commit/ec632bd75bc9cbe02403dac98099f47e0b6aa50e))
+* **ui:** split the MCP page into Settings and Connect an agent tabs ([301c7d0](https://github.com/postalsys/emailengine/commit/301c7d0ed5d0108c46732752018860290bc27093))
+* **ui:** stack the agent generator fields in one column ([9a1ab8e](https://github.com/postalsys/emailengine/commit/9a1ab8ec7f890be7707966bc72e1aec4d7dcdf29))
+* **windows:** set CompanyName and ship a multi-size icon in the exe ([33b7842](https://github.com/postalsys/emailengine/commit/33b784211b5d630ae4b716662edc2b5008c75752))
+
+## [2.79.1](https://github.com/postalsys/emailengine/compare/v2.79.0...v2.79.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **admin:** flag webhook routes that can never deliver on the account page ([416f612](https://github.com/postalsys/emailengine/commit/416f612b616380371f825d673c0b80ad0f975924))
+* **admin:** percent-encode an account or gateway ID interpolated into a link ([522d267](https://github.com/postalsys/emailengine/commit/522d2673eeb33c2f9cc85e7faf78550b99afe361))
+* **admin:** percent-encode every ID a redirect interpolates ([d21c2ab](https://github.com/postalsys/emailengine/commit/d21c2ab5d5892fb94e85a2962a2a252fc865a03d))
+* **admin:** probe a listing's accounts in one round trip ([a9a4c8a](https://github.com/postalsys/emailengine/commit/a9a4c8aeeb30b16b09f22e62847bb93671e8e46d))
+* **admin:** stop reporting a suppression-list read failure as a missing list ([bd414a9](https://github.com/postalsys/emailengine/commit/bd414a94e7ff51f3c6cd68241ff3b94c8996ed2d))
+* **downloads:** end a cross-thread transfer when the peer closes the channel ([8875e79](https://github.com/postalsys/emailengine/commit/8875e799b7d2d365822f3666160450e137130673))
+* **downloads:** notice a consumer that closed the channel before the transfer began ([ce295e6](https://github.com/postalsys/emailengine/commit/ce295e6060c556a0223bbc7bce11078513cbd0ae))
+* **downloads:** stop an aborted attachment download from killing the IMAP worker ([f937993](https://github.com/postalsys/emailengine/commit/f937993b47c518683da3137eebcc7188c8bd9f3e))
+* **gmail:** keep prototype-shaped header names from breaking message formatting ([a494f13](https://github.com/postalsys/emailengine/commit/a494f1308f04fd24dc1ce9bceb27a46ca326fa71))
+* **headers:** drop a __proto__ field name when parsing a header block ([fae64fd](https://github.com/postalsys/emailengine/commit/fae64fd5754f8236b51c26f6095df5c81f299a90))
+* **headers:** drop a constructor field name too, and guard the bounced-message map ([b5fcf32](https://github.com/postalsys/emailengine/commit/b5fcf32003d99254e8288ad2c7d330d14d138637))
+* **headers:** drop a prototype-shaped field name the camelCase step re-creates ([77a3beb](https://github.com/postalsys/emailengine/commit/77a3bebaff9ca61de2ebff875cd50cd9648533c6))
+* **imap:** keep a prototype-shaped content subtype from breaking a text fetch ([d90e013](https://github.com/postalsys/emailengine/commit/d90e0131f236a085bf10537f567b267de0a25481))
+* **imap:** release the mailbox lock when a download resolves without a stream ([8513432](https://github.com/postalsys/emailengine/commit/8513432f9968061eb01fef8e90654904ebdce3cf))
+* **imap:** return the connection to its mailbox after a download or text fetch ([33db6a2](https://github.com/postalsys/emailengine/commit/33db6a20ed64112d9f5c446f89abb82fb9f33101))
+* **imap:** return the connection to its mailbox after deleting one ([0cac841](https://github.com/postalsys/emailengine/commit/0cac8418a296b0bea41c646bcaa539b2862eed69))
+* **imap:** return the connection to its mailbox after renaming one ([6014093](https://github.com/postalsys/emailengine/commit/601409377c19f7f16eb9d8d60d88b5b906ecf1b1))
+* **imap:** stop a secondary connection's task from re-selecting the primary mailbox ([d12a046](https://github.com/postalsys/emailengine/commit/d12a046eaa5d9ef584bc8c88778fcfedc3e3d533))
+* **metrics:** derive the Prometheus queue gauges from BullMQ itself ([7968678](https://github.com/postalsys/emailengine/commit/796867886a2d8ba9ad0e8fee8e9d53dea1af5b3d))
+* **oauth2:** harden the legacy app migration and restore the auth-failure alert ([50710be](https://github.com/postalsys/emailengine/commit/50710bebe5b4c108313add39beabe74e6c0dd0f8))
+* **reference:** leave the deprecated token aliases out of the published document ([1ff4697](https://github.com/postalsys/emailengine/commit/1ff46975d47f130289d2cb2702d11cedbf16a6b6))
+* **reports:** drop every prototype-shaped name a camelCased report can carry ([77abf0e](https://github.com/postalsys/emailengine/commit/77abf0ee7b3266de92885e66ae48824598dc822f))
+* **settings:** refuse masked credential values posted back to the settings API ([7e51155](https://github.com/postalsys/emailengine/commit/7e51155641b72f2622d0d6f7c31d94e2b01ef9fa))
+* **settings:** seed the trial Sentry default atomically ([1e276f8](https://github.com/postalsys/emailengine/commit/1e276f8ef0dac49a6c4fe3470fff572f57cfab94))
+* **startup:** name the prepared-settings keys that get ignored ([9e23ceb](https://github.com/postalsys/emailengine/commit/9e23ceb9d20dff5f7c64690f71f307bf427bac59))
+* **tokens:** bind an access token to an account from the create form ([6f4fc93](https://github.com/postalsys/emailengine/commit/6f4fc936ef254710b7bc99582776c6d1700d7195))
+* **tokens:** keep the audit log page size default inside its own range ([c688756](https://github.com/postalsys/emailengine/commit/c6887564e0ef20e9e5c2b4ec4a5560d3eec3fc8d))
+* **tokens:** raise the audit log retention cap and bound the account it stores ([6c8039a](https://github.com/postalsys/emailengine/commit/6c8039a1fb2bc5325a8b815a79b51d4f318a059f))
+* **tokens:** register the pre-2.79 token endpoints as deprecated aliases ([5cb2887](https://github.com/postalsys/emailengine/commit/5cb2887c6c6c94e7b3dd9686f5223ae6b7dafb29))
+* **tokens:** revoke an account's access tokens when the account is deleted ([61c9a17](https://github.com/postalsys/emailengine/commit/61c9a178c8a55b4f869fc8d204755519f48a3e48))
+* **tokens:** show account-bound tokens on the Access Tokens page ([716ca0d](https://github.com/postalsys/emailengine/commit/716ca0dc5a56a9d853c5064f4c059fbefd8b0551))
+* **tokens:** stop a whitespace-only search from reading every record ([eb1f398](https://github.com/postalsys/emailengine/commit/eb1f398f5a99c613e4fe30d5e91a93cd80399603))
+* **webhooks:** log the reason a delivery is skipped ([c34df7d](https://github.com/postalsys/emailengine/commit/c34df7d0fbe1724e2bea8baa1d66ce3e7a3e3f40))
+
+## [2.79.0](https://github.com/postalsys/emailengine/compare/v2.78.0...v2.79.0) (2026-08-18)
+
+
+### Features
+
+* **lists:** add suppression list management to the admin UI ([d684030](https://github.com/postalsys/emailengine/commit/d6840305a3dc0940f248c12e650e068aed866e28))
+* **lists:** link suppression entries to the subscription management page ([b4e1d49](https://github.com/postalsys/emailengine/commit/b4e1d49ff105d95f24462b8ceb0f80b453378cc9))
+* **oauth2:** migrate legacy settings-based OAuth2 apps into the app registry ([4aeb7f5](https://github.com/postalsys/emailengine/commit/4aeb7f5bee45d0ec32ab17d72252bf8d13b57018))
+* **reference:** confirm irreversible Try it requests before running them ([546c32e](https://github.com/postalsys/emailengine/commit/546c32e352a70061ae188c59f54b78933d2bde20))
+* **reference:** edit Try it request bodies in a JSON editor ([dbd38e8](https://github.com/postalsys/emailengine/commit/dbd38e857f16a1ce28c86a32a9105b0e5cb36ca6))
+* **reference:** make large schemas readable in the API reference ([9874821](https://github.com/postalsys/emailengine/commit/9874821288f543d531af757366eced663b738705))
+* **reference:** show an example value and usage guidance for every field ([c974f19](https://github.com/postalsys/emailengine/commit/c974f19e393c6d7519c3599b772a58a898f7c4ce))
+* **reference:** warn in Try it only where running the request has a consequence ([4f53d02](https://github.com/postalsys/emailengine/commit/4f53d02d068f88707419aaffecee6618b2f0bd71))
+* **sentry:** enable error reporting by default for trial licenses ([9c918bc](https://github.com/postalsys/emailengine/commit/9c918bcb9cbb45113c1006db649a6fbf871c6c81))
+* **tokens:** granular access token permissions ([#633](https://github.com/postalsys/emailengine/issues/633)) ([f30bf0a](https://github.com/postalsys/emailengine/commit/f30bf0a838958f64a057afe8f44767a0b3de306a))
+* **webhooks:** show the effective webhook routing on the account page ([0cdbbff](https://github.com/postalsys/emailengine/commit/0cdbbffacfc19ed7af2ef200061edd7e06930b26))
+
+
+### Bug Fixes
+
+* **deps:** move to ioredis 6 ([da4904a](https://github.com/postalsys/emailengine/commit/da4904aba141f7fffeef2200a726254994ae3f9b))
+* **deps:** override deepmerge-ts to clear GHSA-ggr8-5vv4-36mx ([#635](https://github.com/postalsys/emailengine/issues/635)) ([6d68432](https://github.com/postalsys/emailengine/commit/6d6843217ee5246e150e66307e2c2bae94fbc89b))
+* **deps:** refresh dependencies and dedupe node-html-parser ([5502c04](https://github.com/postalsys/emailengine/commit/5502c0467da52eb2d285c1a057818d6c0eb7694e))
+* **logging:** standardize log levels and keep credentials out of error logs ([a229bdc](https://github.com/postalsys/emailengine/commit/a229bdca3b8662338db889568fa132503c5e89c9))
+* **queues:** move to BullMQ 6 and fix outbox paging ([eba0761](https://github.com/postalsys/emailengine/commit/eba0761f162c2561bab81460b481743e42ab4608))
+* **reference:** count the minted token's expiry down while the page is open ([356dfd0](https://github.com/postalsys/emailengine/commit/356dfd0ac9178bcd2ad007f351c2ded3af0936ce))
+* **ui:** share the confirm dialog helper and stop the reference page scrolling sideways ([994ddec](https://github.com/postalsys/emailengine/commit/994ddec7d42c91c1a7ea5167cfe5ee6df689b4d2))
+* **ui:** stop partial blocks from losing content wrapped in a bare condition ([0887172](https://github.com/postalsys/emailengine/commit/0887172c4fe18d23c8a3bd9f9d26249fc7551a9a))
+
+## [2.78.0](https://github.com/postalsys/emailengine/compare/v2.77.0...v2.78.0) (2026-08-12)
+
+
+### Features
+
+* **accounts:** pin an account to an expected email identity ([a64bb60](https://github.com/postalsys/emailengine/commit/a64bb6009163bed0835cb3f8342e5d0ec20549b3)), closes [#626](https://github.com/postalsys/emailengine/issues/626)
+* **admin-ui:** keep the access-token banner in view and make the reference nav usable on a phone ([a4bb55f](https://github.com/postalsys/emailengine/commit/a4bb55f7a416a74c65b50a0b69879b5b21915711))
+* **admin:** mark the operation being read in the API reference sidebar ([700eab7](https://github.com/postalsys/emailengine/commit/700eab7716bec0362b73bf5e8f498be971071e7e))
+
+
+### Bug Fixes
+
+* **accounts:** let a wrong-account setup be retried instead of bouncing it back ([4cd6ac4](https://github.com/postalsys/emailengine/commit/4cd6ac4d0b935244accc55b1f9abb41cf906a2dc))
+* **accounts:** remove the messages an account had queued when it is deleted ([ba6897f](https://github.com/postalsys/emailengine/commit/ba6897f4a5966a1a0dcddd7c514a3804e31591c4))
+* **auth:** replace unmaintained speakeasy and base32.js with in-house implementations ([9abaaaa](https://github.com/postalsys/emailengine/commit/9abaaaa4cfd1869788238db80860bbbb77694ed3))
+* **bounces:** read every block of a delivery-status body ([a99878e](https://github.com/postalsys/emailengine/commit/a99878eaf2970b36a7cc0ac50a725292405c6ab3))
+* **bounces:** report every delivery-status field and describe one recipient ([71300c3](https://github.com/postalsys/emailengine/commit/71300c3fcf72065764857b1e90f43626b5e258e7))
+* **deps:** replace deprecated msgpack5 with @msgpack/msgpack behind a compatibility wrapper ([9c40ebc](https://github.com/postalsys/emailengine/commit/9c40ebcc5b61993dad3f6979caab8cb8632b6ad0))
+* **deps:** replace stagnant xml2js with fast-xml-parser in IMAP settings autodetection ([bfd6ec5](https://github.com/postalsys/emailengine/commit/bfd6ec5e7f0925fd3b0fb16a2a7490aa2cb14c27))
+* **deps:** update dependencies (libmime 5.4.2, nodemailer 9.0.5, imapflow 1.6.6) ([abd8034](https://github.com/postalsys/emailengine/commit/abd8034d1e365c5e523a361a0379649fa9c6c29c))
+* **deps:** update email-text-tools and email-ai-tools to pull in patched dompurify (GHSA-55q2-fjhq-7xh7) ([148130f](https://github.com/postalsys/emailengine/commit/148130ff55680287fcd3902b5b5ff0ba9f4881de))
+* **deps:** update imapflow to 1.7.0, certs to 1.0.17, templates to 2.0.2 ([cafae8c](https://github.com/postalsys/emailengine/commit/cafae8ca7b2429547bc60cf2932077af24bfa356))
+* **deps:** update our own packages so the tree carries one copy of each ([4a6e79f](https://github.com/postalsys/emailengine/commit/4a6e79fcaf2d11a35870e557c4a8e6756d05b4b4))
+* **oauth2:** fall back to stored credentials when useAuthServer is set but no auth server is configured ([cd460b0](https://github.com/postalsys/emailengine/commit/cd460b056673c5b148760ba25b670c4e75f1f344))
+* **webhooks:** bind the egress check to the address actually connected to ([#631](https://github.com/postalsys/emailengine/issues/631)) ([2d68b37](https://github.com/postalsys/emailengine/commit/2d68b37a1d186c7f9894e4b1425c1c52870c7cb5))
+
+
+### Performance Improvements
+
+* **accounts:** unlink the account keys instead of deleting them inline ([ec11210](https://github.com/postalsys/emailengine/commit/ec11210a750021c1ccbf2df3637816974c0f995c))
+
+## [2.77.0](https://github.com/postalsys/emailengine/compare/v2.76.0...v2.77.0) (2026-08-03)
+
+
+### Features
+
+* **admin:** make the API reference searchable by field name and linkable per property ([65acf52](https://github.com/postalsys/emailengine/commit/65acf52a79d0002d7cd7cec7e2466f17dea06f13))
+* **admin:** retire the bundled swagger-ui page ([34eb957](https://github.com/postalsys/emailengine/commit/34eb9579b19211b678283d2af62fee7c876ba6f0))
+* **admin:** server-rendered API reference at /admin/reference ([2ae59f9](https://github.com/postalsys/emailengine/commit/2ae59f9377f0f651324e9fbed65970ffaf72c3f5))
+* **api:** document success responses, enum values and per-operation behavior ([bbe36e6](https://github.com/postalsys/emailengine/commit/bbe36e6d0a2c9fb36fc1fb00fdd5f1d7b5d3cc0d))
+* **api:** generate the OpenAPI document without hapi-swagger ([4a87b29](https://github.com/postalsys/emailengine/commit/4a87b2953d136cbc1f9e44786c7dab2d3ce1cc34))
+
+
+### Bug Fixes
+
+* **api:** declare the success response for streaming and binary endpoints ([633362e](https://github.com/postalsys/emailengine/commit/633362e14924ee57709d18405794577285cf287f))
+* **assignment:** do not 500 when an account is created before the first worker is ready ([7c8e5df](https://github.com/postalsys/emailengine/commit/7c8e5dfaf8e06458b124b5c740a1ad917ff76f94))
+* **deps:** update dependencies (@postalsys/ee-client 1.7.0) ([9c440b2](https://github.com/postalsys/emailengine/commit/9c440b2c4e94f975267a0562022bdebc86524c9f))
+* **encrypt:** rotate every stored secret, not just the ones the tool remembered ([35a2cc0](https://github.com/postalsys/emailengine/commit/35a2cc0886c718945f94989799aeef7cda1db8f3))
+* **imapproxy:** keep an error sink on the upstream proxy connection ([653259d](https://github.com/postalsys/emailengine/commit/653259d7e5a9558489eccea1ead8c50856274dd2))
+* **oauth2:** honor useAuthServer on the IMAP and SMTP paths ([0c5c43d](https://github.com/postalsys/emailengine/commit/0c5c43da4b4190bba4e41ecbfa4c24b2e8627397))
+* **openapi:** do not shadow require() in the schema converter ([a63bf90](https://github.com/postalsys/emailengine/commit/a63bf90435eef459513e78f7ed549607923d428a))
+* **tokens:** reap expired tokens from the listing, not only on use ([2564831](https://github.com/postalsys/emailengine/commit/2564831d1b533b26a0c07dabd981a01a36c21e08))
+
+## [2.76.0](https://github.com/postalsys/emailengine/compare/v2.75.0...v2.76.0) (2026-07-29)
+
+
+### Features
+
+* add an API endpoint for sending stored drafts ([16e759a](https://github.com/postalsys/emailengine/commit/16e759aab429160d312827618841222c7704057d))
+* add EENGINE_UPDATE_CHECK_DISABLED to opt out of the GitHub update check ([e92bfe6](https://github.com/postalsys/emailengine/commit/e92bfe6e9b01ae9abe1cc782b51d39aac94b2341))
+
+
+### Bug Fixes
+
+* **deps:** update dependencies (imapflow 1.6.3) ([7dc423c](https://github.com/postalsys/emailengine/commit/7dc423cafe45206c36b8293f1a57f47f56594dfe))
+* **deps:** update dependencies (imapflow 1.6.5) ([6a350e1](https://github.com/postalsys/emailengine/commit/6a350e1ab7e8b96ae089d0768c2a9300e0a405e0))
+* **imap:** stop re-listing the folders on every connection setup ([6d79eb3](https://github.com/postalsys/emailengine/commit/6d79eb3f67a3d2bb826f43483c4e51d03ea98d8a))
+
+## [2.75.0](https://github.com/postalsys/emailengine/compare/v2.74.2...v2.75.0) (2026-07-28)
+
+
+### Features
+
+* **web-safe-html:** fold quoted thread history into a collapse marker ([25d45bf](https://github.com/postalsys/emailengine/commit/25d45bf5b8dcc64443272f4b85178ee2c497d79c))
+
+
+### Bug Fixes
+
+* **account:** serialize account updates so a refreshed token is not lost ([e577825](https://github.com/postalsys/emailengine/commit/e5778255710b1be912e6b259073ec963c2da03a2))
+* **api:** match IPv4-mapped peer addresses against the address allowlists ([5acff06](https://github.com/postalsys/emailengine/commit/5acff061b31af6db49ffe9d856a5017bdfcaf4e7))
+* **api:** trust X-Forwarded-For only from declared proxies ([6e93ea7](https://github.com/postalsys/emailengine/commit/6e93ea714cd75aa876f713345d675a5416b36aeb))
+* **api:** warn about a spoofable admin allowlist when the proxy list is empty ([4309abe](https://github.com/postalsys/emailengine/commit/4309abe2d45652699f76b4adc31ff37e79802a53))
+* **deps:** bump imapflow to 1.6.1 to restore IMAP account verification ([c2a5437](https://github.com/postalsys/emailengine/commit/c2a543779b29c369d35bfbbc175810fc1d96f02c))
+* **deps:** update @postalsys/email-ai-tools to 1.13.15 ([89ec145](https://github.com/postalsys/emailengine/commit/89ec145a8f43a29405cf154825601dd8ba10fae6))
+* **deps:** update dependencies ([@bull-board](https://github.com/bull-board) 8.3.2) ([a5644f3](https://github.com/postalsys/emailengine/commit/a5644f34e56128451c642d2034ddf7db0d1cc7a8))
+* **logging:** stop logging decrypted setting values and lower Redis reconnect noise ([5c62ac4](https://github.com/postalsys/emailengine/commit/5c62ac486112688e8a964c66a43eb609abe7c8da))
+* **oauth:** pin external account token_url to Google STS ([27ade81](https://github.com/postalsys/emailengine/commit/27ade8183cd31b503077ebefd5724f2f0620947d))
+* **queue:** retain failed queue entries instead of deleting them on arrival ([e83af35](https://github.com/postalsys/emailengine/commit/e83af359aafc49d584cd0c234e089e9dceb83f3b))
+* **server:** drain workers on shutdown and back off crash-looping respawns ([29b3b5d](https://github.com/postalsys/emailengine/commit/29b3b5d0d7b76793ea2852c9a37a8c622217a6ea))
+* **webhooks:** filter webhook egress and stop following redirects ([e44bed5](https://github.com/postalsys/emailengine/commit/e44bed549848d8eb2b04bb991aa2c6cee0bb47c2))
+* **webhooks:** report the refused redirect status and probe through the delivery path ([9f7c666](https://github.com/postalsys/emailengine/commit/9f7c666f5e2a0bfae069a0c43c33a75d04922747))
+* **webhooks:** stop retrying an endpoint that answers with a redirect ([bbb6055](https://github.com/postalsys/emailengine/commit/bbb605560d31bb494495b46a57cd233a78024d99))
+
+## [2.74.2](https://github.com/postalsys/emailengine/compare/v2.74.1...v2.74.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **api:** bring /v1/changes under the route-table guardrail ([d685ad8](https://github.com/postalsys/emailengine/commit/d685ad849fd46d0c15837278b9d30a7f195400a2))
+* **auth:** normalize the rate-limit window and reject a negative cost ([4c58678](https://github.com/postalsys/emailengine/commit/4c586783b350c38e9dd016f334b00c3d7c29cfd4))
+* **export:** correct the concurrency limits and the active-set ownership ([690934a](https://github.com/postalsys/emailengine/commit/690934a0ecf8cbaa5374f0d44ae6881f708ff914))
+* **imap:** keep an error sink on abandoned IMAP connections ([a9ef9e3](https://github.com/postalsys/emailengine/commit/a9ef9e3fe380cd3752a1121a0741559fbd8229b7))
+* **imap:** report account log write failures instead of crashing the worker ([e881e65](https://github.com/postalsys/emailengine/commit/e881e6593ffa0f4ace027e9287124b3bde3a3edb))
+* **imap:** stop wiping the folder listing on an unusable LIST response ([f6229bb](https://github.com/postalsys/emailengine/commit/f6229bb72a8a6cd415a3c738740b9dc64dfbfb9d))
+* **imap:** tolerate a FETCH response that omits FLAGS ([b78b314](https://github.com/postalsys/emailengine/commit/b78b314396ea6eec7e23d707044cf46d1f51899c))
+* **smtp:** handle MIME parse errors and enforce the message size limit ([e70eb7d](https://github.com/postalsys/emailengine/commit/e70eb7df40245118752cf276cb70090647573216))
+* **smtp:** reject an unparseable message permanently instead of with a 450 ([ef77542](https://github.com/postalsys/emailengine/commit/ef775420a15d94c6a46d6eefe6d37413b5330e6c))
+* **ui:** flag recently restarted workers on the internals page ([435a932](https://github.com/postalsys/emailengine/commit/435a93233ca56c61c42f17d80fb2d4d39fb88381))
+
+## [2.74.1](https://github.com/postalsys/emailengine/compare/v2.74.0...v2.74.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **deps:** update dependencies (@postalsys/email-ai-tools 1.13.14) ([027f065](https://github.com/postalsys/emailengine/commit/027f0654a1a5d844dd02a22d1f594927e4c4e258))
+* **ui:** document Azure OpenAI endpoints and refresh the fallback AI model list ([defef18](https://github.com/postalsys/emailengine/commit/defef1832165069d6657ebdd9a6f0c261631105a))
+* **ui:** group the workers page by kind with pool health and descriptions ([8ae65a9](https://github.com/postalsys/emailengine/commit/8ae65a9e5942c2b24b76b2e815d56725567a3d59))
+* **ui:** show the workers page Accounts column only for email workers ([d0fb2ef](https://github.com/postalsys/emailengine/commit/d0fb2efbb7fccb64469f2333e88d2a6768104bdf))
+* **ui:** warn that Document Store will be removed on 2026-10-01 ([1415af6](https://github.com/postalsys/emailengine/commit/1415af687e24d86846482c292065916c24a9dfae))
+
+## [2.74.0](https://github.com/postalsys/emailengine/compare/v2.73.1...v2.74.0) (2026-07-23)
+
+
+### Features
+
+* **imap:** add a per-account IMAP4rev2 opt-out and account-level TLS certificate override ([59764fd](https://github.com/postalsys/emailengine/commit/59764fd16f5c895b2c3e714fc769482830a19a36))
+* **ui:** add the account-level invalid-certificate override to the SMTP settings as well ([7d1b9e4](https://github.com/postalsys/emailengine/commit/7d1b9e44e91e9a251743e8b61413b4ef91a177b3))
+
+
+### Bug Fixes
+
+* **accounts:** back out the OAuth2 auth-failure park ([bc431bd](https://github.com/postalsys/emailengine/commit/bc431bd3ede97d06f58788c66b7dfa8958380c49))
+* **accounts:** make the auth-failure auto-disable work for OAuth2 accounts ([77f78b4](https://github.com/postalsys/emailengine/commit/77f78b4bd852c1662fee9657d84625ccdc58f143))
+* **api:** require an admin session for the Bull Board queue browser ([392723e](https://github.com/postalsys/emailengine/commit/392723e746a83dc8fc7a96fd4c719114667f8b56))
+* **api:** revert the Bull Board admin-session requirement ([14590b8](https://github.com/postalsys/emailengine/commit/14590b86e1557f3b6284401fbd4e1c06a9a72d01))
+* **ci:** give the Docker builds a cache backend and smoke test by digest ([4554d90](https://github.com/postalsys/emailengine/commit/4554d90b5bf38f649b8c27c65a9c26cf39951e0d))
+* **ci:** smoke-test the image before publishing and harden the allowlist test ([c285fcb](https://github.com/postalsys/emailengine/commit/c285fcbbd258846537447cd730342423e6b2eaf7))
+* **deps:** update dependencies ([3370f0a](https://github.com/postalsys/emailengine/commit/3370f0aa3afeb3b07bb5627602a314ec6aaf89fa))
+* **deps:** update dependencies ([e1256b2](https://github.com/postalsys/emailengine/commit/e1256b296f83be3fe161f38af5087d231c8fa3bf))
+* **deps:** update dependencies (imapflow 1.5.0) ([8cc45ac](https://github.com/postalsys/emailengine/commit/8cc45acacb8572d5cf9a187a34d6d284b57d4b99))
+* **docker:** ship the root-level CLI modules in the image ([a63cb4e](https://github.com/postalsys/emailengine/commit/a63cb4e17b3fac9b8e003914b3472f1da20dd6ec))
+* **gitignore:** cover every local env file, not just the exact name ([16124d5](https://github.com/postalsys/emailengine/commit/16124d5e83cb9ead3a0c8520db7fcb4e5eefedaa))
+* **imap:** park phantom folders and throttle short-lived-connection reconnects ([da97da3](https://github.com/postalsys/emailengine/commit/da97da31eddcb327672daf28938efec11b5e55f7))
+* **imap:** store the connection error response as text, not as a parsed object ([3cf8d2e](https://github.com/postalsys/emailengine/commit/3cf8d2e016ce0e8ce623468689ef6f21a90cd6f1))
+* **oauth:** drop the transient token-refresh carve-out, keep the stale-token fix ([63c2d8c](https://github.com/postalsys/emailengine/commit/63c2d8c261a71158ea5670ddc7e080c690240265))
+* **oauth:** make the transient token-failure and delivery-retry fixes actually fire ([5049fea](https://github.com/postalsys/emailengine/commit/5049fea5f1724d4e7ae2fa6f2b58a642af4f7f6b))
+* **oauth:** report transient token failures instead of stalling on them ([10b3480](https://github.com/postalsys/emailengine/commit/10b348082016f047eda641602bfe370d1195e222))
+* **oauth:** stop reporting a rate-limited token endpoint as bad credentials ([de27fca](https://github.com/postalsys/emailengine/commit/de27fca5ed0c42cabb95553a00323dc82fc422bc))
+* **setup:** create production secret files owner-only ([52f0527](https://github.com/postalsys/emailengine/commit/52f052741558e9b3a5478fe2f0ecc5fb0a1679f9))
+* **submit:** retry transient 4xx SMTP rejections and gate token minting on the request principal ([1688c86](https://github.com/postalsys/emailengine/commit/1688c86522d9e79715569e6735353c333d7e527c))
+* **submit:** stop discarding queued mail on non-SMTP 5xx errors ([f80f475](https://github.com/postalsys/emailengine/commit/f80f4754c76e230db529031c0549caf26468d891))
+* **test:** provision scope-test tokens as a trusted local caller ([20ca781](https://github.com/postalsys/emailengine/commit/20ca7817f3679797bb07e17d00e9b4cd5d6d7c4b))
+* **tokens:** refuse to mint an access token before an admin password is set ([ff3dd47](https://github.com/postalsys/emailengine/commit/ff3dd47b06ebac2d7f861fe66e26549db193a9f8))
+
+
+### Performance Improvements
+
+* **docker:** cache the dependency install and smoke test the CLI in the image ([e275733](https://github.com/postalsys/emailengine/commit/e275733dacc85ba72ea3465013242785c2d7adcf))
+
+
+### Reverts
+
+* back out the OAuth2 token-failure rework, keep the delivery and token fixes ([496ac3d](https://github.com/postalsys/emailengine/commit/496ac3d9c8737fecaf5ccf21bf98d1bd51e7af5c))
+
+## [2.73.1](https://github.com/postalsys/emailengine/compare/v2.73.0...v2.73.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **imap:** stop the OAuth token renewal reconnect loop that pinned the CPU ([eff5727](https://github.com/postalsys/emailengine/commit/eff5727f4a328326609856861465f524e381689c))
+* restore the scan CLI command and stop packing secrets into the tarball ([edddb4e](https://github.com/postalsys/emailengine/commit/edddb4e70e96a7267880e295f0d9448b16ed214e))
+
+## [2.73.0](https://github.com/postalsys/emailengine/compare/v2.72.4...v2.73.0) (2026-07-20)
+
+
+### Features
+
+* add generic OIDC SSO for admin login ([71854d4](https://github.com/postalsys/emailengine/commit/71854d402dceff8cbf15e6ee9c059d9079ebd065))
+* add group-based authorization for OIDC SSO ([c988506](https://github.com/postalsys/emailengine/commit/c988506f0aa860273b3128e7bc89d2274b57b6cb))
+* add OIDC_FORCED (SSO-only login) and OIDC_LOGOUT (RP-initiated logout) ([1751ddb](https://github.com/postalsys/emailengine/commit/1751ddb576f50f67ad2d8afb5bcee4db6e06b4c2))
+* make OIDC post-logout redirect optional (OIDC_POST_LOGOUT_REDIRECT_URI) ([ae9169d](https://github.com/postalsys/emailengine/commit/ae9169d3f358c19370baf851479814e081625d90))
+* rebuild the open source license listing ([ebe5e90](https://github.com/postalsys/emailengine/commit/ebe5e90d8b2e5fc76386566ed9eaf02d8fd059b0))
+* Tailwind v4 + FlyonUI admin UI theme ([d648da1](https://github.com/postalsys/emailengine/commit/d648da1ebffdaedd237437ff728eb90cdd6b54dd))
+* **theme:** centralize the ACE editor fullscreen toggle ([bf9a6db](https://github.com/postalsys/emailengine/commit/bf9a6db8e7850c17a58feeabd2a0b45859e6d918))
+* **theme:** centralize the native datalist autocomplete builder ([7b737b1](https://github.com/postalsys/emailengine/commit/7b737b116883b217ceaa1a49377e697b9de5333a))
+* **theme:** convert auth and public layouts to Tailwind/FlyonUI ([568de9e](https://github.com/postalsys/emailengine/commit/568de9e5d58a83b06e270d78272d58f0a4c8de98))
+* **theme:** convert config core pages to Tailwind/FlyonUI ([93f7c06](https://github.com/postalsys/emailengine/commit/93f7c06e7e28440dd037e9f32cfc7961f7bf099b))
+* **theme:** convert Document Store pages to Tailwind/FlyonUI ([5b2b687](https://github.com/postalsys/emailengine/commit/5b2b6879107981ae46cdef2257ba89cbfd102dc2))
+* **theme:** convert internals pages to Tailwind/FlyonUI ([06a670e](https://github.com/postalsys/emailengine/commit/06a670ed95d4ded7f5a303ee59891ed61b7b2981))
+* **theme:** convert OAuth2 config pages to Tailwind/FlyonUI ([a787584](https://github.com/postalsys/emailengine/commit/a7875841b9c090a84ed9c7842887980e0aad5df6))
+* **theme:** convert shared partials, replace bootstrap-autocomplete with datalists ([eb3fdf1](https://github.com/postalsys/emailengine/commit/eb3fdf13fc40f75aa9f529e7239e789f2b97232d))
+* **theme:** convert the accounts pages to FlyonUI ([f54f5bc](https://github.com/postalsys/emailengine/commit/f54f5bcf4d2a9a4a5c39bf2a30f41fd9fd5a688d))
+* **theme:** convert the admin shell to Tailwind v4 + FlyonUI ([d9ab031](https://github.com/postalsys/emailengine/commit/d9ab0318056876519edddfc51d472521cd07ee35))
+* **theme:** convert the dashboard page to FlyonUI ([c4a719c](https://github.com/postalsys/emailengine/commit/c4a719c00f28ed134652d803f0f5b924445df0dd))
+* **theme:** convert the gateways pages to FlyonUI ([6b176fa](https://github.com/postalsys/emailengine/commit/6b176fa8eb23890106b7e24eba32ff28ca520f54))
+* **theme:** convert the tokens and templates pages to FlyonUI ([a650568](https://github.com/postalsys/emailengine/commit/a6505687bcd0dd17e00902a5bf8058d2494e97ab))
+* **theme:** convert webhooks pages to Tailwind/FlyonUI ([77b4438](https://github.com/postalsys/emailengine/commit/77b4438d1957d72ac40883dedd060cf44a4cd6f3))
+* **theme:** follow the admin theme in the ACE editors ([51bc909](https://github.com/postalsys/emailengine/commit/51bc9094eed78737d2abf085d4931b7eac570ef5))
+* **theme:** move the TLS certificate labels to FlyonUI tooltips ([eabc578](https://github.com/postalsys/emailengine/commit/eabc578d4fd2b83b0ef951c35d76e51f3bcf9add))
+* **theme:** rebuild the public pages as framework-free HTML/CSS/JS ([f3a34c0](https://github.com/postalsys/emailengine/commit/f3a34c0907d96cd8b393b25903fdb7be53a44ff3))
+* **theme:** replace ClipboardJS with a central copy-to-clipboard handler ([216334d](https://github.com/postalsys/emailengine/commit/216334da310f1a076773219394f0a5c7952e3ee2))
+* **theme:** restyle the stat cards to the FlyonUI dashboard idiom ([e53dd27](https://github.com/postalsys/emailengine/commit/e53dd27e1590554be4822d7ce08c2e4409c72b14))
+* **theme:** retire the Bootstrap legacy clusters and dead assets ([836e36f](https://github.com/postalsys/emailengine/commit/836e36f74ee290beda1fe81d9ebddf96029ced05))
+* **theme:** retire the bootstrap-compat shim and jQuery ([7669c5c](https://github.com/postalsys/emailengine/commit/7669c5c6f89e48c1ddb5c8f2da415c0c3ea18386))
+* **theme:** sync the embedded message browser with the admin theme ([858fbcd](https://github.com/postalsys/emailengine/commit/858fbcdaf121c51e5a605f45c639f6cec85d175c))
+* **theme:** use HSTogglePassword for the secret reveal buttons ([2ea2c11](https://github.com/postalsys/emailengine/commit/2ea2c1107a46c2619fb35277f24ef2f9ec0e3a25))
+* **ui:** add search to the remaining paged admin list views ([22ff78f](https://github.com/postalsys/emailengine/commit/22ff78fe54f98be3a06334f2cc9481a6597ccf86))
+* **ui:** align the Workers page with the list-view conventions ([8bb421b](https://github.com/postalsys/emailengine/commit/8bb421bf2b19e101a77301990963315b61ff71e0))
+* **ui:** apply the account-view toolbar treatment to all detail views ([a6d36f0](https://github.com/postalsys/emailengine/commit/a6d36f067ad7f803ec7f3999a98a1349eac8478d))
+* **ui:** reorganize the account view around actions, status and density ([097329e](https://github.com/postalsys/emailengine/commit/097329e9dcf688b5986c3a96b36f9cb49ea557db))
+* **ui:** reorganize the admin menu, split settings pages, and redesign the dashboard ([4ec4118](https://github.com/postalsys/emailengine/commit/4ec411852f3971b8c1e6cb1e03ea98074eaeb649))
+* **ui:** standardize admin list views with row actions and copyable ids ([722244f](https://github.com/postalsys/emailengine/commit/722244f16b08931e66ddeb929d29ec01dd44f0d3))
+* **ui:** unify list-view info sections with a page-header subtitle ([925d5fa](https://github.com/postalsys/emailengine/commit/925d5fa80085d325c03c2c374302427ab02b8fc2))
+* **ui:** use the row-actions kebab on the Workers table ([bdbb6d9](https://github.com/postalsys/emailengine/commit/bdbb6d90b04005c18a1e7fb3595934da24f96eb1))
+
+
+### Bug Fixes
+
+* bump dependencies and refresh generated artifacts ([4de7381](https://github.com/postalsys/emailengine/commit/4de7381d994058371adfd3e665c98c46d46431e8))
+* bump ee-client/sentry-node/bullmq and refresh generated artifacts ([b365690](https://github.com/postalsys/emailengine/commit/b365690a49e1d526b691c9c38ad1f8f6cfa6418a))
+* bump sentry-node/bullmq/nanoid/eslint and refresh generated artifacts ([d9c26df](https://github.com/postalsys/emailengine/commit/d9c26df99a04f2ab0c6465e4bd2f311ea3ebc0dd))
+* cap webhook delivery attempts with a wall-clock timeout ([ca263d7](https://github.com/postalsys/emailengine/commit/ca263d7523c625c6b0f1b8f6dda172b6ee962d7c))
+* **deps:** update dependencies ([3961788](https://github.com/postalsys/emailengine/commit/396178803b45ad4d4d428ec637de747bd14756d1))
+* keep dashboard stats counters for the intended retention period ([db175f7](https://github.com/postalsys/emailengine/commit/db175f7161315d95b51e79c5183541995a595e72))
+* mint a session sid on every admin login path ([e166fbf](https://github.com/postalsys/emailengine/commit/e166fbf5e5398a8f7bf6b6d1b08025908b374d89))
+* point documentation links to the learn.emailengine.app docs site ([f947b27](https://github.com/postalsys/emailengine/commit/f947b2770d55c6d8a26f1944416ed449b561af32))
+* **sso:** reject unverified OIDC emails in the admin allow-list ([34ff519](https://github.com/postalsys/emailengine/commit/34ff51997bc75e74787542c59ccca24e7db4e24c))
+* **sso:** treat any present email_verified value as a strict boolean ([89821cc](https://github.com/postalsys/emailengine/commit/89821cc809d6fc1160062115b6c56be1f44a4939))
+* **theme:** align the SSO setup buttons on the account security page ([aee2d34](https://github.com/postalsys/emailengine/commit/aee2d34d753f8b86c824fff1f9d7ace4e339b171))
+* **theme:** apply the post-merge release review findings ([d36ce1b](https://github.com/postalsys/emailengine/commit/d36ce1b8309f8be6fd5b3923147c9a3e105e2bbf))
+* **theme:** apply the whole-branch review findings ([965e652](https://github.com/postalsys/emailengine/commit/965e652351f46778341c37af87bfa8f4509158fc))
+* **theme:** cap tooltip width so long texts wrap ([a805b3b](https://github.com/postalsys/emailengine/commit/a805b3b2729630c02f5a7863fe0d899e0517eb38))
+* **theme:** gate TLS certificate provisioning on a usable service domain ([ef22689](https://github.com/postalsys/emailengine/commit/ef226897493fa700c3dd6a56afee4e14ada48559))
+* **theme:** indicate the selected tab in the admin UI tab strips ([2aa6d22](https://github.com/postalsys/emailengine/commit/2aa6d223a231b7f3ed6318ccd48092e798884376))
+* **theme:** load the ACE language-tools extension where pages expect it ([d3d1592](https://github.com/postalsys/emailengine/commit/d3d1592cf704aa0624deef6df25f8fa9ead6904b))
+* **theme:** render the API reference as a light island ([ddf696c](https://github.com/postalsys/emailengine/commit/ddf696caecc38ddbef9d52579b4cbea329658856))
+* **theme:** repair the ACE editor toolbar chrome ([4f492f1](https://github.com/postalsys/emailengine/commit/4f492f116e2416f21b58b82f9543dc8fad2e63cb))
+* **theme:** tooltip stacking, empty-bubble gating and badge rounding ([bdfea13](https://github.com/postalsys/emailengine/commit/bdfea138db55c1f20eba2d9106dcadd3e8a2ad5a))
+* **theme:** use a real list for the gateway usage notes ([b860c28](https://github.com/postalsys/emailengine/commit/b860c2894432e4c36e5adec253a98b24ba37d10c))
+* **theme:** use standard FlyonUI rounding on the auth pages ([96b7028](https://github.com/postalsys/emailengine/commit/96b7028fd5fa7efbcc682021eddeaebfce30ca4e))
+* **ui:** add a visible exit for the ACE editor fullscreen mode ([0378d82](https://github.com/postalsys/emailengine/commit/0378d82bdb4f624a422d6ba81b5f8c2b2f4ad39f))
+* **ui:** admin UX round: search clear, secret copy, modal Cancel ([ff6def0](https://github.com/postalsys/emailengine/commit/ff6def00f89e271357ce8c3d553d53685d82bccd))
+* **ui:** clarify the gateways help panel and add a docs link ([7f8a669](https://github.com/postalsys/emailengine/commit/7f8a669178a00e8b0a8ed1811f77c77f4898c226))
+* **ui:** keep submitted values when a settings form fails validation ([f01bdef](https://github.com/postalsys/emailengine/commit/f01bdef5c92606e79ebaa6d7a68e278a0920def8))
+* **ui:** left-align tooltip bubble text ([cc52213](https://github.com/postalsys/emailengine/commit/cc52213bbbcdf529dccd1a0f2b498f050bf18931))
+* **ui:** link the dashboard Needs attention card to a real errors filter ([50763c5](https://github.com/postalsys/emailengine/commit/50763c5d64d037dcf9cb7a8729a92c03db7077e4))
+* **ui:** make admin UI links visibly distinct from body text ([e9a4827](https://github.com/postalsys/emailengine/commit/e9a4827df4525c3b0fd4021700ddae1039f26003))
+* **ui:** open the account toolbar dropdowns downward, not clipped ([cd18e5b](https://github.com/postalsys/emailengine/commit/cd18e5b904bd4934cb45cad3885902e9bb86505a))
+* **ui:** restore the accounts list row-actions kebab ([b9b7134](https://github.com/postalsys/emailengine/commit/b9b7134e5e1cbae119a0a790f14895090993b7f9))
+* **ui:** stop the row-actions kebab wrapper from trapping its open menu ([d86324d](https://github.com/postalsys/emailengine/commit/d86324d518b5ccc5a44118fff6104641c74ba92e))
+* **ui:** the account-sync workers are not IMAP-only ([e99c05a](https://github.com/postalsys/emailengine/commit/e99c05a4577affb82e45140ccc772cefbd57d627))
+* **ui:** use an inline docs link, not a button, in the templates help panel ([34c5dcc](https://github.com/postalsys/emailengine/commit/34c5dcc9a3152368d2811ff7888928a533c1368e))
+* wire RPC channel into worker Account instances so OAuth re-auth reconnect does not crash ([7372bf5](https://github.com/postalsys/emailengine/commit/7372bf52e9cde06059691d42fd74b904a68235dc))
+
+## [2.72.4](https://github.com/postalsys/emailengine/compare/v2.72.3...v2.72.4) (2026-07-11)
+
+
+### Bug Fixes
+
+* bump imapflow/bullmq/bull-board/sentry-node/eerawlog/prettier ([8f7b6bf](https://github.com/postalsys/emailengine/commit/8f7b6bf21eae70b1f3c8e0856a6c0f0a0d641317))
+* clear the connecting flag if loading account data fails during reconnect ([8d82167](https://github.com/postalsys/emailengine/commit/8d8216730f809eebdc8a0762e38f93f0084de038))
+* clear the pending changes debounce when closing a subconnection ([a286f89](https://github.com/postalsys/emailengine/commit/a286f89e721336b64a9c16737cf30d161f52fe22))
+* disable subconnection when the monitored mailbox no longer exists ([e1895d6](https://github.com/postalsys/emailengine/commit/e1895d64b5fd17912f582406c7c352b9176364c6))
+* do not report connectError when pause() interrupts a connection attempt ([4d38e4f](https://github.com/postalsys/emailengine/commit/4d38e4f047be16f4f5a16a0274c5240346c2b50f))
+* drop the reconnect timer handle when closing an IMAP connection ([9f46c77](https://github.com/postalsys/emailengine/commit/9f46c77afef8217a8b6b69e736cb0cd38b27429b))
+* ignore \NonExistent folders in mailbox listing ([7ec96cf](https://github.com/postalsys/emailengine/commit/7ec96cfaaf5425c16479151e66ef3285c854b49a))
+* prevent overlapping and revived subconnection reconnect cycles ([5754c07](https://github.com/postalsys/emailengine/commit/5754c074f0f8c89222008e4c1d331b66891b3c16))
+* process refreshed folder listings so new folders emit mailboxNew ([247c325](https://github.com/postalsys/emailengine/commit/247c325cc71f1842cc8083c7fd025792217c77d8))
+* reconcile disabled and active subconnections in setupSubConnections ([85ebb54](https://github.com/postalsys/emailengine/commit/85ebb54bae8d4d7321a7362bb20e570a149fe892))
+* refresh folder listing when a listed mailbox is missing on SELECT ([1e54d32](https://github.com/postalsys/emailengine/commit/1e54d32c1c74cb1f6d3d085a75d5b5ecc1cf5ff2))
+* require an exact path match in the missing-mailbox verification LIST ([54e23c4](https://github.com/postalsys/emailengine/commit/54e23c4f6f13d3d834348df4bf15cf11206dc58b))
+* reset IMAP reconnection backoff only after a successful sync ([7138dab](https://github.com/postalsys/emailengine/commit/7138dabab866483818440478d3584a46dfc8de12))
+* reset subconnection backoff only after the monitored mailbox is opened ([f2bf297](https://github.com/postalsys/emailengine/commit/f2bf297883c38f4d1f61197ae75bdd7ae3976a53))
+* resolve the mailbox sync promise when a concurrent operation already selected the mailbox ([7327dcc](https://github.com/postalsys/emailengine/commit/7327dcc9479a991881d3ddafdd0f36cc69e3411d))
+* resolve the mailbox sync promise when opening fails before the sync starts ([c2268af](https://github.com/postalsys/emailengine/commit/c2268af90bea13d5b804c0a84945801cd9d74e45))
+* retry transient account data load failures during reconnect ([7f18d4b](https://github.com/postalsys/emailengine/commit/7f18d4b16ccdfcfde77eb433530636b8657a354a))
+* revive missing-folder subconnections when the folder is re-created ([254fce4](https://github.com/postalsys/emailengine/commit/254fce4f0eca59bc52ed4a8235f581b8107b97a7))
+* scope the re-entrant open latch to the connection that emitted the event ([627b6ee](https://github.com/postalsys/emailengine/commit/627b6eeaf9ed493f6a4d81adcbe5b766eba54682))
+* skip mailboxes that can not be selected during account sync ([eaf09c1](https://github.com/postalsys/emailengine/commit/eaf09c1700eca77e27fada20371bad193e0665c8))
+* skip re-entrant mailbox open events while onOpen is already running ([6d06b09](https://github.com/postalsys/emailengine/commit/6d06b09c0c573a2f8ca554ba85c75d6b7be87002))
+* stop opening IMAP connections for accounts paused while connecting ([128aef3](https://github.com/postalsys/emailengine/commit/128aef3cf2b7f1485a2e3d291436e88183255c0e))
+* untrack bailed subconnection clients and harden the revival trigger ([086a585](https://github.com/postalsys/emailengine/commit/086a585541d3c6d751ebfbfc34f8f15397d51407))
+* untrack the IMAP client when connect() bails for a paused account ([cface66](https://github.com/postalsys/emailengine/commit/cface665f16d7ad00f7b657e07f3c3f77c3401ef))
+* update connection tracking when replacing a previous IMAP client ([8e143c2](https://github.com/postalsys/emailengine/commit/8e143c281d03d3d226e65eaae32eab96b1db0671))
+
+## [2.72.3](https://github.com/postalsys/emailengine/compare/v2.72.2...v2.72.3) (2026-07-06)
+
+
+### Bug Fixes
+
+* bump imapflow to 1.4.4 (dedupe nodemailer/iconv-lite) ([5acc8cd](https://github.com/postalsys/emailengine/commit/5acc8cd99f9179fabb8d8486cf23b0558e4514bf))
+* bump imapflow/mailparser/mailsplit/email-ai-tools (collapse iconv-lite) ([51dcffb](https://github.com/postalsys/emailengine/commit/51dcffb3ff0f22f9b9634d078e58b35aaf7a0312))
+* bump libmime/mailparser/smtp-server/pubface (uniform nodemailer) ([eee89bb](https://github.com/postalsys/emailengine/commit/eee89bb716655519c72fb922849272c1058cbc9a))
+* constant-time MS Graph clientState check and escape unsubscribe email ([3def225](https://github.com/postalsys/emailengine/commit/3def225ab1d598dec4f0b44443ff842295736039))
+* escape Redis glob metacharacters in account-scoped SCAN patterns ([603d9db](https://github.com/postalsys/emailengine/commit/603d9dbce9c4e21b390e10dc7499f2cc5989c875))
+* escape untrusted email fields in message browser to prevent stored XSS ([1159cc1](https://github.com/postalsys/emailengine/commit/1159cc193a98eb972454a5ae61ec01d7df77f06a))
+* gate hosted auth form with a single-use nonce and probe cap, harden serviceSecret ([7ea4ff7](https://github.com/postalsys/emailengine/commit/7ea4ff7e6ca4d9239201f556b24ebd9cf8ab8250))
+* harden hosted authentication form (SSRF gate, fail-closed HMAC, XSS) ([4267df7](https://github.com/postalsys/emailengine/commit/4267df7fd0252aa84ff1d257846126a8f943bf1a))
+* HTML-escape json Handlebars helper to prevent stored XSS in error logs ([af2c153](https://github.com/postalsys/emailengine/commit/af2c153eb4d7de06b2730da6fdeb17bbe868472b))
+* override grunt's transitive js-yaml to 3.15.0 (GHSA-h67p-54hq-rp68) ([024a923](https://github.com/postalsys/emailengine/commit/024a923de3ff2a880e79c7ddbf34bbc058fcbea3))
+* stop logging the MS Graph access token on HTTP 401 ([f2f0300](https://github.com/postalsys/emailengine/commit/f2f03008cbcbaba8b7c2ff9c043ede7930c5c4ef))
+* update dependencies (@postalsys/ee-client 1.3.2, nodemailer 9.0.3, bullmq 5.79.2, @sentry/node 10.63.0, [@bull-board](https://github.com/bull-board) 8.0.2) ([b954f67](https://github.com/postalsys/emailengine/commit/b954f67e1250d8a0029d355a5a8c6fc9d7f00e8e))
+* update dependencies (email-text-tools 2.4.10, email-ai-tools 1.13.10) ([73df05c](https://github.com/postalsys/emailengine/commit/73df05c02db79fc47623ee41e27a315952c289b1))
+* use constant-time comparison for secret and MAC checks ([453caf3](https://github.com/postalsys/emailengine/commit/453caf3ac01e58248a3a7019aa4ec3c2179b3abc))
+* verify HMAC signature on the human-facing unsubscribe routes ([e30be83](https://github.com/postalsys/emailengine/commit/e30be836a71bc7e96baee19e5b019da5b0de40fa))
+
+## [2.72.2](https://github.com/postalsys/emailengine/compare/v2.72.1...v2.72.2) (2026-06-26)
+
+
+### Bug Fixes
+
+* reconnect error-state accounts after OAuth re-auth via create() ([77cee1e](https://github.com/postalsys/emailengine/commit/77cee1eb1916fbd6582cfcf931023d53f6cc8abf))
+* resume sync after OAuth re-auth and enable Run sync for Gmail/Outlook ([f3bef82](https://github.com/postalsys/emailengine/commit/f3bef823ee90cd6fcf90b95fadcb6f2730657441))
+* update dependencies (libmime 5.4.0, mailparser 3.9.12, imapflow 1.4.3, email-ai-tools 1.13.9) ([8c999d8](https://github.com/postalsys/emailengine/commit/8c999d8c5e6b550c6d3a28fd4ec118c48d095901))
+
 ## [2.72.1](https://github.com/postalsys/emailengine/compare/v2.72.0...v2.72.1) (2026-06-19)
 
 

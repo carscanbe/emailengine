@@ -1,0 +1,151 @@
+{{!--
+    reference/try-it - live request runner for one operation.
+
+    The form is rendered server-side (one field per parameter, prefilled from the
+    schema example) and static/js/reference.js reads it to build and send the request.
+    Requests go to this same instance, so they need a real access token - the shared
+    token field at the top of the page feeds every panel.
+
+    The request body textarea stays in the server-rendered HTML and remains the value
+    everything downstream reads - the submit path, "Copy as curl" and the JSON validation.
+    static/js/reference.js upgrades it to an ACE editor and syncs back into it, so the panel
+    works unchanged with no JS and the editor is purely additive.
+
+    That upgrade is deliberately lazy on both axes. ace.js is 127 KB gzipped and no
+    reference page loads it otherwise, so it is fetched only once someone opens a Try it
+    panel that has a body; and the editor is mounted per panel on first open, because these
+    disclosures start closed and ACE cannot size itself in a container with no layout box.
+    Between them a tag page mounts one or two editors rather than the seven its bodies would
+    suggest, and a reader who never opens Try it pays nothing.
+
+    Context is an operation view model from lib/api-reference/model.js.
+--}}
+{{#> reference/disclosure label="Try it" primary=true elId=(concat "try-" id) class="mt-4"}}
+
+<form class="ee-ref-try border-base-content/20 mt-3 rounded-box border p-4" data-method="{{method}}" data-path="{{path}}"
+    {{#if tryImpact.confirm}}data-confirm="ee-ref-confirm-{{id}}" {{/if}}>
+
+    {{!-- Weight tracks consequence - see tryImpact() in lib/api-reference/model.js. A read
+          says nothing, an ordinary write gets one muted line, and only the operations that
+          destroy data or send mail get a warning box. The same warning on all 82 operations
+          is what taught readers to skim past the fourteen where it mattered. --}}
+    {{#if tryImpact.warn}}
+    {{#> ui/alert-banner variant="warning"}}
+    <div class="text-sm">{{tryImpact.text}}</div>
+    {{/ui/alert-banner}}
+    {{else if tryImpact}}
+    <p class="text-base-content/50 mb-3 text-xs">{{tryImpact.text}}</p>
+    {{/if}}
+
+    {{#if pathParams.length}}
+    <div class="mb-3 grid gap-3 sm:grid-cols-2">
+        {{#each pathParams}}{{> reference/try-field}}{{/each}}
+    </div>
+    {{/if}}
+
+    {{#if queryParams.length}}
+    <div class="mb-3">
+        {{> reference/section-heading label="Query" class="mb-2"}}
+        <div class="grid gap-3 sm:grid-cols-2">
+            {{#each queryParams}}{{> reference/try-field}}{{/each}}
+        </div>
+    </div>
+    {{/if}}
+
+    {{#if headerParams.length}}
+    <div class="mb-3">
+        {{> reference/section-heading label="Headers" class="mb-2"}}
+        <div class="grid gap-3 sm:grid-cols-2">
+            {{#each headerParams}}{{> reference/try-field}}{{/each}}
+        </div>
+    </div>
+    {{/if}}
+
+    {{!-- Not a <label> wrapper: reference.js replaces the textarea with an ACE mount, which a
+          label cannot legitimately wrap. The heading is tied to the field by aria-label
+          instead, which survives the swap. data-schema names the rendered property tree the
+          completer harvests field names from - already on the page, so nothing is duplicated
+          into the markup for it. --}}
+    {{#if body}}
+    <div class="mb-3" data-body-field data-schema="{{body.scopeId}}" {{#if body.completeJson}}data-complete-source="{{body.completeTabId}}" {{/if}}>
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+            {{> reference/section-heading label="Request body" suffix=body.contentType class=""}}
+            {{!-- The field starts on the typical payload, which is what most calls are. This
+                  swaps in the complete one, because the panel is exactly where you find out
+                  what else the endpoint takes: the reader is already editing the body.
+                  Reads the JSON back out of the rendered tab panel above rather than
+                  carrying a second copy of it in an attribute. --}}
+            {{#if body.completeJson}}
+            {{> ui/btn label="Fill in every field" bare=true style="text" size="xs" icon="icon-[tabler--list-details]"
+            class="ee-ref-try-fill" id=""}}
+            {{/if}}
+        </div>
+        <textarea class="textarea mt-1 font-mono text-xs" rows="10" data-body spellcheck="false"
+            aria-label="Request body">{{body.exampleJson}}</textarea>
+    </div>
+    {{/if}}
+
+    {{!-- id="" on both: ui/btn reads `id`, and Handlebars merges a partial's hash params into
+          the caller's context, so without it every button here would carry the surrounding
+          operation's id (the same trap reference/disclosure documents). --}}
+    <div class="flex flex-wrap items-center gap-3">
+        {{> ui/btn label="Send request" variant="primary" size="sm" icon="icon-[tabler--send]" type="submit" id="" class=""}}
+        {{!-- The code samples above are built from the schema examples; this one is built from
+              whatever is in the fields right now, so what you read is what you would run. The
+              token is emitted as $EMAILENGINE_TOKEN, never the live one. --}}
+        {{> ui/btn label="Copy as curl" bare=true style="text" size="sm" icon="icon-[tabler--copy]" class="ee-ref-try-curl" id=""}}
+        <span class="ee-ref-try-status text-base-content/60 text-sm"></span>
+    </div>
+
+    <div class="ee-ref-try-result mt-4 hidden">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+            <span class="ee-ref-try-code badge badge-sm"></span>
+            <span class="ee-ref-try-time text-base-content/50 text-xs"></span>
+        </div>
+        <pre class="ee-code-block"><code class="ee-ref-try-body language-json"></code></pre>
+    </div>
+
+</form>
+
+{{!-- Sits after the form rather than inside it, so the dialog is not a descendant of the
+      thing it is confirming. Nothing breaks if it moves; it just reads wrong.
+
+      Both buttons dismiss through ui/btn's `overlay` param, which is FlyonUI's own
+      data-overlay path and what every other modal in the admin UI uses. "Run it" carries a
+      class as well, so static/js/reference.js can tell an answer from a dismissal without
+      closing the overlay itself - see the note there. A class rather than an id because
+      ui/modal neutralizes `id` inside its block.
+
+      No neutralizing hash params on these three calls: ui/modal already neutralizes its own
+      for the block, reference/disclosure neutralizes `class`, and nothing else ui/btn reads
+      exists on the operation view model. The `id=""` on the buttons inside the form above is
+      a different case - the operation's own `id` is in context there.
+
+      static=true so neither Escape nor a stray backdrop click dismisses a confirmation; the
+      corner close button remains, and reads as declining like Cancel does. --}}
+{{#if tryImpact.confirm}}
+{{#> ui/modal id=(concat "ee-ref-confirm-" id) title="Run this request?" static=true}}
+<div class="modal-body space-y-3">
+    <p class="text-sm">{{tryImpact.text}}</p>
+    <div>
+        <div class="text-base-content/50 text-2xs mb-1 tracking-wide uppercase">Request</div>
+        <pre class="ee-code-block text-xs"><code class="ee-ref-confirm-request"></code></pre>
+    </div>
+    {{!-- Deleting messages by search, flushing an account, submitting a message: these carry
+          what they act on in the body, so a dialog showing only the path would be confirming
+          the wrong half. Filled and unhidden by static/js/reference.js when the request has
+          one, and capped like the example payloads so a large body cannot outgrow the
+          dialog. --}}
+    <div class="ee-ref-confirm-body-wrap hidden">
+        <div class="text-base-content/50 text-2xs mb-1 tracking-wide uppercase">Body</div>
+        <pre class="ee-code-block ee-ref-example text-xs"><code class="ee-ref-confirm-body"></code></pre>
+    </div>
+</div>
+<div class="modal-footer">
+    {{> ui/btn label="Cancel" variant="neutral" style="soft" overlay=closeOverlay}}
+    {{> ui/btn label="Run it" variant="error" icon="icon-[tabler--alert-triangle]" class="ee-ref-confirm-run" overlay=closeOverlay}}
+</div>
+{{/ui/modal}}
+{{/if}}
+
+{{/reference/disclosure}}

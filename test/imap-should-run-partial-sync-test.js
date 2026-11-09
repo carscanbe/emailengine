@@ -22,13 +22,13 @@ function createMockRedis() {
         hgetallBuffer: async () => ({}),
         multi: () => ({
             exec: async () => [],
-            hset: function () {
+            hset() {
                 return this;
             },
-            hdel: function () {
+            hdel() {
                 return this;
             },
-            del: function () {
+            del() {
                 return this;
             }
         }),
@@ -38,11 +38,11 @@ function createMockRedis() {
         exists: async () => 0,
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         defineCommand: () => {},
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -60,9 +60,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -80,12 +78,32 @@ require.cache[getSecretPath] = {
 
 const { Mailbox } = require('../lib/email-client/imap/mailbox');
 
-function createCtx({ stored, mailbox }) {
+function createCtx({ stored, mailbox, selected = true }) {
     return {
+        isSelected: () => selected,
         getStoredStatus: async () => stored,
         getMailboxStatus: () => mailbox
     };
 }
+
+test('shouldRunPartialSyncAfterExists does not read the counters once the mailbox was deselected', async () => {
+    // The stored state is read from Redis first; if an API command opened another
+    // folder on the connection in the meantime, getMailboxStatus() would report that
+    // folder's counters and the drift check would compare the wrong mailbox
+    let statusReads = 0;
+    const ctx = createCtx({
+        stored: { messages: 10, uidNext: 101, highestModseq: 50n },
+        mailbox: { messages: 500, uidNext: 9000, highestModseq: 1n },
+        selected: false
+    });
+    ctx.getMailboxStatus = () => {
+        statusReads++;
+        return { messages: 500, uidNext: 9000, highestModseq: 1n };
+    };
+
+    assert.equal(await Mailbox.prototype.shouldRunPartialSyncAfterExists.call(ctx), false);
+    assert.equal(statusReads, 0, 'the counters of whatever folder is open now must not be read');
+});
 
 test('shouldRunPartialSyncAfterExists triggers when uidNext differs while counts are equal', async () => {
     const ctx = createCtx({

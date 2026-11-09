@@ -4,37 +4,55 @@ imap = 4
 # Number of API/HTTP workers. Values >1 require SO_REUSEPORT (Linux); on other platforms it falls back to 1.
 api = 1
 webhooks = 1
-"imapProxy" = 1
+submit = 1
+export = 1
+# The IMAP proxy runs as a single worker, started by the imapProxyServerEnabled setting
 
 [queues]
 # concurrency values
 submit = 1
 notify = 1
+export = 1
 
 [service]
 #commandTimeout = "10s" # how much time to wait until IMAP command is deemed as failed
-#localAddresses = "ip1,ip2" # somma separated list of local IP addresses to use for tcp connections
 #secret = "secret_encryption_key" # key to encrypt passwords and Oauth tokens in DB
 #setupDelay = "0ms" # how much time to wait until assigning next IMAP connection to a worker
+# Local IP addresses for outbound connections are an admin setting (localAddresses), not a config value
 
 [api]
 port = 3000
 host = "127.0.0.1" # by default API server is accessible from localhost only
 maxSize = "5M"     # maximum size of an attachment when submitting or uploading messages
-#auth = "user:pass" # If set then uses Basic Auth
+#maxBodySize = "50M" # maximum size of an API request body
+#maxPayloadTimeout = "10s" # how long to wait for a request body to arrive
+#proxy = false # trust X-Forwarded-For from a reverse proxy (restrict the peers with EENGINE_API_PROXY_ADDRESSES)
+#cspMode = "enforce" # Content-Security-Policy delivery: "enforce", "report-only" (violations are only reported to the browser console) or "off"
+# Serve the API over HTTPS by pointing at a certificate and key. Anything left unset falls back to
+# what EmailEngine manages itself (an uploaded certificate, a Let's Encrypt one, or a self-signed
+# certificate), so this section is only needed to pin a specific certificate here.
+# The SMTP server and the IMAP proxy take the same values through EENGINE_SMTP_TLS_* and
+# EENGINE_IMAPPROXY_TLS_* (use the _FILE suffix to read one from a file).
+#[api.tls]
+#certPath = "/path/to/cert.pem"
+#keyPath = "/path/to/key.pem"
 
 [smtp]
+# enabled, port, host, secret and proxy are deprecated and removed after 2027-01-01. They only seed
+# the SMTP server settings on a first start; configure the SMTP server in the admin UI instead
 enabled = false
 port = 2525
 host = "127.0.0.1"
-secret = ""        # client password, if not set allows any password
+secret = ""        # shared client password; when unset, clients authenticate with an API token that has the "smtp" scope
 proxy = false      # Set to true if using HAProxy with send-proxy option
 #maxMessageSize = "25M" # maximum message size accepted by SMTP server (default: 25MB)
+#maxClients = 100 # concurrent SMTP server connections; excess connections are refused with a 421 (default: 100)
 
-[documentStore]
-# Deprecated Document Store (ElasticSearch) feature. Disabled by default; the worker and
-# all document-store API/UI endpoints are only available when this is enabled.
-enabled = false
+[mcp]
+# MCP (Model Context Protocol) endpoint at /mcp. This deployment-level gate controls whether
+# the endpoint exists in the route table at all; the runtime on/off switch is the mcpEnabled
+# setting (Configuration > MCP in the admin UI), which starts out disabled.
+enabled = true
 
 [dbs]
 # redis connection

@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert').strict;
 
 const { ExternalAccountSigner, __test__ } = require('../lib/oauth/external-account-signer');
+const exitWhenStandalone = require('./helpers/exit-standalone');
 const { validateConfig, extractFromFormat } = __test__;
 
 const VALID_FILE_CONFIG = {
@@ -76,7 +77,7 @@ test('ExternalAccountSigner', async t => {
         // Loading lib/oauth/external-account-signer transitively pulls in lib/settings -> lib/db,
         // which opens Redis sockets that keep the event loop alive after tests finish. Force-exit
         // the test process so node:test's runner does not hang waiting for the loop to drain.
-        setTimeout(() => process.exit(), 500).unref();
+        exitWhenStandalone(500);
     });
 
     await t.test('validateConfig accepts a valid file-source config', () => {
@@ -283,6 +284,27 @@ test('ExternalAccountSigner', async t => {
         assert.strictEqual(stsParams.get('subject_token'), 'imds-token');
     });
 
+    // The credential source is a host-local identity endpoint; through the configured HTTP or
+    // SOCKS proxy it is unreachable, and the proxy would see the request headers and the token
+    await t.test('the url credential source bypasses the proxy, STS and signJwt keep the shared dispatcher', async () => {
+        const { httpAgent } = require('../lib/tools');
+        let { fetchImpl, calls } = makeFakeFetch({
+            'http://169.254.169.254': () => makeResponse({ status: 200, text: '{"access_token":"imds-token"}' }),
+            'https://sts.googleapis.com/v1/token': () => makeResponse({ status: 200, json: { access_token: 'fed', expires_in: 3600 } }),
+            'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/svc%40proj.iam.gserviceaccount.com:signJwt': () =>
+                makeResponse({ status: 200, json: { signedJwt: 'a.b.c' } })
+        });
+
+        let signer = new ExternalAccountSigner({ config: VALID_URL_CONFIG, fetchImpl });
+        await signer.sign({ iss: 'svc@proj.iam.gserviceaccount.com' });
+
+        assert.strictEqual(calls[0].options.dispatcher, __test__.credentialSourceAgent);
+        assert.notStrictEqual(calls[0].options.dispatcher, httpAgent.retry);
+        assert.notStrictEqual(calls[0].options.dispatcher, httpAgent.fetch);
+        assert.strictEqual(calls[1].options.dispatcher, httpAgent.retry);
+        assert.strictEqual(calls[2].options.dispatcher, httpAgent.retry);
+    });
+
     await t.test('sign() caches federated token across calls within TTL', async () => {
         let now = 1700000000000;
         let { fetchImpl, calls } = makeFakeFetch({
@@ -469,6 +491,72 @@ test('ExternalAccountSigner', async t => {
         assert.strictEqual(calls.filter(c => c.url === 'https://sts.googleapis.com/v1/token').length, 1);
         // signJwt fires once per caller.
         assert.strictEqual(calls.filter(c => c.url.includes(':signJwt')).length, 10);
+    });
+
+    // token_url pinning. The subject token is read from this host and POSTed verbatim as
+    // `subject_token`, so a caller-chosen token_url turns any readable file into an exfiltration
+    // channel: point it at your own server and the file contents are delivered to you, with the
+    // response echoed back through the /v1/oauth2/{app}/verify report.
+    await t.test('validateConfig rejects a token_url that is not a Google STS endpoint', () => {
+        for (let tokenUrl of [
+            'https://attacker.example.com/v1/token',
+            'https://sts.googleapis.com.attacker.example.com/v1/token',
+            'http://sts.googleapis.com/v1/token',
+            'https://evil.sts.googleapis.com.co/v1/token',
+            'https://169.254.169.254/v1/token'
+        ]) {
+            assert.throws(
+                () => validateConfig(Object.assign({}, VALID_FILE_CONFIG, { token_url: tokenUrl })),
+                err => err.code === 'EExternalAccountConfig' && /Google STS endpoint/.test(err.message),
+                `expected ${tokenUrl} to be rejected`
+            );
+        }
+    });
+
+    await t.test('validateConfig rejects a malformed token_url', () => {
+        assert.throws(
+            () => validateConfig(Object.assign({}, VALID_FILE_CONFIG, { token_url: 'not a url' })),
+            err => err.code === 'EExternalAccountConfig'
+        );
+    });
+
+    await t.test('validateConfig accepts the global and regional Google STS endpoints', () => {
+        for (let tokenUrl of [
+            'https://sts.googleapis.com/v1/token',
+            'https://sts.europe-west1.rep.googleapis.com/v1/token',
+            'https://sts.us-central1.rep.googleapis.com/v1/token'
+        ]) {
+            validateConfig(Object.assign({}, VALID_FILE_CONFIG, { token_url: tokenUrl }));
+        }
+    });
+
+    await t.test('validateConfig honors allowedTokenHosts, the test injection point', () => {
+        // Production callers never pass this; it exists so the integration suites can drive a
+        // local STS double, mirroring the signer's iamCredentialsBaseUrl option.
+        let config = Object.assign({}, VALID_FILE_CONFIG, { token_url: 'http://127.0.0.1:9999/sts' });
+
+        assert.throws(
+            () => validateConfig(config),
+            err => err.code === 'EExternalAccountConfig'
+        );
+        validateConfig(config, { allowedTokenHosts: ['127.0.0.1'] });
+
+        // ...and it does not widen anything beyond the hosts named
+        assert.throws(
+            () => validateConfig(config, { allowedTokenHosts: ['localhost'] }),
+            err => err.code === 'EExternalAccountConfig'
+        );
+    });
+
+    await t.test('the signer constructor enforces the token_url pin', () => {
+        assert.throws(
+            () =>
+                new ExternalAccountSigner({
+                    config: Object.assign({}, VALID_FILE_CONFIG, { token_url: 'https://attacker.example.com/v1/token' }),
+                    fetchImpl: async () => makeResponse()
+                }),
+            err => err.code === 'EExternalAccountConfig'
+        );
     });
 
     await t.test('describeCredentialSource reports the active source type', () => {

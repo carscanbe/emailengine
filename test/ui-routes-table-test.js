@@ -19,27 +19,33 @@
 // (not by this refactor). A diff here means a route was dropped, duplicated, or its
 // method/path was altered during a move - exactly the failure modes the extraction risks.
 //
-// server.table() is unreachable from the external Grunt test process and the Swagger
+// server.table() is unreachable from the external test runner process and the Swagger
 // spec omits UI routes, so this must run in-process. Because requiring routes-ui.js
 // transitively opens a Redis connection and BullMQ queues (lib/db.js), the test force
 // exits after running, mirroring the convention in test/tokens-test.js.
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { redis } = require('../lib/db');
-const { captureRoutes } = require('./helpers/capture-ui-routes');
+const { captureRoutes, captureRouteConfigs } = require('./helpers/capture-ui-routes');
+const { OAUTH_REDIRECT_FORM_DIRECTIVES } = require('../lib/security-headers');
+const exitWhenStandalone = require('./helpers/exit-standalone');
 
 // The complete, sorted set of routes registered by lib/routes-ui.js (including the
-// already-extracted admin-entities-routes.js it wires in). 128 routes.
+// already-extracted admin-entities-routes.js it wires in). 167 routes.
 const GOLDEN_ROUTES = [
     'DELETE /admin/accounts/{account}/export/{exportId}',
     'GET /.well-known/acme-challenge/{token}',
     'GET /accounts/new',
     'GET /admin',
+    'GET /admin/account/passkeys',
     'GET /admin/account/password',
     'GET /admin/account/security',
     'GET /admin/accounts',
+    'GET /admin/accounts/suggestions',
     'GET /admin/accounts/{account}',
     'GET /admin/accounts/{account}/browse',
     'GET /admin/accounts/{account}/edit',
@@ -47,23 +53,26 @@ const GOLDEN_ROUTES = [
     'GET /admin/accounts/{account}/export/{exportId}/download',
     'GET /admin/accounts/{account}/exports',
     'GET /admin/accounts/{account}/logs.txt',
+    'GET /admin/bull-board',
+    'GET /admin/bull-board/{path*}',
     'GET /admin/config/ai',
-    'GET /admin/config/document-store',
-    'GET /admin/config/document-store/chat',
-    'GET /admin/config/document-store/mappings',
-    'GET /admin/config/document-store/mappings/new',
-    'GET /admin/config/document-store/pre-processing',
+    'GET /admin/config/branding',
+    'GET /admin/config/email-processing',
     'GET /admin/config/imap-proxy',
     'GET /admin/config/license',
     'GET /admin/config/logging',
+    'GET /admin/config/mcp',
     'GET /admin/config/network',
     'GET /admin/config/oauth',
     'GET /admin/config/oauth/app/{app}',
     'GET /admin/config/oauth/edit/{app}',
     'GET /admin/config/oauth/new',
     'GET /admin/config/oauth/subscriptions',
+    'GET /admin/config/security',
     'GET /admin/config/service',
     'GET /admin/config/smtp',
+    'GET /admin/config/tls',
+    'GET /admin/config/tls/upload',
     'GET /admin/config/webhooks',
     'GET /admin/gateways',
     'GET /admin/gateways/edit/{gateway}',
@@ -72,8 +81,19 @@ const GOLDEN_ROUTES = [
     'GET /admin/internals',
     'GET /admin/internals/thread/{threadId}',
     'GET /admin/legal',
+    'GET /admin/legal/sbom.json',
     'GET /admin/login',
     'GET /admin/logout',
+    'GET /admin/mcp/authorize',
+    'GET /admin/queues',
+    'GET /admin/queues/counts',
+    'GET /admin/queues/{queue}',
+    'GET /admin/queues/{queue}/jobs/{jobId}',
+    'GET /admin/reference',
+    'GET /admin/reference/token',
+    'GET /admin/reference/{tag}',
+    'GET /admin/suppression-lists',
+    'GET /admin/suppression-lists/list/{listId}',
     'GET /admin/swagger',
     'GET /admin/templates',
     'GET /admin/templates/new',
@@ -91,6 +111,7 @@ const GOLDEN_ROUTES = [
     'POST /accounts/new',
     'POST /accounts/new/imap',
     'POST /accounts/new/imap/server',
+    'POST /accounts/new/imap/settings',
     'POST /accounts/new/imap/test',
     'POST /admin/account/logout-all',
     'POST /admin/account/passkeys/delete',
@@ -106,39 +127,49 @@ const GOLDEN_ROUTES = [
     'POST /admin/accounts/{account}/logs',
     'POST /admin/accounts/{account}/logs-flush',
     'POST /admin/accounts/{account}/reconnect',
+    'POST /admin/accounts/{account}/resume',
     'POST /admin/accounts/{account}/sync',
     'POST /admin/config/ai',
     'POST /admin/config/ai/reload-models',
     'POST /admin/config/ai/test-prompt',
+    'POST /admin/config/branding',
+    'POST /admin/config/branding/preview',
     'POST /admin/config/browser',
     'POST /admin/config/clear-error',
-    'POST /admin/config/document-store',
-    'POST /admin/config/document-store/chat',
-    'POST /admin/config/document-store/mappings/new',
-    'POST /admin/config/document-store/pre-processing',
-    'POST /admin/config/document-store/test',
+    'POST /admin/config/email-processing',
     'POST /admin/config/imap-proxy',
     'POST /admin/config/license',
     'POST /admin/config/license/delete',
     'POST /admin/config/license/trial',
     'POST /admin/config/logging',
     'POST /admin/config/logging/reconnect',
+    'POST /admin/config/mcp',
     'POST /admin/config/network',
     'POST /admin/config/network/delete',
     'POST /admin/config/network/reload',
     'POST /admin/config/oauth/app/{app}/add-account',
     'POST /admin/config/oauth/delete',
     'POST /admin/config/oauth/edit',
+    'POST /admin/config/oauth/metadata-probe',
     'POST /admin/config/oauth/new',
     'POST /admin/config/oauth/subscriptions',
     'POST /admin/config/oauth/verify/{app}',
+    'POST /admin/config/security',
     'POST /admin/config/service',
     'POST /admin/config/service/clean',
-    'POST /admin/config/service/preview',
     'POST /admin/config/smtp',
-    'POST /admin/config/smtp/certificate',
+    'POST /admin/config/tls',
+    'POST /admin/config/tls/delete',
+    'POST /admin/config/tls/hostnames',
+    'POST /admin/config/tls/hostnames/delete',
+    'POST /admin/config/tls/listeners',
+    'POST /admin/config/tls/preflight',
+    'POST /admin/config/tls/request',
+    'POST /admin/config/tls/upload',
     'POST /admin/config/webhooks',
     'POST /admin/config/webhooks/test',
+    'POST /admin/dbsc/refresh',
+    'POST /admin/dbsc/start',
     'POST /admin/gateways/delete/{gateway}',
     'POST /admin/gateways/edit',
     'POST /admin/gateways/new',
@@ -146,10 +177,22 @@ const GOLDEN_ROUTES = [
     'POST /admin/internals/kill',
     'POST /admin/internals/snapshot',
     'POST /admin/login',
+    'POST /admin/mcp/authorize',
     'POST /admin/passkey/auth/options',
     'POST /admin/passkey/auth/verify',
+    'POST /admin/queues/{queue}/clean',
+    'POST /admin/queues/{queue}/jobs/{jobId}/promote',
+    'POST /admin/queues/{queue}/jobs/{jobId}/remove',
+    'POST /admin/queues/{queue}/jobs/{jobId}/retry',
+    'POST /admin/queues/{queue}/pause',
+    'POST /admin/queues/{queue}/resume',
+    'POST /admin/reference/token',
+    'POST /admin/reference/token/revoke',
     'POST /admin/smtp/check-test',
     'POST /admin/smtp/create-test',
+    'POST /admin/suppression-lists/add',
+    'POST /admin/suppression-lists/delete',
+    'POST /admin/suppression-lists/list/{listId}/remove',
     'POST /admin/templates/delete',
     'POST /admin/templates/edit',
     'POST /admin/templates/new',
@@ -163,16 +206,15 @@ const GOLDEN_ROUTES = [
     'POST /unsubscribe/address'
 ];
 
-// Route capture (mock Hapi server) lives in test/helpers/capture-ui-routes.js so the
-// document-store-disabled test can reuse it in a child process. captureRoutes() returns the
-// raw registration list (with any duplicates), which lets this test detect duplicate
+// Route capture (mock Hapi server) lives in test/helpers/capture-ui-routes.js. captureRoutes()
+// returns the raw registration list (with any duplicates), which lets this test detect duplicate
 // registrations before comparing the de-duplicated set against the golden snapshot.
 
 test('UI route table is unchanged', async t => {
     t.after(() => {
         redis.quit();
         // Force exit after cleanup - requiring routes-ui.js opens Redis/BullMQ handles.
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     const captured = captureRoutes();
@@ -180,6 +222,85 @@ test('UI route table is unchanged', async t => {
 
     await t.test('no duplicate route registrations', () => {
         assert.equal(captured.length, unique.length, `expected no duplicate (method, path) registrations, got ${captured.length - unique.length} duplicate(s)`);
+    });
+
+    await t.test('a UI route that mutates outside POST validates the crumb from the header', () => {
+        // Crumb checks the crumb field of POST payloads only. A DELETE, PUT or PATCH passes with no
+        // CSRF check at all unless the route opts into restful mode, which validates the
+        // X-CSRF-Token header instead - the export delete route shipped without it.
+        const MUTATING = new Set(['DELETE', 'PUT', 'PATCH']);
+        for (const cfg of captureRouteConfigs()) {
+            for (const method of [].concat(cfg.method)) {
+                if (!MUTATING.has(String(method).toUpperCase())) {
+                    continue;
+                }
+                const restful = cfg.options && cfg.options.plugins && cfg.options.plugins.crumb && cfg.options.plugins.crumb.restful;
+                assert.equal(
+                    restful,
+                    true,
+                    `${String(method).toUpperCase()} ${cfg.path} must declare plugins.crumb.restful, crumb does not validate its payload`
+                );
+            }
+        }
+    });
+
+    await t.test('every admin page carrying an OAuth setup form relaxes form-action', () => {
+        // The setup form's POST is answered with a redirect to the provider's authorization page,
+        // and Chrome checks a form submission's redirect target against the SUBMITTING page's
+        // form-action - so the admin preset's `form-action 'self'` blocks it even though the form
+        // posts to this instance. The hosted form gets the same relaxation from the public preset;
+        // an admin page has to ask for it, and the account page's "Re-authenticate" button shipped
+        // without it. Views are the input rather than a hand-kept list, so a second admin page
+        // growing one of these forms fails here instead of in a browser. The detector only sees a
+        // literal action attribute - a form whose action came from a helper, or one submitted from
+        // JS, would slip past it, so this bounds the regression rather than the whole defect class.
+        const viewsDir = path.join(__dirname, '..', 'views');
+
+        const viewsWithSetupForm = [];
+        const walk = dir => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    walk(full);
+                } else if (entry.name.endsWith('.hbs') && /<form[^>]*action="\/accounts\/new"/.test(fs.readFileSync(full, 'utf8'))) {
+                    viewsWithSetupForm.push(path.relative(viewsDir, full));
+                }
+            }
+        };
+        walk(viewsDir);
+
+        // The hosted setup form itself is rendered with the public layout, which already allows it
+        const PUBLIC_VIEWS = new Set(['accounts/register/index.hbs']);
+        // Admin views carrying the form, and the route that renders each one
+        const ADMIN_VIEWS = new Map([['accounts/account.hbs', 'GET /admin/accounts/{account}']]);
+
+        const unaccounted = viewsWithSetupForm.filter(view => !PUBLIC_VIEWS.has(view) && !ADMIN_VIEWS.has(view));
+        assert.deepEqual(
+            unaccounted,
+            [],
+            'these views post to /accounts/new but are not accounted for: name the rendering route in ADMIN_VIEWS and give it OAUTH_REDIRECT_FORM_DIRECTIVES, or add it to PUBLIC_VIEWS if it renders with the public layout'
+        );
+
+        const configs = new Map();
+        for (const cfg of captureRouteConfigs()) {
+            for (const method of [].concat(cfg.method)) {
+                configs.set(`${String(method).toUpperCase()} ${cfg.path}`, cfg);
+            }
+        }
+
+        for (const [view, route] of ADMIN_VIEWS) {
+            assert.ok(viewsWithSetupForm.includes(view), `${view} no longer carries the setup form - drop it from ADMIN_VIEWS`);
+
+            const cfg = configs.get(route);
+            assert.ok(cfg, `${route} is not registered, but ${view} says it renders there`);
+
+            const directives = cfg.options && cfg.options.plugins && cfg.options.plugins.securityHeaders && cfg.options.plugins.securityHeaders.directives;
+            assert.deepEqual(
+                directives,
+                OAUTH_REDIRECT_FORM_DIRECTIVES,
+                `${route} renders ${view}, whose form redirects to the OAuth provider, so it must declare OAUTH_REDIRECT_FORM_DIRECTIVES`
+            );
+        }
     });
 
     await t.test('registered routes match the golden snapshot exactly', () => {

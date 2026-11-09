@@ -1,0 +1,272 @@
+'use strict';
+
+// Regression tests for the reconnect scheduling behavior of Subconnection.reconnect():
+// the backoff counter and the close/re-entry races around the pre-connect sleep.
+//
+// Counter: it must be reset only after the monitored mailbox has been opened,
+// not right after connect/login succeeds. Before the fix a subconnection whose
+// folder could be logged into but not opened (the phantom-folder scenario) reset
+// the counter on every cycle, so a server that drops the connection after the
+// failed SELECT kept the close-triggered retry loop at the base delay forever -
+// the same reset-on-every-cycle storm that was fixed on the primary connection.
+//
+// Races: _connecting must be set before the backoff sleep (otherwise the error
+// and close handlers of one dying connection each start an overlapping cycle),
+// and a close() landing during the sleep must not be erased on wake (otherwise
+// a subconnection the parent already discarded revives as an unreachable zombie
+// holding a live server connection).
+
+const test = require('node:test');
+const assert = require('node:assert').strict;
+
+const { Subconnection } = require('../lib/email-client/imap/subconnection');
+
+// reconnect() sleeps delay + Math.random() * 1000 of jitter before connecting;
+// zero the jitter so the subtests do not add real wall-clock waits (each test
+// file runs in its own process, so the stub can not leak elsewhere)
+test.mock.method(Math, 'random', () => 0);
+
+const noopLogger = {
+    trace() {},
+    debug() {},
+    info() {},
+    warn() {},
+    error() {},
+    fatal() {},
+    child() {
+        return noopLogger;
+    }
+};
+
+// listResponse answers a LIST if one is run. reconnect() runs none any more after a tagged NO,
+// ImapFlow reports a missing folder on the error itself; kept so a regression that brings a LIST
+// back still gets an answer. Defaults to "folder exists".
+function makeSubconnection({ mailboxOpenError, path = 'Shared Folders/team', listResponse = [{ path: 'Shared Folders/team' }] } = {}) {
+    const listingRefreshCalls = [];
+
+    const subconnection = new Subconnection({
+        parent: {
+            // Consumed by the missing-mailbox disable path
+            refreshAndProcessListing: async () => {
+                listingRefreshCalls.push(1);
+                return new Set();
+            }
+        },
+        account: 'test-account',
+        mailbox: { path },
+        logger: noopLogger
+    });
+
+    // Shrink the scheduling delay so the pre-connect wait stays in milliseconds
+    subconnection.reconnectBackoff.baseDelay = 1;
+
+    // Replace the connection setup: successful "login", configurable mailboxOpen
+    subconnection.start = async () => {
+        subconnection.imapClient = {
+            usable: true,
+            mailboxOpen: async () => {
+                if (mailboxOpenError) {
+                    throw mailboxOpenError;
+                }
+                return {};
+            },
+            run: async () => (typeof listResponse === 'function' ? listResponse() : listResponse),
+            close: () => {}
+        };
+    };
+
+    return { subconnection, listingRefreshCalls };
+}
+
+test('Subconnection.reconnect() backoff counter', async t => {
+    await t.test('keeps the counter when a still-listed mailbox can not be opened', async () => {
+        // The folder IS in the LIST response (phantom/INUSE case), so the
+        // subconnection must keep retrying with a growing backoff, not disable
+        const mailboxOpenError = Object.assign(new Error('Command failed'), {
+            responseStatus: 'NO',
+            serverResponseCode: 'NONEXISTENT'
+        });
+        const { subconnection } = makeSubconnection({ mailboxOpenError });
+        subconnection.reconnectBackoff.attempts = 5;
+
+        await subconnection.reconnect();
+
+        // reconnect() increments the counter when scheduling; a failed mailbox
+        // open must not reset it, otherwise every retry runs at the base delay
+        assert.equal(subconnection.reconnectBackoff.attempts, 6, 'counter must keep growing while the setup keeps failing');
+        assert.notEqual(subconnection.state, 'connected');
+        assert.ok(!subconnection.disabled, 'a still-listed mailbox must not disable the subconnection');
+    });
+
+    await t.test('resets the counter after the monitored mailbox is open', async () => {
+        const { subconnection } = makeSubconnection();
+        subconnection.reconnectBackoff.attempts = 5;
+
+        await subconnection.reconnect();
+
+        assert.equal(subconnection.reconnectBackoff.attempts, 0, 'counter must reset after a fully successful setup');
+        assert.equal(subconnection.state, 'connected');
+    });
+});
+
+test('Subconnection.reconnect() missing monitored mailbox', async t => {
+    // Whether a refused SELECT means the folder is gone is ImapFlow's call since 2.6.0 (an exact LIST
+    // match, \NonExistent and wildcard siblings excluded, tested there); it says so with
+    // err.mailboxMissing, and the subconnection no longer runs a LIST of its own
+    await t.test('disables the subconnection when ImapFlow reports the mailbox gone', async () => {
+        const mailboxOpenError = Object.assign(new Error('Command failed'), {
+            responseStatus: 'NO',
+            serverResponseCode: 'NONEXISTENT',
+            mailboxMissing: true
+        });
+        const { subconnection, listingRefreshCalls } = makeSubconnection({ mailboxOpenError });
+
+        await subconnection.reconnect();
+
+        assert.equal(subconnection.state, 'disabled');
+        assert.equal(subconnection.disabledReason, 'Mailbox folder not found');
+        assert.equal(subconnection.disabled, true, 'must look like a placeholder to the reconciler');
+        assert.equal(subconnection.isClosed, true, 'the connection must be shut down');
+        assert.equal(subconnection.imapClient, null);
+        assert.equal(listingRefreshCalls.length, 1, 'the parent listing refresh must be requested');
+        assert.equal(await subconnection.reconnect(), false, 'retries must stop for the missing folder');
+    });
+
+    await t.test('keeps retrying when the SELECT failed for any other reason', async () => {
+        const mailboxOpenError = Object.assign(new Error('Command failed'), { responseStatus: 'NO' });
+        const { subconnection } = makeSubconnection({ mailboxOpenError });
+        subconnection.reconnectBackoff.attempts = 5;
+
+        await subconnection.reconnect();
+
+        assert.ok(!subconnection.disabled, 'a refusal that is not a missing folder must not disable the subconnection');
+        assert.equal(subconnection.reconnectBackoff.attempts, 6, 'the backoff counter must keep growing');
+        assert.notEqual(subconnection.state, 'disabled');
+    });
+});
+
+test('Subconnection.reconnect() close and re-entry races', async t => {
+    await t.test('a close() during the backoff sleep is not erased on wake', async () => {
+        const { subconnection } = makeSubconnection();
+        let startCalls = 0;
+        subconnection.start = async () => {
+            startCalls++;
+        };
+
+        // reconnect() enters its (1ms base + zeroed jitter) backoff sleep;
+        // close() is synchronous, so it lands inside that sleep window
+        const pending = subconnection.reconnect();
+        subconnection.close();
+
+        assert.equal(await pending, false, 'the sleeping cycle must bail out');
+        assert.equal(startCalls, 0, 'a closed subconnection must not open a new connection');
+        assert.equal(subconnection.isClosed, true, 'close() must not be erased by the sleeping cycle');
+        assert.equal(subconnection._connecting, false);
+    });
+
+    await t.test('a concurrent reconnect() during an in-flight cycle is rejected', async () => {
+        const { subconnection } = makeSubconnection();
+        let startCalls = 0;
+        subconnection.start = async () => {
+            startCalls++;
+            subconnection.imapClient = {
+                usable: true,
+                mailboxOpen: async () => ({})
+            };
+        };
+
+        // The first call sets _connecting synchronously, so a second call -
+        // e.g. from the 'close' handler of a dying connection while the first
+        // cycle sleeps - must short-circuit on the guard
+        const first = subconnection.reconnect();
+        assert.equal(await subconnection.reconnect(), false, 'concurrent reconnect must be rejected');
+
+        await first;
+
+        assert.equal(startCalls, 1, 'exactly one connection cycle must run');
+        assert.equal(subconnection.state, 'connected');
+    });
+});
+
+test('Subconnection.reconnect() refused login', async t => {
+    // A subconnection used to retry a refused credential forever, every 30 seconds per
+    // subconnection, for the whole auth-failure park window: lockout and fail2ban territory while
+    // the primary connection was backing off to 10 minutes. The primary owns that retry now
+    const refusedLogin = () => Object.assign(new Error('Authentication failed'), { authenticationFailed: true, serverResponseCode: 'AUTHENTICATIONFAILED' });
+
+    await t.test('stops retrying and disables itself when the server refuses the credential', async () => {
+        const { subconnection } = makeSubconnection();
+        let startCalls = 0;
+        subconnection.start = async () => {
+            startCalls++;
+            throw refusedLogin();
+        };
+
+        assert.equal(await subconnection.reconnect(), false);
+
+        assert.equal(startCalls, 1, 'a refused login must not be retried by the subconnection');
+        assert.equal(subconnection.state, 'authenticationError');
+        assert.equal(subconnection.disabled, true, 'must look disabled to the reconciler, which replaces it later');
+        assert.equal(subconnection.loginRefused, true, 'the marker the parent revives it by');
+        assert.equal(subconnection.isClosed, true);
+        assert.equal(subconnection._connecting, false);
+        assert.equal(await subconnection.reconnect(), false, 'a later close or error event must not start a new cycle');
+    });
+
+    await t.test('keeps retrying a login the server could not serve right now', async () => {
+        // [UNAVAILABLE] is the server's own temporary failure, not a verdict on the credential
+        const { subconnection } = makeSubconnection();
+        let startCalls = 0;
+        const originalStart = subconnection.start;
+        subconnection.start = async () => {
+            startCalls++;
+            if (startCalls === 1) {
+                throw Object.assign(new Error('Try again later'), { authenticationFailed: true, serverResponseCode: 'UNAVAILABLE' });
+            }
+            return originalStart();
+        };
+
+        await subconnection.reconnect();
+
+        assert.equal(startCalls, 2, 'a transient login failure is retried');
+        assert.equal(subconnection.state, 'connected');
+        assert.ok(!subconnection.loginRefused);
+    });
+});
+
+test('Subconnection error listener after the client was let go', async t => {
+    await t.test('a late error event after close does not call close() on null', async () => {
+        // The missing-mailbox shutdown nulls this.imapClient without detaching the listeners, and
+        // the close handler nulls the listener's own reference, so a late 'error' read
+        // null === null as "still the current client" and threw from inside the listener
+        const subconnection = new Subconnection({
+            parent: {
+                getImapConfig: async () => ({}),
+                connections: new Set(),
+                redis: { hSetExists: async () => {} },
+                getAccountKey: () => 'iad:test-account',
+                untrackConnection: async () => {}
+            },
+            account: 'test-account',
+            mailbox: { path: 'Shared Folders/team' },
+            logger: noopLogger
+        });
+
+        // Build the client through the real start() so the real listeners are attached; only the
+        // network connect is skipped
+        subconnection.connect = async () => true;
+        await subconnection.start();
+
+        const client = subconnection.imapClient;
+        assert.ok(client, 'start() must have created a client');
+
+        // Mirror the missing-mailbox shutdown, then the socket closing
+        subconnection.close();
+        subconnection.imapClient = null;
+        client.emit('close');
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.doesNotThrow(() => client.emit('error', new Error('late socket error')));
+        client.removeAllListeners();
+    });
+});

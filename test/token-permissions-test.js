@@ -1,0 +1,499 @@
+'use strict';
+
+// Unit tests for the token narrowing check.
+//
+// No Redis and no teardown hook: lib/token-permissions.js reaches only lib/api-routes/permission-map.js
+// and from there two dependency-free modules, so nothing here opens a connection.
+
+const { describe, it } = require('node:test');
+const assert = require('node:assert').strict;
+
+const { check, effectiveGrants, REASON } = require('../lib/token-permissions');
+const { ACTION, GROUP, GRANTABLE_GROUPS, IMPLICIT_GROUPS } = require('../lib/api-routes/permission-map');
+
+// The sections the admin split made grantable. A record has to name these; an absent groups axis
+// does not reach them.
+// The grantable groups outside IMPLICIT_GROUPS: the five the admin split created, and the ones
+// added since, which a record reaches only by naming them
+const SPLIT_GROUPS = [GROUP.SETTINGS, GROUP.OAUTH2, GROUP.LICENSE, GROUP.TOKEN, GROUP.PROVISIONING, GROUP.WEBHOOK_DELIVERIES];
+
+// A read of a message, which is the operation most of these narrow around
+const READ_MESSAGE = { action: ACTION.READ, group: GROUP.MESSAGE };
+
+const allow = (permissions, operation) => check({ tokenData: permissions === undefined ? {} : { permissions }, operation });
+
+describe('token permissions', () => {
+    describe('a token with no permissions is not narrowed', () => {
+        it('allows anything the scope and account binding already allowed', () => {
+            // Every token issued before this feature shipped takes this path. If it ever stops
+            // doing so, the change is no longer additive and existing deployments break.
+            for (const group of [...GRANTABLE_GROUPS, GROUP.ADMIN]) {
+                for (const action of Object.values(ACTION)) {
+                    const result = check({ tokenData: {}, operation: { action, group } });
+                    assert.ok(result.allowed, `${action} on ${group} was denied for an un-narrowed token`);
+                }
+            }
+        });
+
+        it('treats an explicitly null record as absent', () => {
+            assert.ok(check({ tokenData: { permissions: null }, operation: READ_MESSAGE }).allowed);
+            assert.ok(check({ tokenData: {}, operation: READ_MESSAGE }).allowed);
+            assert.ok(check({ tokenData: undefined, operation: READ_MESSAGE }).allowed);
+        });
+    });
+
+    describe('the actions axis', () => {
+        it('allows a listed action and denies an unlisted one', () => {
+            const readOnly = { actions: [ACTION.READ] };
+            assert.ok(allow(readOnly, READ_MESSAGE).allowed);
+
+            const denied = allow(readOnly, { action: ACTION.DESTRUCTIVE, group: GROUP.MESSAGE });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.ACTION);
+        });
+
+        it('separates destructive from write, which is the point of the axis', () => {
+            // "an agent that can file and reply but not delete" is the single most requested shape
+            const fileAndReply = { actions: [ACTION.READ, ACTION.WRITE, ACTION.SEND] };
+            assert.ok(allow(fileAndReply, { action: ACTION.WRITE, group: GROUP.MESSAGE }).allowed);
+            assert.ok(allow(fileAndReply, { action: ACTION.SEND, group: GROUP.SUBMIT }).allowed);
+            assert.ok(!allow(fileAndReply, { action: ACTION.DESTRUCTIVE, group: GROUP.MESSAGE }).allowed);
+        });
+
+        it('reports what the operation required, so a 403 can say which grant was missing', () => {
+            const denied = allow({ actions: [ACTION.READ] }, { action: ACTION.WRITE, group: GROUP.MAILBOX });
+            assert.deepEqual(denied.required, { action: ACTION.WRITE, group: GROUP.MAILBOX });
+        });
+    });
+
+    describe('the groups axis', () => {
+        it('allows a listed group and denies an unlisted one', () => {
+            const mailOnly = { groups: [GROUP.MESSAGE, GROUP.MAILBOX] };
+            assert.ok(allow(mailOnly, READ_MESSAGE).allowed);
+
+            const denied = allow(mailOnly, { action: ACTION.READ, group: GROUP.TEMPLATE });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.GROUP);
+        });
+
+        it('denies the export group unless it is named, so a message grant does not archive the account', () => {
+            // One export call bundles the whole account, which is why it is not part of `message`
+            assert.ok(!allow({ groups: [GROUP.MESSAGE] }, { action: ACTION.WRITE, group: GROUP.EXPORT }).allowed);
+            assert.ok(allow({ groups: [GROUP.EXPORT] }, { action: ACTION.WRITE, group: GROUP.EXPORT }).allowed);
+        });
+
+        it('denies the instance-wide event stream unless it is named', () => {
+            assert.ok(!allow({ groups: [GROUP.MESSAGE] }, { action: ACTION.READ, group: GROUP.EVENTS }).allowed);
+        });
+    });
+
+    describe('the axes intersect rather than union', () => {
+        it('requires both to pass', () => {
+            const permissions = { actions: [ACTION.READ], groups: [GROUP.MESSAGE] };
+            assert.ok(allow(permissions, READ_MESSAGE).allowed);
+            // right group, wrong action
+            assert.ok(!allow(permissions, { action: ACTION.WRITE, group: GROUP.MESSAGE }).allowed);
+            // right action, wrong group
+            assert.ok(!allow(permissions, { action: ACTION.READ, group: GROUP.GATEWAY }).allowed);
+        });
+
+        it('applies an axis to every group, since actions are not per group', () => {
+            // Documented limitation rather than an oversight: `groups` may later accept an object
+            // for per-group actions, and an array keeps meaning "these actions apply to all of
+            // these groups".
+            const permissions = { actions: [ACTION.READ], groups: [GROUP.MESSAGE, GROUP.TEMPLATE] };
+            assert.ok(!allow(permissions, { action: ACTION.WRITE, group: GROUP.TEMPLATE }).allowed);
+        });
+    });
+
+    describe('write access to the outbox', () => {
+        // Retrying a failed message and sending a scheduled one now are the first write
+        // operations the outbox section ever had. They landed on an existing section on purpose,
+        // so a token minted with `write` before they existed reaches them on upgrade: such a token
+        // already held `send`, and a credential that can send any message can retry one it sent.
+        // Pinned so that widening stays a decision and not a side effect of the route map.
+        it('is held by a record that names write, including one minted before retry existed', () => {
+            const retry = { action: ACTION.WRITE, group: GROUP.OUTBOX };
+            assert.ok(allow({ actions: [ACTION.READ, ACTION.WRITE] }, retry).allowed, 'an actions-only record');
+            assert.ok(allow({ actions: [ACTION.WRITE], groups: [GROUP.OUTBOX] }, retry).allowed);
+            assert.ok(!allow({ actions: [ACTION.READ], groups: [GROUP.OUTBOX] }, retry).allowed, 'a read-only outbox record cannot retry');
+        });
+    });
+
+    describe('an absent groups axis', () => {
+        // Reaches the sections that existed when the two-axis form shipped and not the ones the
+        // admin split added, so a record minted before the split keeps exactly the reach it had
+        // (the reasoning is with IMPLICIT_GROUPS in lib/api-routes/permission-map.js)
+
+        it('stands for exactly the sections that existed before the admin split', () => {
+            // Pinned by name, not derived: a section added to the vocabulary joins GRANTABLE_GROUPS
+            // and must not join this list, or every actions-only record widens again
+            assert.deepEqual(IMPLICIT_GROUPS, [
+                'account',
+                'mailbox',
+                'message',
+                'submit',
+                'outbox',
+                'export',
+                'template',
+                'blocklist',
+                'webhook',
+                'gateway',
+                'events',
+                'diagnostics',
+                'logs'
+            ]);
+            assert.ok(Object.isFrozen(IMPLICIT_GROUPS));
+            assert.deepEqual(
+                GRANTABLE_GROUPS.filter(group => !IMPLICIT_GROUPS.includes(group)).sort(),
+                [...SPLIT_GROUPS].sort(),
+                'a grantable group is neither implicit nor one of the split groups - decide which, and pin it'
+            );
+        });
+
+        it('reaches every pre-split section, so a record from before the split keeps what it had', () => {
+            const permissions = { actions: [ACTION.READ, ACTION.WRITE] };
+            for (const group of IMPLICIT_GROUPS) {
+                assert.ok(allow(permissions, { action: ACTION.READ, group }).allowed, `read on ${group} was denied`);
+                assert.ok(allow(permissions, { action: ACTION.WRITE, group }).allowed, `write on ${group} was denied`);
+            }
+        });
+
+        it('does not reach the sections the split created, whatever actions the record holds', () => {
+            const permissions = { actions: Object.values(ACTION) };
+            for (const group of SPLIT_GROUPS) {
+                for (const action of Object.values(ACTION)) {
+                    const denied = allow(permissions, { action, group });
+                    assert.ok(!denied.allowed, `${action} on ${group} was allowed`);
+                    assert.equal(denied.reason, REASON.GROUP, 'every action is held, so the group is what refuses it');
+                }
+            }
+        });
+
+        it('is the only way a record leaves them out - naming a split section grants it', () => {
+            assert.ok(allow({ actions: [ACTION.WRITE], groups: [GROUP.SETTINGS] }, { action: ACTION.WRITE, group: GROUP.SETTINGS }).allowed);
+            assert.ok(allow({ groups: [GROUP.PROVISIONING] }, { action: ACTION.WRITE, group: GROUP.PROVISIONING }).allowed);
+            assert.ok(
+                allow({ grants: [{ action: ACTION.READ, group: GROUP.TOKEN }] }, { action: ACTION.READ, group: GROUP.TOKEN }).allowed,
+                'the pair form names its sections by construction'
+            );
+        });
+    });
+
+    describe('the admin group is never grantable', () => {
+        it('is denied even when the record names it explicitly', () => {
+            // The whole safety property. While this holds, a narrowed token cannot read the settings
+            // blob, cannot read a stored OAuth2 credential and cannot mint a token, so it cannot
+            // widen itself and every other rule here means something.
+            const denied = allow({ groups: [GROUP.ADMIN] }, { action: ACTION.READ, group: GROUP.ADMIN });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.RESTRICTED);
+        });
+
+        it('is denied when only the actions axis is set', () => {
+            // Presence of `permissions` at all is what triggers the denial, not the groups axis
+            const denied = allow({ actions: Object.values(ACTION) }, { action: ACTION.READ, group: GROUP.ADMIN });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.RESTRICTED);
+        });
+
+        it('outranks the ordinary axis denials', () => {
+            // A denial that reported "group not in your list" would invite someone to add it
+            const denied = allow({ actions: [ACTION.WRITE], groups: [GROUP.MESSAGE] }, { action: ACTION.READ, group: GROUP.ADMIN });
+            assert.equal(denied.reason, REASON.RESTRICTED);
+        });
+    });
+
+    describe('the grants form', () => {
+        // The shape the two axes cannot express, and the reason the form exists: read on one section
+        // and write on another, without the write leaking onto the first section
+        const mixed = {
+            grants: [
+                { action: ACTION.READ, group: GROUP.MESSAGE },
+                { action: ACTION.WRITE, group: GROUP.TEMPLATE }
+            ]
+        };
+
+        it('allows a listed pair and denies an unlisted one', () => {
+            assert.ok(allow(mixed, READ_MESSAGE).allowed);
+            assert.ok(allow(mixed, { action: ACTION.WRITE, group: GROUP.TEMPLATE }).allowed);
+
+            const denied = allow(mixed, { action: ACTION.READ, group: GROUP.MAILBOX });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.GRANT);
+            assert.deepEqual(denied.required, { action: ACTION.READ, group: GROUP.MAILBOX });
+        });
+
+        it('does not cross the pairs, which is the whole point of the form', () => {
+            // Both halves of this pair appear in the list, on different pairs. The two-axis form
+            // would allow it; the pair form must not.
+            assert.ok(!allow(mixed, { action: ACTION.WRITE, group: GROUP.MESSAGE }).allowed);
+            assert.ok(!allow(mixed, { action: ACTION.READ, group: GROUP.TEMPLATE }).allowed);
+        });
+
+        it('treats an empty list as granting nothing', () => {
+            const denied = allow({ grants: [] }, READ_MESSAGE);
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.GRANT);
+        });
+
+        it('refuses the list beside an axis rather than intersecting the two', () => {
+            for (const permissions of [
+                { grants: mixed.grants, actions: [ACTION.READ] },
+                { grants: mixed.grants, groups: [GROUP.MESSAGE] },
+                { grants: mixed.grants, actions: [ACTION.READ], groups: [GROUP.MESSAGE] }
+            ]) {
+                const denied = allow(permissions, READ_MESSAGE);
+                assert.ok(!denied.allowed, `${JSON.stringify(permissions)} was allowed`);
+                assert.equal(denied.reason, REASON.MALFORMED);
+            }
+        });
+
+        it('refuses an entry that is not a pair from the vocabulary', () => {
+            for (const grants of [
+                'read:message',
+                [['read', 'message']],
+                ['read:message'],
+                [{ action: ACTION.READ }],
+                [{ group: GROUP.MESSAGE }],
+                [{ action: 'readonly', group: GROUP.MESSAGE }],
+                [{ action: ACTION.READ, group: 'messages' }],
+                [{ action: ACTION.READ, group: GROUP.MESSAGE, mailboxes: ['INBOX'] }],
+                [null],
+                [{ action: ACTION.READ, group: GROUP.MESSAGE }, 42]
+            ]) {
+                const denied = allow({ grants }, READ_MESSAGE);
+                assert.ok(!denied.allowed, `${JSON.stringify(grants)} was allowed`);
+                assert.equal(denied.reason, REASON.MALFORMED, `${JSON.stringify(grants)} was not refused as malformed`);
+            }
+        });
+
+        it('still never grants the admin group', () => {
+            const denied = allow({ grants: [{ action: ACTION.READ, group: GROUP.ADMIN }] }, { action: ACTION.READ, group: GROUP.ADMIN });
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.RESTRICTED);
+        });
+
+        it('reads only own keys off an entry', () => {
+            // The same prototype-chain rule the axes follow: an inherited `group` must not complete a
+            // pair the entry does not own
+            const entry = Object.create({ group: GROUP.MESSAGE });
+            entry.action = ACTION.READ;
+            assert.equal(allow({ grants: [entry] }, READ_MESSAGE).reason, REASON.MALFORMED);
+        });
+    });
+
+    describe('absent, empty and malformed are three different answers', () => {
+        it('treats an empty allowlist as granting nothing', () => {
+            // Opposite of the axis being absent, and consistent with how `scopes: []` already
+            // denies every scope
+            const denied = allow({ actions: [] }, READ_MESSAGE);
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.ACTION);
+
+            assert.ok(!allow({ groups: [] }, READ_MESSAGE).allowed);
+        });
+
+        it('denies a record that is not an object', () => {
+            for (const permissions of ['read', 42, true, ['read']]) {
+                const denied = allow(permissions, READ_MESSAGE);
+                assert.ok(!denied.allowed, `${JSON.stringify(permissions)} was allowed`);
+                assert.equal(denied.reason, REASON.MALFORMED);
+            }
+        });
+
+        it('denies an empty object, which is ambiguous', () => {
+            const denied = allow({}, READ_MESSAGE);
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.MALFORMED);
+        });
+
+        it('denies an unknown axis rather than ignoring it', () => {
+            // What makes adding a third axis later safe: an older release that cannot apply a
+            // narrowing refuses the request instead of honouring a subset of it
+            const denied = allow({ actions: [ACTION.READ], mailboxes: ['INBOX'] }, READ_MESSAGE);
+            assert.ok(!denied.allowed);
+            assert.equal(denied.reason, REASON.MALFORMED);
+        });
+
+        it('denies an axis that is not an array, or holds a value outside the vocabulary', () => {
+            for (const permissions of [{ actions: ACTION.READ }, { groups: GROUP.MESSAGE }, { actions: ['readonly'] }, { groups: ['messages'] }]) {
+                const denied = allow(permissions, READ_MESSAGE);
+                assert.ok(!denied.allowed, `${JSON.stringify(permissions)} was allowed`);
+                assert.equal(denied.reason, REASON.MALFORMED);
+            }
+        });
+
+        it('does not accept an impact name where an action is expected', () => {
+            // `readonly` and `sends` describe a route; `read` and `send` describe a grant. Accepting
+            // both spellings would make the vocabulary ambiguous.
+            assert.equal(allow({ actions: ['sends'] }, READ_MESSAGE).reason, REASON.MALFORMED);
+        });
+
+        it('denies rather than ignoring a record it cannot read', () => {
+            // The admin listing flags these separately, through summarize() in
+            // lib/token-permission-view.js - such a token authenticates and then refuses everything
+            assert.equal(allow({ nonsense: true }, READ_MESSAGE).reason, REASON.MALFORMED);
+        });
+    });
+
+    describe('an operation the vocabulary does not describe', () => {
+        it('is denied rather than waved through', () => {
+            // Reached when the route table and permission-map.js diverge, which
+            // test/api-routes-table-test.js exists to prevent. Fails closed either way.
+            for (const operation of [{ action: null, group: GROUP.MESSAGE }, { action: ACTION.READ, group: null }, {}, undefined]) {
+                const denied = check({ tokenData: { permissions: { actions: [ACTION.READ] } }, operation });
+                assert.ok(!denied.allowed, `${JSON.stringify(operation)} was allowed`);
+                assert.equal(denied.reason, REASON.UNCLASSIFIED);
+            }
+        });
+
+        it('is still allowed for a token that is not narrowed', () => {
+            // An un-narrowed token behaves exactly as it does today, including on a route this
+            // vocabulary has nothing to say about
+            assert.ok(check({ tokenData: {}, operation: { action: null, group: null } }).allowed);
+        });
+    });
+});
+
+// The record reaches check() from Redis via msgpack, and tokens.setRawData() writes whatever its
+// input carries with no joi schema at all - it is the import path for EENGINE_PREPARED_TOKEN. So the
+// check has to hold against shapes no route validation ever saw.
+describe('a hostile record cannot widen a token', () => {
+    const denied = permissions => check({ tokenData: { permissions }, operation: READ_MESSAGE });
+
+    it('does not read an axis off the prototype chain', () => {
+        // An `in` check would find the inherited `groups` and apply a narrowing the record does not
+        // own. Only the own key counts, so this record narrows on actions and not on groups.
+        const hostile = Object.create({ groups: [GROUP.MESSAGE] });
+        hostile.actions = [ACTION.READ];
+
+        assert.ok(check({ tokenData: { permissions: hostile }, operation: READ_MESSAGE }).allowed, 'the own actions axis should still allow a read');
+
+        assert.ok(
+            check({ tokenData: { permissions: hostile }, operation: { action: ACTION.READ, group: GROUP.TEMPLATE } }).allowed,
+            'the inherited groups axis must not restrict anything - reading it would mean honouring a narrowing the record never set'
+        );
+    });
+
+    it('refuses a record whose own keys include a prototype name', () => {
+        const hostile = {};
+        Object.defineProperty(hostile, '__proto__', { value: { groups: [GROUP.ADMIN] }, enumerable: true, configurable: true });
+        assert.equal(denied(hostile).reason, REASON.MALFORMED);
+    });
+
+    it('refuses a null-prototype record with no recognised axis', () => {
+        const bare = Object.create(null);
+        bare.nonsense = true;
+        assert.equal(denied(bare).reason, REASON.MALFORMED);
+    });
+
+    it('honours a null-prototype record that is otherwise valid', () => {
+        const bare = Object.create(null);
+        bare.actions = [ACTION.READ];
+        assert.ok(check({ tokenData: { permissions: bare }, operation: READ_MESSAGE }).allowed);
+    });
+
+    it('refuses non-string entries in an axis rather than coercing them', () => {
+        for (const permissions of [{ actions: [1] }, { actions: [null] }, { groups: [{ toString: () => 'message' }] }, { groups: [['message']] }]) {
+            assert.equal(denied(permissions).reason, REASON.MALFORMED, `${JSON.stringify(permissions)} was not refused`);
+        }
+    });
+
+    it('never throws, whatever it is handed', () => {
+        // A throw inside the api-token strategy is a 500, not a 403, so it would turn a denial into
+        // an outage rather than a refusal
+        for (const permissions of [
+            Object.create(null),
+            [],
+            [[]],
+            0,
+            -1,
+            NaN,
+            Infinity,
+            () => {},
+            Symbol.iterator,
+            new Date(),
+            new Map(),
+            new Set(),
+            { grants: null },
+            { grants: [Symbol.iterator] },
+            { grants: [new Date()] }
+        ]) {
+            assert.doesNotThrow(() => check({ tokenData: { permissions }, operation: READ_MESSAGE }));
+            assert.doesNotThrow(() => effectiveGrants(permissions));
+        }
+        assert.doesNotThrow(() => check({}));
+        assert.doesNotThrow(() => check({ tokenData: null, operation: null }));
+    });
+});
+
+// What a record allows as pairs, whichever way it is written. The admin listing and the pages that
+// count MCP tools read this rather than keeping their own reading of the two forms.
+describe('effectiveGrants', () => {
+    const key = grant => `${grant.action}:${grant.group}`;
+
+    it('is null for a record that narrows nothing, and for one that cannot be read', () => {
+        assert.equal(effectiveGrants(undefined), null);
+        assert.equal(effectiveGrants(null), null);
+        assert.equal(effectiveGrants({}), null);
+        assert.equal(effectiveGrants({ actions: ['bogus'] }), null);
+        assert.equal(effectiveGrants({ grants: [{ action: ACTION.READ }] }), null);
+    });
+
+    it('returns the pair list as it is, minus the pairs check() would refuse anyway', () => {
+        const grants = [
+            { action: ACTION.READ, group: GROUP.MESSAGE },
+            { action: ACTION.READ, group: GROUP.ADMIN },
+            { action: ACTION.WRITE, group: GROUP.TEMPLATE }
+        ];
+        assert.deepEqual(effectiveGrants({ grants }).map(key), [`read:${GROUP.MESSAGE}`, `write:${GROUP.TEMPLATE}`]);
+    });
+
+    it('expands the two-axis form to its cross product', () => {
+        const pairs = effectiveGrants({ actions: [ACTION.READ, ACTION.WRITE], groups: [GROUP.MESSAGE, GROUP.MAILBOX] }).map(key);
+        assert.deepEqual(pairs.sort(), [`read:${GROUP.MAILBOX}`, `read:${GROUP.MESSAGE}`, `write:${GROUP.MAILBOX}`, `write:${GROUP.MESSAGE}`]);
+    });
+
+    it('reads an absent actions axis as every action, and an absent groups axis as the pre-split sections', () => {
+        const actionsOnly = effectiveGrants({ actions: [ACTION.READ] });
+        assert.deepEqual(
+            actionsOnly.map(grant => grant.group),
+            IMPLICIT_GROUPS,
+            'an absent groups axis must expand to IMPLICIT_GROUPS, not to the live grantable list'
+        );
+        assert.ok(actionsOnly.every(grant => grant.action === ACTION.READ));
+        assert.ok(!actionsOnly.some(grant => grant.group === GROUP.ADMIN));
+
+        const groupsOnly = effectiveGrants({ groups: [GROUP.MESSAGE] });
+        assert.deepEqual(groupsOnly.map(grant => grant.action).sort(), Object.values(ACTION).sort());
+    });
+
+    it('agrees with check() over the whole vocabulary, in both forms', () => {
+        const records = [
+            { actions: [ACTION.READ, ACTION.SEND], groups: [GROUP.MESSAGE, GROUP.SUBMIT] },
+            { groups: [GROUP.TEMPLATE] },
+            { actions: [ACTION.DESTRUCTIVE] },
+            { actions: [ACTION.READ, ACTION.WRITE] },
+            { groups: [GROUP.SETTINGS, GROUP.MESSAGE] },
+            {
+                grants: [
+                    { action: ACTION.READ, group: GROUP.MESSAGE },
+                    { action: ACTION.SEND, group: GROUP.SUBMIT }
+                ]
+            },
+            { grants: [] },
+            { actions: [] }
+        ];
+
+        for (const permissions of records) {
+            const allowed = new Set(effectiveGrants(permissions).map(key));
+            for (const group of [...GRANTABLE_GROUPS, GROUP.ADMIN]) {
+                for (const action of Object.values(ACTION)) {
+                    const verdict = check({ tokenData: { permissions }, operation: { action, group } }).allowed;
+                    assert.equal(allowed.has(`${action}:${group}`), verdict, `${JSON.stringify(permissions)} disagrees with check() on ${action}/${group}`);
+                }
+            }
+        }
+    });
+});

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="ee-app-chrome">
 
 <head>
 
@@ -9,420 +9,340 @@
     <meta name="description" content="EmailEngine Application page; The Ultimate Email API for Developers" />
     <meta name="author" content="Postal Systems OÜ">
 
-    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} &ndash;
+    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} -
         {{pageTitle}}{{/if}}{{/if}}</title>
 
-    <link rel="apple-touch-icon" href="/static/favicon/apple-touch-icon.png" sizes="180x180" />
-    <link rel="icon" href="/static/favicon/favicon-32x32.png" sizes="32x32" type="image/png" />
-    <link rel="icon" href="/static/favicon/favicon-16x16.png" sizes="16x16" type="image/png" />
-    <link rel="manifest" href="/static/favicon/manifest.json" />
-    <link rel="icon" href="/favicon.ico" />
-
-    <!-- Custom fonts for this template-->
-    <link href="/static/vendor/fontawesome-free/css/all.min.css" rel="stylesheet" type="text/css">
-
-    <link href="/static/fonts/nunito-font.css" rel="stylesheet">
+    {{> head_assets}}
 
     <link rel="stylesheet" href="/static/css/highlight.min.css">
 
-    <link href="/static/css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="/static/css/app.css" rel="stylesheet">
-
-    {{#if injectHtmlHead}}
-    {{{injectHtmlHead}}}
-    {{/if}}
+    <link href="/static/css/flyonui.css" rel="stylesheet">
 
 </head>
 
-<body id="page-top">
+<body class="bg-base-200 min-h-screen" data-sse-changes="true">
 
-    <!-- Page Wrapper -->
-    <div id="wrapper">
+    <!-- Sidebar -->
+    <aside id="layout-sidebar"
+        class="overlay overlay-open:translate-x-0 drawer drawer-start w-sidebar max-w-full inset-y-0 start-0 hidden h-full [--auto-close:lg] lg:z-40 lg:block lg:translate-x-0 lg:shadow-none"
+        aria-label="Sidebar" tabindex="-1">
+        <div class="drawer-body bg-base-100 border-base-content/20 flex h-full flex-col border-e p-0">
 
-        <!-- Sidebar -->
-        <ul class="navbar-nav bg-gradient-primary sidebar sidebar-dark accordion" id="accordionSidebar">
+            <button type="button" class="btn btn-text btn-circle btn-sm absolute end-3 top-3 lg:hidden"
+                aria-label="Close" data-overlay="#layout-sidebar">
+                <span class="icon-[tabler--x] size-4"></span>
+            </button>
 
-            <!-- Sidebar - Brand -->
-            <a class="sidebar-brand d-flex align-items-center justify-content-center" href="/">
-                <div class="sidebar-brand-icon">
-                    <div class="d-flex">
-                        <img src="/static/logo/EmailEngine_logo_horiz.png"
-                            style="display: block; max-height: 32px; max-width: 100%;">
-                    </div>
-                </div>
-            </a>
-
-            <!-- Divider -->
-            <hr class="sidebar-divider my-0">
-
-            {{>side_menu}}
-
-            <!-- Divider -->
-            <hr class="sidebar-divider d-none d-md-block">
-
-            <!-- Sidebar Toggler (Sidebar) -->
-            <div class="text-center d-none d-md-inline">
-                <button class="rounded-circle border-0" id="sidebarToggle"></button>
+            <!-- Brand -->
+            <div class="border-base-content/20 flex items-center justify-center border-b px-6 py-5">
+                <a href="/" class="flex items-center">
+                    <img src="/static/logo/EmailEngine_logo_horiz.png" alt="EmailEngine" class="block max-h-8 max-w-full">
+                </a>
             </div>
 
-        </ul>
-        <!-- End of Sidebar -->
+            <div class="grow overflow-y-auto">
+                {{>side_menu}}
+            </div>
 
-        <!-- Content Wrapper -->
-        <div id="content-wrapper" class="d-flex flex-column">
+        </div>
+    </aside>
+    <!-- End of Sidebar -->
 
-            <!-- Main Content -->
-            <div id="content">
+    <!-- Content column -->
+    <div class="flex min-h-screen flex-col lg:ps-sidebar">
 
-                {{#if iframePage}}
+        <!-- Topbar -->
+        <header class="bg-base-100 border-base-content/20 sticky top-0 z-30 border-b">
+            {{!-- flex-wrap: on phones the search form drops to a full-width second row (see its
+                  max-sm classes) instead of disappearing, so the account search and the state
+                  filter stay reachable without a redesign of the bar --}}
+            <nav class="navbar flex flex-wrap items-center gap-2 px-6 py-2">
+
+                <button type="button" class="btn btn-text btn-circle btn-sm lg:hidden" aria-haspopup="dialog"
+                    aria-expanded="false" aria-controls="layout-sidebar" data-overlay="#layout-sidebar"
+                    aria-label="Open menu">
+                    <span class="icon-[tabler--menu-2] size-5"></span>
+                </button>
+
+                {{#if searchTarget}}
+                <!-- Topbar search -->
+                <form class="flex items-center gap-2 grow max-w-xl max-sm:order-last max-sm:w-full max-sm:max-w-none" method="get" action="{{searchTarget}}">
+
+                    {{#if stateOptions}}
+                    <div class="dropdown relative inline-flex shrink-0">
+                        <button type="button" id="search-state-dropdown" class="dropdown-toggle btn btn-soft btn-sm"
+                            aria-haspopup="menu" aria-expanded="false">
+                            {{#if selectedState}}{{selectedState.label}}{{else}}All{{/if}}
+                            <span class="icon-[tabler--chevron-down] size-4"></span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-open:opacity-100 hidden min-w-40"
+                            role="menu" aria-orientation="vertical" aria-labelledby="search-state-dropdown">
+                            {{#each stateOptions}}
+                            {{#if divider}}
+                            <li><div class="divider my-1"></div></li>
+                            {{else}}
+                            <li><a class="dropdown-item{{#if selected}} dropdown-active{{/if}}" href="{{url}}">{{label}}</a></li>
+                            {{/if}}
+                            {{/each}}
+                        </ul>
+                    </div>
+                    <input type="hidden" name="state" value="{{state}}">
+                    {{/if}}
+
+                    {{#each searchHidden}}
+                    <input type="hidden" name="{{name}}" value="{{value}}">
+                    {{/each}}
+
+                    <div class="input input-sm grow">
+                        <span class="icon-[tabler--search] text-base-content/60 my-auto me-2 size-4 shrink-0"></span>
+                        <input type="text" class="grow" placeholder="{{searchPlaceholder}}" aria-label="Search"
+                            name="query" value="{{query}}">
+                        {{#if query}}
+                        <button type="button" id="topbar-search-clear"
+                            class="my-auto shrink-0 cursor-pointer text-base-content/60 hover:text-base-content"
+                            aria-label="Clear search">
+                            <span class="icon-[tabler--x] size-4"></span>
+                        </button>
+                        {{/if}}
+                    </div>
+
+                    <button class="btn btn-primary btn-sm" type="submit">Search</button>
+
+                </form>
+                {{/if}}
+
+                <div class="ms-auto flex items-center gap-1">
+
+                    {{#if licenseInfo.suspended}}
+                    {{#> ui/tooltip text="EmailEngine is currently not running and does not process any email accounts"
+                    placement="left" class="me-2"}}
+                    <span class="text-error flex items-center gap-1">
+                        <span class="icon-[tabler--heartbeat] size-5"></span>
+                        <span class="text-sm">Engine is <strong>stopped</strong></span>
+                    </span>
+                    {{/ui/tooltip}}
+                    {{/if}}
+
+                    {{#if systemAlerts}}
+                    <!-- System alerts -->
+                    <div class="dropdown relative inline-flex">
+                        <button type="button" id="alertsDropdown" class="dropdown-toggle btn btn-text btn-circle btn-sm relative"
+                            aria-haspopup="menu" aria-expanded="false" aria-label="System notifications">
+                            <span class="icon-[tabler--bell] size-5"></span>
+                            <span class="badge badge-error badge-sm absolute -top-1 -end-1 px-1.5">{{systemAlerts.length}}</span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-open:opacity-100 hidden w-80 max-w-[90vw]" role="menu"
+                            aria-orientation="vertical" aria-labelledby="alertsDropdown">
+                            <li class="dropdown-header">System notifications</li>
+                            {{#each systemAlerts}}
+                            <li>
+                                <a class="dropdown-item flex items-start gap-3" href="{{url}}">
+                                    {{!-- tinted-container idiom (matches ui/stat-card): white-on-color fails
+                                          contrast for warning/info in light mode and for every lightened
+                                          color in the dark theme --}}
+                                    <span class="bg-{{eeColor level}}/10 text-{{eeColor level}} flex size-8 shrink-0 items-center justify-center rounded-field">
+                                        <span class="{{icon}} size-4 shrink-0"></span>
+                                    </span>
+                                    <span class="text-sm whitespace-normal">{{message}}</span>
+                                </a>
+                            </li>
+                            {{/each}}
+                        </ul>
+                    </div>
+                    {{/if}}
+
+                    <!-- Theme toggle -->
+                    <button type="button" class="theme-toggle-btn btn btn-text btn-circle btn-sm" aria-label="Toggle theme">
+                        <span class="theme-toggle-dark icon-[tabler--moon] size-5"></span>
+                        <span class="theme-toggle-light icon-[tabler--sun] size-5 hidden"></span>
+                    </button>
+
+                    <!-- User menu -->
+                    <div class="dropdown relative inline-flex">
+                        <button type="button" id="userDropdown" class="dropdown-toggle btn btn-text btn-sm flex items-center gap-2"
+                            aria-haspopup="menu" aria-expanded="false" aria-label="User menu">
+                            {{#if authData.name}}
+                            <span class="hidden lg:inline text-base-content/60 text-sm font-normal">{{authData.name}}</span>
+                            {{/if}}
+                            <img class="size-7 rounded-field" src="/static/undraw_profile.svg" alt="">
+                        </button>
+                        <ul class="dropdown-menu dropdown-open:opacity-100 hidden min-w-52 end-0" role="menu"
+                            aria-orientation="vertical" aria-labelledby="userDropdown">
+                            {{#if authData.isAdmin}}
+                            <li>
+                                <a class="dropdown-item{{#if menuAccountSecurity}} dropdown-active{{/if}}" href="/admin/account/security">
+                                    <span class="icon-[tabler--shield-lock] size-4"></span>
+                                    Account security
+                                </a>
+                            </li>
+                            {{#if authData.enabled}}
+                            <li><div class="divider my-1"></div></li>
+                            {{/if}}
+                            {{/if}}
+                            {{#if authData.enabled}}
+                            <li>
+                                <a class="dropdown-item" href="/admin/logout">
+                                    <span class="icon-[tabler--logout] size-4"></span>
+                                    Sign out
+                                </a>
+                            </li>
+                            {{/if}}
+                        </ul>
+                    </div>
+
+                </div>
+
+            </nav>
+        </header>
+        <!-- End of Topbar -->
+
+        <!-- Page content -->
+        <div id="content" class="grow lg:flex lg:items-start">
+
+            {{#if secondaryNav}}
+            <!-- Secondary navigation column. Rendered flush against the main sidebar
+                 (no card, no gap, matching surface and border) so it reads as a second
+                 level of the same menu rather than a panel floating in the page. A page
+                 opts in by setting `secondaryNav` to a partial name in its view context;
+                 every other page renders exactly as before.
+
+                 Below lg there is no room for a second column, so the whole thing collapses
+                 to the row below, closed by default. It used to be a 192px scroll strip
+                 pinned above the content, which showed about a fifth of the list, hid the
+                 rest behind a nested scrollbar most people never notice, and still pushed
+                 the page heading off the first screen. A disclosure costs one row instead.
+                 Opened, it is capped at the screen and scrolls itself - the difference from
+                 what it replaced is that the space is asked for, not permanently taken, and
+                 that the filter's 82 hits cannot push the page a thousand pixels down.
+
+                 aria-expanded on the button is the only state there is: below lg the panel
+                 derives its visibility from it, above lg it is a column regardless of what
+                 the button last said. -->
+            <aside class="bg-base-100 border-base-content/20 shrink-0 border-b lg:sticky lg:top-topbar lg:h-[calc(100vh-var(--spacing-topbar))] lg:w-64 lg:overflow-y-auto lg:border-e lg:border-b-0"
+                aria-label="Section navigation">
+
+                <button type="button" id="secondary-nav-toggle" aria-expanded="false" aria-controls="secondary-nav-panel"
+                    class="peer group hover:bg-base-200 flex w-full cursor-pointer items-center justify-between gap-2 px-4 py-3 text-sm font-semibold lg:hidden">
+                    <span class="flex items-center gap-2">
+                        <span class="icon-[tabler--list-search] size-4 shrink-0"></span>
+                        {{#if secondaryNavLabel}}{{secondaryNavLabel}}{{else}}Sections{{/if}}
+                    </span>
+                    <span class="icon-[tabler--chevron-down] size-4 shrink-0 transition-transform duration-200 group-aria-expanded:rotate-180"></span>
+                </button>
+
+                <div id="secondary-nav-panel"
+                    class="border-base-content/10 hidden border-t max-lg:max-h-[calc(100dvh-var(--spacing-topbar))] max-lg:overflow-y-auto max-lg:overscroll-contain max-lg:peer-aria-expanded:block lg:block lg:border-t-0">
+                    {{> (lookup . "secondaryNav")}}
+                </div>
+            </aside>
+            {{/if}}
+
+            <div class="w-full min-w-0 px-6 py-6">
+
+                <div id="toastContainer" class="fixed top-16 right-6 z-[10000] w-80 max-w-[90vw]"></div>
+
+                {{!-- floating exit for the ACE editor fullscreen mode (uiEditorFullscreen):
+                      touch devices have no Escape key, so this is their only way out --}}
+                <button type="button" id="fullscreen-close-btn"
+                    class="btn btn-circle btn-neutral fixed end-4 top-4 z-[10000] hidden shadow-lg"
+                    aria-label="Exit full screen">
+                    <span class="icon-[tabler--x] size-5"></span>
+                </button>
+
+                {{> alerts}}
+
+                {{#unless licenseInfo.active}}
+                {{#unless hideLicenseWarning}}
+                {{#> ui/stat-card elId="license-warning" variant="error" title="License key missing" icon="icon-[tabler--key]" class="mb-6"}}
+
+                {{#if licenseInfo.suspended}}
+                <div class="alert alert-soft alert-error mb-6" role="alert">
+                    EmailEngine is currently not syncing any accounts. Please restart the application or
+                    register a valid license key to enable syncing.
+                </div>
+                {{/if}}
+
+                <p class="mb-4">To use all the features of EmailEngine, you need to provide a valid license key.</p>
+                <div class="flex flex-wrap gap-2">
+
+                    {{#if trialPossible}}
+                    {{> ui/btn id="start-trial-btn" variant="success" icon="icon-[tabler--gift]" label="Start a 14-day trial"}}
+                    {{/if}}
+
+                    {{> ui/btn href="/admin/config/license" variant="primary" icon="icon-[tabler--arrow-right]" label="Register a license"}}
+
+                </div>
+
+                {{/ui/stat-card}}
+                {{/unless}}
+                {{/unless}}
+
+                {{#unless authData.enabled}}
+                {{#unless disableAuthWarning}}
+                {{#> ui/stat-card variant="error" title="Authentication not enabled" icon="icon-[tabler--shield-lock]" class="mb-6"}}
+
+                <p class="mb-4">To enable authentication for EmailEngine, please set a password for the admin
+                    user account.</p>
+                <div>
+                    {{> ui/btn href="/admin/account/password" variant="primary" icon="icon-[tabler--arrow-right]" label="Enable authentication"}}
+                </div>
+
+                {{/ui/stat-card}}
+                {{/unless}}
+                {{/unless}}
 
                 {{{content}}}
 
-                {{else}}
-
-                <!-- Topbar -->
-                <nav class="navbar navbar-expand navbar-light bg-white topbar mb-4 static-top shadow">
-
-                    <!-- Sidebar Toggle (Topbar) -->
-                    <button id="sidebarToggleTop" class="btn btn-link d-md-none rounded-circle mr-3">
-                        <i class="fa fa-bars"></i>
-                    </button>
-
-                    {{#if searchTarget}}
-                    <!-- Topbar Search -->
-                    <form class="d-none d-sm-inline-block form-inline mr-auto ml-md-3 my-2 my-md-0 mw-100 navbar-search"
-                        method="get" action="{{searchTarget}}">
-                        <div class="input-group">
-
-                            {{#if stateOptions}}
-                            <div class="dropdown input-group-prepend">
-                                <a class="btn btn-light dropdown-toggle" href="#" role="button" data-toggle="dropdown"
-                                    aria-expanded="false">
-
-
-                                    {{#if selectedState}}
-                                    {{selectedState.label}}
-                                    {{else}}
-                                    All
-                                    {{/if}}
-
-                                </a>
-
-                                <div class="dropdown-menu">
-                                    {{#each stateOptions}}
-                                    {{#if divider}}
-                                    <div class="dropdown-divider"></div>
-                                    {{else}}
-                                    <a class="dropdown-item {{#if selected}}active{{/if}}" href="{{url}}">{{label}}</a>
-                                    {{/if}}
-                                    {{/each}}
-                                </div>
-                            </div>
-                            <input type="hidden" name="state" value="{{state}}">
-                            {{/if}}
-
-                            <input type="text" class="form-control bg-light border-0 small"
-                                placeholder="{{searchPlaceholder}}" aria-label="Search" aria-describedby="basic-addon2"
-                                name="query" value="{{query}}">
-
-
-
-                            <div class="input-group-append">
-                                <button class="btn btn-primary" type="submit">
-                                    <i class="fas fa-search fa-sm"></i>
-                                </button>
-                            </div>
-
-                        </div>
-
-
-                    </form>
-                    {{/if}}
-
-                    <!-- Topbar Navbar -->
-                    <ul class="navbar-nav ml-auto">
-
-                        {{#if licenseInfo.suspended}}
-                        <li class="nav-item mx-1">
-                            <div class="text-danger nav-link" style="cursor: default;"
-                                title="EmailEngine is currently not running and does not process any email accounts"
-                                data-toggle="tooltip" data-placement="left">
-                                <div>
-                                    <i class="fas fa-heartbeat"></i> Engine is <strong>stopped</strong>
-                                </div>
-                            </div>
-                        </li>
-                        {{/if}}
-
-                        {{#if systemAlerts}}
-
-                        <!-- Nav Item - Alerts -->
-                        <li class="nav-item dropdown no-arrow mx-1">
-                            <a class="nav-link dropdown-toggle" href="#" id="alertsDropdown" role="button"
-                                data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-                                <i class="fas fa-bell fa-fw"></i>
-                                <!-- Counter - Alerts -->
-                                <span class="badge badge-danger badge-counter">{{systemAlerts.length}}</span>
-                            </a>
-                            <!-- Dropdown - Alerts -->
-                            <div class="dropdown-list dropdown-menu dropdown-menu-right shadow animated--grow-in"
-                                aria-labelledby="alertsDropdown">
-
-                                <h6 class="dropdown-header">
-                                    System notifications
-                                </h6>
-
-                                {{#each systemAlerts}}
-
-                                <a class="dropdown-item d-flex align-items-center" href="{{url}}">
-                                    <div class="mr-3">
-                                        <div class="icon-circle bg-{{level}}">
-                                            <i class="{{#if brand}}fab{{else}}fas{{/if}} fa-{{icon}} text-white"></i>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        {{#if verbatim}}
-                                        {{{message}}}
-                                        {{else}}
-                                        {{message}}
-                                        {{/if}}
-                                    </div>
-                                </a>
-
-                                {{/each}}
-                            </div>
-                        </li>
-
-                        {{/if}}
-
-
-                        <div class="topbar-divider d-none d-sm-block"></div>
-
-                        <!-- Nav Item - User Information -->
-                        <li class="nav-item dropdown no-arrow">
-
-                            <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button"
-                                data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-                                {{#if authData.name}}
-                                <span class="mr-2 d-none d-lg-inline text-gray-600 small">{{authData.name}}</span>
-                                {{/if}}
-                                <img class="img-profile rounded-circle" src="/static/undraw_profile.svg">
-                            </a>
-
-                            <!-- Dropdown - User Information -->
-                            <div class="dropdown-menu dropdown-menu-right shadow animated--grow-in"
-                                aria-labelledby="userDropdown">
-                                {{#if authData.isAdmin}}
-                                <a class="dropdown-item {{#if menuAccountSecurity}}active{{/if}}"
-                                    href="/admin/account/security">
-                                    <i class="fas fa-user-shield fa-sm fa-fw mr-2 text-gray-400"></i>
-                                    Account security
-                                </a>
-                                {{#if authData.enabled}}
-                                <div class="dropdown-divider"></div>
-                                {{/if}}
-
-                                {{/if}}
-                                {{#if authData.enabled}}
-                                <a class="dropdown-item" href="/admin/logout">
-                                    <i class="fas fa-sign-out-alt fa-sm fa-fw mr-2 text-gray-400"></i>
-                                    Sign out
-                                </a>
-                                {{/if}}
-                            </div>
-                        </li>
-
-                    </ul>
-
-                </nav>
-                <!-- End of Topbar -->
-
-                <!-- Begin Page Content -->
-                <div class="container-fluid">
-
-                    <div id="toastContainer"
-                        style="position: fixed; top: 50px; right: 50px; min-width: 250px; z-index: 10000;"></div>
-
-                    {{> alerts}}
-
-                    {{#unless licenseInfo.active}}
-
-                    {{#unless hideLicenseWarning}}
-                    <div id="license-warning" class="card border-left-danger shadow mb-4">
-                        <div class="card-body">
-
-                            {{#if licenseInfo.suspended}}
-                            <div class="alert alert-danger" role="alert">
-                                EmailEngine is currently not syncing any accounts. Please restart the application or
-                                register a valid license key to enable syncing.
-                            </div>
-                            {{/if}}
-
-                            <div class="row no-gutters align-items-center">
-                                <div class="col mr-2">
-                                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">
-                                        License key missing</div>
-                                    <p>To use all the features of EmailEngine, you need to provide a valid license key.
-                                    </p>
-                                    <div>
-
-                                        {{#if trialPossible}}
-
-                                        <button type="button" id="start-trial-btn"
-                                            class="btn btn-success btn-icon-split">
-                                            <span class="icon text-white-50">
-                                                <i class="fas fa-gift"></i>
-                                            </span>
-                                            <span class="text">Start a 14-day trial</span>
-                                        </button>
-
-                                        {{/if}}
-
-                                        <a href="/admin/config/license" class="btn btn-primary btn-icon-split">
-                                            <span class="icon text-white-50">
-                                                <i class="fas fa-arrow-right"></i>
-                                            </span>
-                                            <span class="text">Register a license</span>
-                                        </a>
-
-                                    </div>
-                                </div>
-                                <div class="col-auto">
-                                    <i class="fas fa-key fa-2x text-gray-300"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    {{/unless}}
-                    {{/unless}}
-
-                    {{#unless authData.enabled}}
-                    {{#unless disableAuthWarning}}
-                    <div class="card border-left-danger shadow mb-4">
-                        <div class="card-body">
-                            <div class="row no-gutters align-items-center">
-                                <div class="col mr-2">
-                                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">
-                                        Authentication not enabled</div>
-                                    <p>To enable authentication for EmailEngine, please set a password for the admin
-                                        user account.</p>
-                                    <div>
-                                        <a href="/admin/account/password" class="btn btn-primary btn-icon-split">
-                                            <span class="icon text-white-50">
-                                                <i class="fas fa-arrow-right"></i>
-                                            </span>
-                                            <span class="text">Enable authentication</span>
-                                        </a>
-                                    </div>
-                                </div>
-                                <div class="col-auto">
-                                    <i class="fas fa-user-shield fa-2x text-gray-300"></i>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    {{/unless}}
-                    {{/unless}}
-
-                    {{{content}}}
-
-                </div>
-                <!-- /.container-fluid -->
-
             </div>
-            <!-- End of Main Content -->
-
-            <!-- Footer -->
-            <footer class="sticky-footer bg-white">
-                <div class="container my-auto">
-                    <div class="copyright text-center my-auto">
-                        <a href="{{packageData.homepage}}" target="_blank" rel="noopener noreferrer">EmailEngine</a>
-                        v{{packageData.version}}.
-                        <span class="text-muted">&copy; 2020-{{currentYear}}</span>
-
-                        <a class="text-muted" href="https://postalsys.com/contact" target="_blank"
-                            rel="noopener noreferrer">Postal Systems
-                            O&Uuml;</a>.
-                        <a class="" href="/admin/legal">
-                            <i class="fas fa-fw fa-gavel"></i>
-                            License and terms</a>.
-                    </div>
-                </div>
-            </footer>
-            <!-- End of Footer -->
-            {{/if}}
         </div>
-        <!-- End of Content Wrapper -->
+        <!-- End of page content -->
+
+        <!-- Footer -->
+        <footer class="bg-base-100 border-base-content/20 border-t py-6 mt-auto">
+            <div class="text-base-content/60 flex flex-col items-center gap-3 px-4 text-sm sm:px-6 lg:flex-row lg:justify-between">
+                <p>EmailEngine v{{packageData.version}} &middot; &copy; 2020-{{currentYear}} Postal Systems O&Uuml;</p>
+                <nav aria-label="Footer">
+                    <ul class="flex flex-wrap justify-center gap-x-6 gap-y-2">
+                        <li><a class="link link-animated inline-flex items-center gap-1.5" href="https://learn.emailengine.app/" target="_blank" rel="noopener noreferrer"><span class="icon-[tabler--book] size-4" aria-hidden="true"></span>Documentation</a></li>
+                        <li><a class="link link-animated inline-flex items-center gap-1.5" href="https://emailengine.app/support" target="_blank" rel="noopener noreferrer"><span class="icon-[tabler--lifebuoy] size-4" aria-hidden="true"></span>Support</a></li>
+                        <li><a class="link link-animated inline-flex items-center gap-1.5" href="/admin/legal"><span class="icon-[tabler--gavel] size-4" aria-hidden="true"></span>License and terms</a></li>
+                    </ul>
+                </nav>
+            </div>
+        </footer>
+        <!-- End of Footer -->
 
     </div>
-    <!-- End of Page Wrapper -->
+    <!-- End of content column -->
 
-    <!-- Scroll to Top Button-->
-    <a class="scroll-to-top rounded" href="#page-top">
-        <i class="fas fa-angle-up"></i>
-    </a>
+    <script data-cfasync="false" src="/static/js/flyonui.js"></script>
+    <script data-cfasync="false" src="/static/js/ui.js"></script>
 
-    <!-- Bootstrap core JavaScript-->
-    <script src="/static/js/jquery-3.6.0.min.js" crossorigin="anonymous"></script>
-    <script src="/static/bootstrap-4.6.2-dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
+    <script data-cfasync="false" src="/static/js/highlight.min.js"></script>
 
-    <!-- Core plugin JavaScript-->
-    <script src="/static/vendor/jquery-easing/jquery.easing.min.js"></script>
+    <script data-cfasync="false" src="/static/js/app.js"></script>
 
-    <!-- Custom scripts for all pages-->
-    <script src="/static/js/sb-admin-2.min.js"></script>
-
-    <script src="/static/vendor/handlebars/handlebars.min-v4.7.9.js"></script>
-    <script src="/static/js/clipboard.min.js"></script>
-
-    <script src="/static/js/bootstrap-autocomplete.min.js"></script>
-
-    <script src="/static/js/highlight.min.js"></script>
-
-    <script src="/static/js/app.js"></script>
-
+    {{!-- global #crumb element for page scripts that post with fetch();
+          must render unconditionally - converted pages rely on it instead of
+          page-local duplicates --}}
+    <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
 
     {{#if trialPossible}}
-    <div class="modal fade" id="activateTrial" tabindex="-1" aria-labelledby="activateTrialLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="activateTrialLabel">Start a 14-day trial</h5>
-                    <button type="button" class="close d-none" data-dismiss="modal" aria-label="Close">
-                        <span aria-hidden="true">&times;</span>
-                    </button>
-                </div>
-                <div class="modal-body">
-                    Provisioning a trial license, please wait <i class="fas fa-spinner fa-spin fa-fw"></i>
-                </div>
-                <div class="modal-footer d-none">
-                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-                    <button type="submit" class="btn btn-primary">OK?</button>
-                </div>
-            </div>
-        </div>
+    {{#> ui/modal id="activateTrial" title="Start a 14-day trial" hideClose=true}}
+    <div class="modal-body">
+        Provisioning a trial license, please wait <span class="loading loading-spinner loading-sm align-middle"></span>
     </div>
-
-    <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
-    <script>
+    {{/ui/modal}}
+    <script data-cfasync="false" nonce="{{cspNonce}}">
         document.addEventListener('DOMContentLoaded', () => {
             let trialBtn = document.getElementById('start-trial-btn');
+            if (!trialBtn) {
+                return;
+            }
 
             let handleActivation = async () => {
 
-                const res = await fetch('/admin/config/license/trial', {
-                    method: 'post',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({
-                        crumb: document.getElementById('crumb').value
-                    })
-                });
-
-                if (!res.ok) {
-                    throw new Error('Request failed with status ' + res.status);
-                }
-
-                let data = await res.json();
+                let data = await uiPostJson('/admin/config/license/trial');
 
                 if (!data || !data.success) {
                     console.log(data)
@@ -432,37 +352,19 @@
                 return 1
             }
 
-            let lastError, lastSuccess;
-
-            $('#activateTrial').on('shown.bs.modal', function (event) {
-                // do something...
-                handleActivation().then(res => {
-                    lastError = false;
-                    lastSuccess = res;
-                    $('#activateTrial').modal('hide');
-                }).catch(err => {
-                    lastError = err;
-                    lastSuccess = false;
-                    $('#activateTrial').modal('hide');
-                })
-            })
-
-            $('#activateTrial').on('hidden.bs.modal', function (event) {
-                // do something...
-                if (lastError) {
-                    return showToast(lastError.message, 'alert-triangle');
-                }
-
-                if (lastSuccess) {
-                    console.log(lastSuccess);
-                    document.getElementById('license-warning').style.display = 'none';
-                    window.location.reload();
-                }
-            });
-
             trialBtn.addEventListener('click', e => {
                 e.preventDefault();
-                $('#activateTrial').modal('show');
+
+                uiModal.open('#activateTrial');
+
+                handleActivation().then(() => {
+                    uiModal.close('#activateTrial');
+                    document.getElementById('license-warning').style.display = 'none';
+                    window.location.reload();
+                }).catch(err => {
+                    uiModal.close('#activateTrial');
+                    showToast(err.message, 'alert-triangle');
+                });
             });
         });
     </script>
@@ -471,7 +373,7 @@
 
     {{#if updateBrowserInfo}}
     <input type="hidden" id="browser-info-crumb" value="{{crumb}}" />
-    <script>
+    <script data-cfasync="false" nonce="{{cspNonce}}">
         document.addEventListener('DOMContentLoaded', () => {
             let sendBrowserInfo = async () => {
                 let timezone = false;

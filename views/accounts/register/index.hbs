@@ -1,18 +1,22 @@
-<div class="text-center">
-    <h1 class="h4 text-gray-900 mb-4">{{_ "Choose your email account provider" templateLocale }}</h1>
+{{!-- Hosted authentication form, step 1: the account provider chooser. Every
+button POSTs the signed data/sig blob back to /accounts/new with the chosen
+provider type. --}}
+
+<div class="ee-center">
+    <h1>{{_ "Choose your email account provider" templateLocale }}</h1>
 </div>
 
-<div style="width: 270px; margin: 0 auto;">
+<div class="ee-providers">
 
-    <div class="mb-1 p-1">
+    <div class="ee-provider">
         <form method="post" action="/accounts/new">
             <input type="hidden" name="crumb" value="{{crumb}}">
             <input type="hidden" name="type" value="imap">
             <input type="hidden" name="data" value="{{values.data}}">
             <input type="hidden" name="sig" value="{{values.sig}}">
 
-            <button type="submit" class="btn btn-primary btn-block" style="line-height: 2.5rem; font-size: 1.2rem;">
-                <i class="fa fa-envelope-square fa-fw"></i> {{_ "Standard IMAP" templateLocale }}
+            <button type="submit" class="ee-btn ee-btn-primary ee-btn-block ee-btn-lg">
+                <span class="ee-icon ee-icon-mail"></span> {{_ "Standard IMAP" templateLocale }}
             </button>
         </form>
     </div>
@@ -21,10 +25,13 @@
 
     {{#each oauth2apps}}
 
-    <div class="mb-1 p-1 rounded {{#if title}}hover-bg-light{{/if}}">
+    {{!-- an app's optional display title (set in the OAuth2 app settings) renders
+    above its button so several apps of the same provider can be told apart; the
+    ee-provider-titled hover highlight ties the title and button visually together --}}
+    <div class="ee-provider{{#if title}} ee-provider-titled{{/if}}">
 
         {{#if title}}
-        <h5 style="cursor: default;">{{title}}</h5>
+        <h5 class="ee-provider-title">{{title}}</h5>
         {{/if}}
 
         <form method="post" action="/accounts/new">
@@ -34,14 +41,13 @@
             <input type="hidden" name="sig" value="{{../values.sig}}">
 
             {{#if providerData.linkImage}}
-            <input type="image" src="{{providerData.linkImage}}" style="width: 100%; display: block;" />
+            <input type="image" src="{{providerData.linkImage}}" class="ee-provider-image" alt="{{providerData.comment}}" />
             {{else}}
 
-            <button type="submit" class="btn btn-primary btn-block" style="font-size: 1.5rem;">
-                <i class="fa {{providerData.icon}} fa-fw"></i> {{providerData.comment}}
+            <button type="submit" class="ee-btn ee-btn-primary ee-btn-block ee-btn-xl">
+                <span class="ee-icon {{providerData.publicIcon}}"></span> {{providerData.comment}}
             </button>
             {{/if}}
-
 
         </form>
     </div>

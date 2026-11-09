@@ -1,0 +1,909 @@
+/*
+ * EmailEngine admin UI theme - Tailwind v4 + FlyonUI.
+ *
+ * This is the build SOURCE. Compile with `npm run build:css`, which writes the
+ * committed artifact static/css/flyonui.css (loaded by all layouts and bundled
+ * into the pkg binary). tailwindcss/flyonui/iconify are devDependencies only.
+ *
+ * Brand (EmailEngine_logo+info.pdf): indigo #4C5CC5 (PMS 2726C) = primary,
+ * coral #F8485E (PMS 1785C) = secondary/accent, font PT Sans (self-hosted,
+ * loaded via /static/fonts/pt-sans-font.css). The info sheet prints hex
+ * #407ec9 for the indigo, but that contradicts its own RGB 76,92,197 and the
+ * artwork - #4C5CC5 is correct.
+ */
+
+@import 'tailwindcss' source(none);
+
+@plugin "@iconify/tailwind4";
+
+@plugin "flyonui" {
+    themes: false;
+}
+@import 'flyonui/variants.css';
+
+/* Light theme: FlyonUI builtin "light" tokens merged with EmailEngine brand colors */
+@plugin "flyonui/theme" {
+    name: 'light';
+    default: true;
+    color-scheme: light;
+    --color-primary: #4c5cc5;
+    --color-primary-content: #ffffff;
+    --color-secondary: #f8485e;
+    --color-secondary-content: #ffffff;
+    --color-accent: #f8485e;
+    --color-accent-content: #ffffff;
+}
+
+/* Dark theme: FlyonUI builtin "dark" tokens with brand colors lightened for
+ * contrast on dark surfaces; content colors darkened to keep WCAG-ish ratios */
+@plugin "flyonui/theme" {
+    name: 'dark';
+    prefersdark: true;
+    color-scheme: dark;
+    --color-primary: #7b86dc;
+    --color-primary-content: #10123a;
+    --color-secondary: #f8697b;
+    --color-secondary-content: #3b070f;
+    --color-accent: #f8697b;
+    --color-accent-content: #3b070f;
+}
+
+/* Class sources: server-rendered templates plus the custom scripts that build
+ * class names. Vendored libraries are intentionally NOT scanned. */
+@source '../../../views/**/*.hbs';
+@source '../../js/app.js';
+@source '../../js/ui.js';
+@source '../../js/passkey-register.js';
+@source '../../js/login-passkey.js';
+@source '../../js/reference.js';
+@source '../../../node_modules/flyonui/flyonui.js';
+
+/* Safelist for classes assembled dynamically - in JS (badge-${type} etc.) and
+ * in the ui/* partials (btn-{{variant}} etc.) - that the scanner cannot see as
+ * complete tokens */
+@source inline('badge-{primary,secondary,accent,neutral,info,success,warning,error,soft}');
+@source inline('alert-{primary,secondary,neutral,info,success,warning,error,soft}');
+@source inline('btn-{primary,secondary,accent,neutral,info,success,warning,error,outline,soft,text,xs,sm,lg}');
+@source inline('{text-,bg-}{primary,secondary,neutral,info,success,warning,error}');
+/* tinted icon containers in ui/stat-card and the systemAlerts chips
+ * (bg-{{variant}}/10 is assembled); neutral included because it is the
+ * eeColor helper's fallback for unset color names */
+@source inline('bg-{primary,secondary,neutral,info,success,warning,error}/10');
+@source inline('[--placement:top] [--placement:bottom] [--placement:left] [--placement:right]');
+/* server-driven dashboard icons (lib/ui-routes/dashboard-routes.js is not scanned) */
+@source inline('icon-[tabler--mail] icon-[tabler--webhook] icon-[tabler--mail-forward] icon-[tabler--file-code] icon-[tabler--clock]');
+/* queue icons named in lib/queue-browser/definitions.js and rendered through {{queue.icon}} */
+@source inline('icon-[tabler--package-export]');
+/* client-side rendered delivery-test status icons (built by browser JS) */
+@source inline('icon-[tabler--circle-check] icon-[tabler--circle-off] icon-[tabler--alert-triangle]');
+/* server-driven icon classes emitted by lib/ui-routes/route-helpers.js,
+   lib/oauth2-apps.js and the systemAlerts list in workers/api.js - those
+   files are not scanned, so the classes are safelisted here */
+@source inline('icon-[tabler--send] icon-[tabler--arrow-right-circle] icon-[tabler--brand-google] icon-[tabler--brand-windows]');
+@source inline('icon-[tabler--lock-open] icon-[tabler--link] icon-[tabler--key] icon-[tabler--database] icon-[tabler--brand-docker]');
+/* server-driven passkey device icons (describePasskeyDevice in lib/ui-routes/auth-routes.js) */
+@source inline('icon-[tabler--fingerprint] icon-[tabler--device-mobile] icon-[tabler--usb]');
+
+@theme {
+    --font-sans: 'PT Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    /* single source for the sidebar width: w-sidebar on the aside,
+     * lg:ps-sidebar on the content column */
+    --spacing-sidebar: 18rem;
+    /* height of the sticky topbar: the secondary nav column sticks directly
+     * below it (lg:top-topbar) and sizes its scroll region against it, so the
+     * two must agree */
+    --spacing-topbar: 2.9375rem;
+    /* one step below text-xs, for the dense metadata labels in the API
+     * reference (required markers, constraint chips, nav method labels) */
+    --text-2xs: 0.6875rem;
+    --text-2xs--line-height: calc(1 / 0.6875);
+}
+
+@layer base {
+    /* The admin shell's topbar is sticky, and a page may stick a band of its own under it
+     * (the API reference's "no access token" banner, whose measured height static/js/
+     * reference.js publishes). Telling the scroller about that inset covers every way
+     * something is scrolled into view - fragment links, scrollIntoView, find-in-page, the
+     * focus moving through a Try it panel - instead of only the classes that carry a
+     * scroll-margin of their own. On the class rather than on html because the login and
+     * public layouts load this stylesheet too and have no topbar to clear; the class is on
+     * <html> in views/layout/app.hbs. */
+    .ee-app-chrome {
+        scroll-padding-top: calc(var(--spacing-topbar) + var(--ee-sticky-band-h, 0px));
+    }
+
+    /* Tailwind preflight leaves hr at "1px solid currentColor" - a harsh
+     * full-contrast line in both themes; default every hr to the standard
+     * content-border token instead of classing each instance */
+    hr {
+        border-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+    }
+}
+
+/* Close button for the dismissable clear-alert-btn error alerts. Un-layered
+ * on purpose (unlike the components below) so it sits above the Tailwind
+ * layers. */
+.close {
+    float: right;
+    font-size: 1.5rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--color-base-content);
+    background: none;
+    border: 0;
+    padding: 0;
+    opacity: 0.5;
+    cursor: pointer;
+}
+.close:hover {
+    opacity: 0.75;
+}
+
+/* Tooltip overrides. Un-layered on purpose: FlyonUI emits .tooltip and .tooltip-content
+ * in @layer utilities, which beats any components-layer rule regardless of
+ * specificity. */
+/* FlyonUI centers .tooltip, which is the bubble AND the trigger inside it. A one-line
+ * trigger never shows it; a multi-line bubble and a dashboard tile label that wraps
+ * ("Webhooks delivered" in a two-up phone grid) both read better left-aligned, the
+ * latter because it sits in a left-aligned card. ui/tooltip renders nothing but the
+ * toggle and the content, so one rule on the wrapper covers both. */
+.tooltip {
+    text-align: start;
+}
+/* tooltips float above the sidebar (lg:z-40) and topbar; FlyonUI's default
+ * z-20 leaves bubbles clipped under the drawer. The width cap makes long
+ * tooltip texts wrap (FlyonUI's width:max-content otherwise renders them as
+ * one viewport-wide line); balance keeps the wrapped lines even. */
+.tooltip .tooltip-content {
+    z-index: 60;
+    max-width: 20rem;
+}
+.tooltip .tooltip-body {
+    /* block, not inline: an inline body fragments its background into one
+     * box per wrapped line */
+    display: block;
+    text-wrap: balance;
+}
+
+/* empty-state gate for SSE state badges (ui/state-badge): while there is no
+ * error, the bubble must not render at all. Gated on the wrapper because
+ * HSTooltip's show() removes the hidden class from the content. */
+.tooltip.ee-tooltip-empty .tooltip-content {
+    display: none;
+}
+
+/* FlyonUI's .badge pins height to --size, so a badge whose label wraps keeps the
+ * one-line box and spills its second line over whatever follows - on the TLS page the
+ * three "used by" badges printed on top of each other. Grow instead: min-height keeps
+ * every single-line badge pixel-identical (one 20px line inside a 24px box), and a
+ * wrapped one gets the room it needs. Un-layered on purpose, like the rules around it:
+ * FlyonUI emits .badge from @layer utilities, which a layered rule of ours could not
+ * outrank whatever its specificity. */
+.badge {
+    height: auto;
+    min-height: var(--size);
+}
+
+/* FlyonUI's .link keeps the surrounding text color (the only resting cue is
+ * a font-weight bump) and .link-animated hides the underline until hover, so
+ * links read as plain text. Color them with the brand primary so they are
+ * recognizable at rest; hover keeps the animated underline. Un-layered on
+ * purpose: FlyonUI sets --link-color in @layer utilities. NB: this also
+ * outranks FlyonUI's link-{primary,error,...} color modifiers (unused so
+ * far) - a semantic-colored link would need an explicit color override. */
+.link {
+    --link-color: var(--color-primary);
+}
+
+/* FlyonUI lays a tab strip out as a nowrap flex row with no overflow handling, so one
+ * wider than its column pushes the whole page sideways instead of adapting: an API reference
+ * operation documents up to eight status codes. Wrapping rather than scrolling because these
+ * are navigation - a second row keeps every tab reachable, where a scroller hides some behind
+ * an interaction with no affordance for it. No strip in the app wraps at desktop width. Here
+ * rather than on each strip: ui/tabs and the hand-rolled link navs (oauth_tabs, the
+ * auth-method strip in oauth_form) all need it. Un-layered on purpose, like the rules around
+ * it: FlyonUI emits .tabs from @layer utilities. */
+.tabs {
+    flex-wrap: wrap;
+}
+
+/* Segmented (pill) tab strip, used through ui/tabs variant="segment" for a
+ * choice nested inside a page whose top already carries a bordered tab row -
+ * a second identical bordered row would read as the same navigation level.
+ * FlyonUI ships no segmented tabs variant, only bordered/lifted/sizes. The
+ * active state is the same .active class the FlyonUI data-tabs plugin toggles
+ * on .tab buttons. Un-layered on purpose: FlyonUI emits .tab and .tab-active
+ * in @layer utilities, which beats any components-layer rule regardless of
+ * specificity - in a layer, the pill metrics and colors would all be dead
+ * declarations. The active color is stated explicitly because these
+ * un-layered rules in turn beat .tab-active's own primary. */
+.tabs-segment {
+    background-color: var(--color-base-200);
+    /* visible on the base-200 page ground too, not only on base-100 cards */
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent);
+    border-radius: var(--radius-field, 0.375rem);
+    padding: 0.25rem;
+    gap: 0.25rem;
+    width: fit-content;
+}
+.tabs-segment .tab {
+    height: 2rem;
+    border-radius: calc(var(--radius-field, 0.375rem) - 0.125rem);
+    padding-inline: 0.75rem;
+    font-size: 0.875rem;
+    color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+}
+.tabs-segment .tab:hover {
+    color: var(--color-base-content);
+}
+.tabs-segment .tab.active {
+    background-color: var(--color-base-100);
+    color: var(--color-primary);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.08);
+}
+
+/* highlight.js colors live in the hand-vendored static/css/highlight.min.css,
+ * rewritten to the FlyonUI theme tokens (single source; no load-order or
+ * specificity coupling between the two sheets). */
+
+/* Fullscreen ACE editor container (uiEditorFullscreen in ui.js). Un-layered
+ * with !important on purpose: ACE injects its own un-layered
+ * .ace_editor{position:relative} stylesheet at runtime, which beats any
+ * @layer rule in the cascade and previously kept the editor collapsed.
+ * NB: un-layered !important loses to layered !important (layer order
+ * reverses for important declarations), so a !-prefixed Tailwind utility
+ * on the same element/property would override this - do not use those on
+ * the editor containers. */
+.full-screen-div {
+    z-index: 9999;
+    width: 100% !important;
+    height: 100% !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+}
+
+/* ---------------------------------------------------------------------------
+ * EmailEngine custom components (ported from static/css/app.css, callout.css
+ * and emailengine.css; colors converted to theme tokens for light+dark)
+ * ------------------------------------------------------------------------- */
+@layer components {
+    /* Settings row on the account security page: label / value / action. Three columns from
+     * the sm breakpoint up, stacked below it - the row used a bare grid-cols-3 at every
+     * width, and at 390px each column is ~110px, narrow enough that every multi-word button
+     * label wrapped out of its own fixed-height box. Stacked, the action goes full width the
+     * way a form button does on a phone.
+     *
+     * The action buttons share one width so the right-hand column reads as a column: with
+     * natural widths the labels here run 108px to 174px, and right-aligning them left a
+     * ragged staircase of left edges. A class rather than utilities because the rule is one
+     * definition for every row, and the min-width has to be lifted again for the one row
+     * that carries a pair of buttons. */
+    .ee-setting-row {
+        display: grid;
+        gap: 0.5rem;
+    }
+
+    /* Stacked: a column, so a row carrying two buttons keeps them apart instead of letting
+     * them touch */
+    .ee-setting-action {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .ee-setting-action .btn {
+        width: 100%;
+    }
+
+    @media (width >= 40rem) {
+        .ee-setting-row {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .ee-setting-action {
+            flex-direction: row;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .ee-setting-action .btn {
+            width: auto;
+            min-width: 12.5rem;
+        }
+
+        /* A row whose action is a pair of dialogs shares the width between them instead of
+         * claiming the single-action width twice */
+        .ee-setting-action-pair .btn {
+            min-width: 0;
+        }
+    }
+
+    /* FlyonUI ships no badge-neutral variant (the base .badge already uses
+     * neutral tokens); define it explicitly so the SSE badge updater's
+     * class swaps (badge-${type} with type "neutral") stay meaningful */
+    .badge-neutral {
+        --badge-color: var(--color-neutral);
+        --badge-fg: var(--color-neutral-content);
+    }
+
+
+    /* Code/output panel: theme-aware block for <pre> content (integration
+     * examples, error dumps, usage snippets). One definition instead of the
+     * utility string repeated at every call site. */
+    .ee-code-block {
+        background-color: var(--color-base-200);
+        border-radius: var(--radius-box, 1rem);
+        overflow-x: auto;
+        padding: 1rem;
+        font-size: 0.875rem;
+        line-height: 1.4286;
+    }
+
+    /* Inline code / metadata pill. The block-level counterpart is
+     * .ee-code-block above; there was no inline equivalent before. .ee-code is
+     * emitted from lib/api-reference/format.js for every backtick span in a
+     * schema description, which the Tailwind scanner never sees - so this has
+     * to be a class, not utilities. */
+    .ee-code,
+    .ee-chip,
+    .ee-ref-example-value {
+        background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+        border-radius: var(--radius-field, 0.375rem);
+        padding: 0.0625rem 0.375rem;
+        font-family: var(--font-mono, ui-monospace, monospace);
+        font-size: 0.75rem;
+    }
+    /* A prose code span holds together on one line. A chip does not: a few spell out a list -
+     * the accepted proxy URI schemes run to 366px - and a chip that cannot break pushed the
+     * whole page sideways on a phone. Chips sit in wrapping flex rows, so one only breaks
+     * internally when it does not fit a line of its own; on the Account page that is 5 of 420. */
+    .ee-code {
+        white-space: nowrap;
+    }
+    /* .ee-chip is the muted variant, for constraint and default markers */
+    .ee-chip {
+        color: color-mix(in oklab, var(--color-base-content) 65%, transparent);
+    }
+
+    /* --- API reference (/admin/reference) ---------------------------------
+     * The schema trees are deeply nested lists rendered by a recursive
+     * partial, so their look comes from a class rather than utilities. These
+     * class names double as the e2e selectors in test/e2e/reference.spec.js. */
+    /* Each list of rows is its own size container, which is what lets a row split on the
+     * width it actually has - see .ee-ref-prop-row. */
+    .ee-ref-props {
+        display: flex;
+        flex-direction: column;
+        container-type: inline-size;
+    }
+    .ee-ref-nest {
+        border-inline-start: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+        padding-inline-start: 0.75rem;
+    }
+
+    /* One property row: name, type and constraint chips in a rail, prose in a column
+     * beside it. Before this the name sat above its own description at the same left edge,
+     * and the description ran the full 800px content width - about 120 characters against
+     * a comfortable 45 to 75 - so the one token a reader scans for was the least
+     * distinguishable thing on the row and 128 of them read as a single grey field.
+     *
+     * The hairline replaces the old 0.625rem gap rather than adding to it, which keeps a
+     * long list the same height as before while making its rows countable.
+     *
+     * A container query, not a viewport one. A row never sees the viewport: the admin shell
+     * takes an 18rem sidebar and the reference a further 16rem nav column, BOTH of which
+     * appear at lg - so a viewport breakpoint fires just as the row gets narrower, not when
+     * it gets wider. Nesting then subtracts another 0.75rem per level through .ee-ref-nest,
+     * up to nine levels deep. Asking the row's own list how wide it is holds in every one of
+     * those cases with no breakpoint bookkeeping. */
+    .ee-ref-prop-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.1rem 0.9rem;
+        padding-block: 0.3rem;
+        border-block-start: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    }
+    .ee-ref-props > .ee-ref-prop:first-child > .ee-ref-prop-row {
+        border-block-start: 0;
+        padding-block-start: 0;
+    }
+    @container (width >= 30rem) {
+        .ee-ref-prop-row {
+            grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+        }
+    }
+    .ee-ref-prop-rail {
+        display: flex;
+        flex-direction: column;
+        gap: 0.1rem;
+        min-width: 0;
+    }
+    /* The two wrapping lines inside the rail (name, then type and chips). A class rather
+     * than the utility string at both call sites: the recursive partial emits this twice
+     * per property, so on the Account tag page that is 836 copies of it. */
+    .ee-ref-prop-line {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 0.375rem;
+        row-gap: 0.25rem;
+    }
+    /* Capped measure for the prose. In rem rather than ch so the cap does not drift with
+     * whatever font-size the row inherits. */
+    .ee-ref-prop-body {
+        min-width: 0;
+        max-width: 34rem;
+    }
+
+    /* The example value on a property row. It takes the shared size and shape above so it
+     * belongs to the same family as the constraint markers, and overrides only the colour:
+     * primary text on a primary-tinted ground, because it is the one thing on the row that
+     * is a specimen rather than a statement about the field. Muting it into .ee-chip made it
+     * read as another constraint; leaving it as plain prose made it read as the end of the
+     * sentence it follows.
+     *
+     * It breaks internally rather than pushing the row sideways. A cut value is closed off
+     * by formatExample() in lib/api-reference/format.js, so what wraps is at most 43
+     * characters. */
+    .ee-ref-example-value {
+        background-color: color-mix(in oklab, var(--color-primary) 10%, transparent);
+        color: color-mix(in oklab, var(--color-primary) 85%, var(--color-base-content));
+        overflow-wrap: anywhere;
+    }
+
+    /* A usage note is prose about a decision, so it gets the same left rule the nested
+     * property lists use, in the primary colour to tie it to the disclosure that opened it. */
+    .ee-ref-usage {
+        border-inline-start: 2px solid color-mix(in oklab, var(--color-primary) 45%, transparent);
+        padding-inline-start: 0.625rem;
+    }
+
+    /* The Try it request body editor keeps .code-editor's border and radius but sizes itself
+     * from its content: static/js/reference.js gives it minLines/maxLines, which .code-editor's
+     * fixed 14rem would otherwise fight. */
+    .ee-ref-body-editor {
+        height: auto;
+    }
+
+    /* Example payloads open by default, so the shape of a response is the first thing a
+     * reader meets rather than 128 property rows. That only works if the cost is bounded:
+     * the AccountResponse example alone pretty-prints to about 130 lines, and thirteen of
+     * those on one tag page is worse than what it replaced. Past this height the block
+     * scrolls inside itself, which keeps every operation the same size on the page.
+     *
+     * Bounded is not the same as hidden, though, and it used to be: the submit request
+     * example is 392px of content in a 240px box, so 40% of it sat below an edge with
+     * nothing to say so. The four background layers are the standard pure-CSS scroll
+     * shadow: the two `local` layers scroll with the content and mask the two `scroll`
+     * layers, so a shadow appears at the top only when there is something above and at the
+     * bottom only when there is something below. No script, and no shadow at all on a block
+     * that fits. */
+    .ee-ref-example {
+        max-height: 15rem;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        background-image: linear-gradient(to bottom, var(--color-base-200), transparent), linear-gradient(to top, var(--color-base-200), transparent),
+            linear-gradient(to bottom, color-mix(in oklab, var(--color-base-content) 16%, transparent), transparent),
+            linear-gradient(to top, color-mix(in oklab, var(--color-base-content) 16%, transparent), transparent);
+        background-position:
+            top,
+            bottom,
+            top,
+            bottom;
+        background-size:
+            100% 1.25rem,
+            100% 1.25rem,
+            100% 0.5rem,
+            100% 0.5rem;
+        background-repeat: no-repeat;
+        background-attachment: local, local, scroll, scroll;
+    }
+
+    /* Room to breathe above a jump target - operations linked from the sidebar and from
+     * #operationId, property rows from #operation.body.field. The sticky chrome above them is
+     * NOT in here: that is scroll-padding on the scroller (.ee-app-chrome in @layer base), and
+     * counting it twice would park every deep link a band's height below where it belongs.
+     * Also keep any scroll-mt-* utility off these elements - utilities are emitted after this
+     * layer and would silently replace it. */
+    .ee-ref-op,
+    .ee-ref-prop {
+        scroll-margin-top: 2rem;
+    }
+
+    /* Deep-link icons (reference/anchor-link), on operation headings and on every
+     * property row. One definition instead of the utility string repeated at every
+     * call site - a tag page renders up to 434 of these. */
+    .ee-ref-anchor {
+        color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+        flex-shrink: 0;
+    }
+    .ee-ref-anchor:hover {
+        color: var(--color-primary);
+    }
+
+    /* Property links stay hidden until their row is hovered. The rule hangs off the row
+     * rather than the list item because the item CONTAINS the nested rows, so hovering a
+     * leaf would reveal the link on every one of its ancestors too. The row holds only
+     * this property's own rail and prose, which makes it exact at every depth (same
+     * reasoning as the disclosure chevron below). */
+    .ee-ref-prop-anchor {
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+    .ee-ref-prop-row:hover .ee-ref-prop-anchor,
+    .ee-ref-prop-anchor:focus-visible {
+        opacity: 1;
+    }
+
+    /* Arriving on a linked property. :target needs no script, so the row is marked
+     * even if the deep link lands on an already-expanded group. */
+    .ee-ref-prop:target > .ee-ref-prop-row {
+        background: color-mix(in oklab, var(--color-primary) 12%, transparent);
+        border-radius: var(--radius-field);
+        box-shadow: 0 0 0 0.25rem color-mix(in oklab, var(--color-primary) 12%, transparent);
+    }
+    .ee-ref-prop:target > .ee-ref-prop-row .ee-ref-prop-anchor {
+        opacity: 1;
+    }
+
+    /* Collapsible section (reference/disclosure). The chevron rotation is here
+     * rather than on Tailwind's group-open variant because these disclosures
+     * nest: a named group matches ANY open ancestor, so an inner collapsed
+     * group's chevron would rotate whenever an outer one was open. The child
+     * combinator below is exact at every depth. */
+    .ee-ref-disclosure > summary .ee-ref-chevron {
+        transition: transform 0.2s;
+    }
+    .ee-ref-disclosure[open] > summary .ee-ref-chevron {
+        transform: rotate(90deg);
+    }
+
+    /* Typography island for server-rendered markdown (marked output: the EULA
+     * on /license.html and the branding preview page). Preflight strips all
+     * default heading sizes, margins and list bullets, so restore a minimal
+     * document look for bare elements inside the island. */
+    .ee-prose h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin: 1.5rem 0 0.75rem;
+    }
+    .ee-prose h2 {
+        font-size: 1.25rem;
+        font-weight: 700;
+        margin: 1.25rem 0 0.625rem;
+    }
+    .ee-prose h3 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        margin: 1rem 0 0.5rem;
+    }
+    .ee-prose h4,
+    .ee-prose h5,
+    .ee-prose h6 {
+        font-weight: 600;
+        margin: 1rem 0 0.5rem;
+    }
+    .ee-prose p {
+        margin: 0 0 0.75rem;
+    }
+    .ee-prose ul,
+    .ee-prose ol {
+        margin: 0 0 0.75rem;
+        padding-inline-start: 1.5rem;
+    }
+    .ee-prose ul {
+        list-style: disc;
+    }
+    .ee-prose ol {
+        list-style: decimal;
+    }
+    .ee-prose li {
+        margin: 0.25rem 0;
+    }
+    .ee-prose blockquote {
+        border-inline-start: 3px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+        padding-inline-start: 1rem;
+        margin: 0.75rem 0;
+        color: color-mix(in oklab, var(--color-base-content) 80%, transparent);
+    }
+    .ee-prose a {
+        color: var(--color-primary);
+        text-decoration: underline;
+    }
+
+    /* Description list: label column + value column (replaces the Bootstrap
+     * dl.row + dt.col-sm-3/dd.col-sm-9 pattern used across detail pages) */
+    .ee-dl {
+        display: grid;
+        grid-template-columns: 1fr;
+        row-gap: 0.25rem;
+        column-gap: 1rem;
+    }
+    .ee-dl dt {
+        font-weight: 700;
+    }
+    .ee-dl dd {
+        margin: 0 0 0.5rem 0;
+        min-width: 0;
+    }
+    @media (min-width: 640px) {
+        .ee-dl {
+            grid-template-columns: 11rem minmax(0, 1fr);
+        }
+        .ee-dl dd {
+            margin-bottom: 0.25rem;
+        }
+    }
+
+    /* illustration half of the split login card (layout/login.hbs) */
+    .bg-login-page-image {
+        background: url(/static/logo_wide.png);
+        background-position: center;
+        background-size: cover;
+    }
+
+    /* ACE editor wrapper chrome (the editors themselves style their content) */
+    .code-editor {
+        width: 100%;
+        height: 14rem;
+        border: var(--border, 1px) solid var(--color-base-300);
+        border-radius: var(--radius-field, 0.375rem);
+    }
+
+    /* Template editor toolbar attached below an editor box */
+    .editor-embed-block {
+        text-align: left;
+        padding-top: 0;
+        margin-top: -2px;
+    }
+    .editor-embed-content {
+        font-weight: 300;
+        font-size: 13px;
+        display: inline-block;
+        padding: 2px 10px;
+        background: var(--color-base-100);
+        border: var(--border, 1px) solid var(--color-base-300);
+        border-top: none;
+        border-bottom-left-radius: 4px;
+        border-bottom-right-radius: 4px;
+        text-decoration: none;
+    }
+    .editor-embed-content-left {
+        border-bottom-right-radius: 0;
+        border-top-left-radius: 0;
+        margin-right: -4px;
+    }
+    .editor-embed-content-right {
+        border-bottom-left-radius: 0;
+        border-top-left-radius: 0;
+        border-left: 0;
+        margin-left: 0;
+    }
+
+    /* the toolbar's label cell (editor title) - visually distinct from the
+     * clickable action cells */
+    .editor-embed-title {
+        background: var(--color-base-200);
+        font-weight: 600;
+        color: color-mix(in oklab, var(--color-base-content) 80%, transparent);
+    }
+    /* action links in the toolbar read as interactive */
+    .editor-embed-content a {
+        color: var(--color-primary);
+    }
+    .editor-embed-content a:hover {
+        text-decoration: underline;
+    }
+
+    .error-log-field {
+        font-family: var(--font-mono);
+        font-size: 0.8em;
+        border: var(--border, 1px) solid var(--color-base-300);
+        margin: 0;
+        padding: 1px;
+        display: block;
+        width: 100%;
+        height: 5rem;
+        color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    }
+
+    .droptxt,
+    .code-link {
+        font-family: var(--font-mono);
+        font-size: 0.8em;
+    }
+    .dragover {
+        box-shadow: 2px 2px color-mix(in oklab, var(--color-base-content) 45%, transparent);
+    }
+
+    .popover-list {
+        margin: 0 0 0 10px;
+        padding: 0;
+        list-style: square;
+    }
+    .popover-list li {
+        margin: 0;
+        padding: 0;
+    }
+
+    .alert-margin .alert {
+        margin: 10px 10px 0 0;
+    }
+
+    /* --- Account picker (ui/account-picker) --------------------------------
+     * The suggestion list and the card that replaces the search box once an
+     * account is picked. Classes rather than utilities because the list is an
+     * overlay: it has to be positioned, layered and scroll-bounded as one
+     * piece, and that is a component rather than a string of utilities on a
+     * node ui.js builds. (Utilities in ui.js ARE scanned - it is an @source
+     * above - so the row-level styling stays inline there.) */
+    .ee-account-picker-search {
+        position: relative;
+    }
+    .ee-account-picker-results {
+        position: absolute;
+        z-index: 20;
+        inset-inline: 0;
+        top: calc(100% + 0.25rem);
+        max-height: 18rem;
+        overflow-y: auto;
+        /* the list is an overlay over page content, so it needs its own ground */
+        background-color: var(--color-base-100);
+        border: var(--border, 1px) solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+        border-radius: var(--radius-box, 0.5rem);
+        box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+        padding: 0.25rem;
+    }
+    .ee-account-picker-option {
+        display: block;
+        width: 100%;
+        text-align: start;
+        cursor: pointer;
+        padding: 0.5rem 0.625rem;
+        border-radius: var(--radius-field, 0.375rem);
+        /* every row is one account: its lines must not wrap into each other */
+        min-width: 0;
+    }
+    /* Hover and keyboard land on the same highlight, so the row under the
+     * pointer and the row Enter would pick are never two different rows. */
+    .ee-account-picker-option.is-active {
+        background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    }
+    /* A modal body scrolls its own content (`overflow: hidden auto` in FlyonUI), which would clip
+     * the overlay to whatever room is left below the field. In flow the body simply grows and
+     * scrolls to the list instead - keyed on the ancestor rather than on a class ui.js would have
+     * to add, since the DOM already says where the picker is. */
+    .modal-body .ee-account-picker-results {
+        position: static;
+        margin-top: 0.25rem;
+        box-shadow: none;
+    }
+    .ee-account-picker-note {
+        padding: 0.5rem 0.625rem;
+        font-size: 0.875rem;
+        color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    }
+    .ee-account-picker-card {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.625rem 0.75rem;
+        border: var(--border, 1px) solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+        border-radius: var(--radius-field, 0.375rem);
+        background-color: var(--color-base-200);
+    }
+}
+
+/* A table whose cells hold sentences. FlyonUI's .table sets every cell nowrap from the
+ * utilities layer, which is right for ids and badges and wrong for a status line under a
+ * hostname. A utility of our own is the only thing that can outrank it: same layer, and
+ * :is() carries the element's specificity where the library's :where() carries none. A cell
+ * that must stay on one line puts whitespace-nowrap on a wrapper inside the cell. */
+@utility ee-table-wrap {
+    & :is(th, td) {
+        white-space: normal;
+    }
+}
+
+/* Setting row: the control on the left, its setting reference (and usually a state badge)
+ * on the right. On a phone the two do not fit beside each other - ui/checkbox's root is
+ * w-full and a setting key does not wrap, so the label was squeezed into a column of single
+ * words - and the reference column has to span the line it wraps onto, or it lands
+ * shrink-to-fit at the start and its text-end does nothing. One utility rather than the same
+ * two variants written at every call site, the same reasoning as .ee-setting-row above. */
+@utility ee-toggle-row {
+    @media (width < 40rem) {
+        flex-wrap: wrap;
+
+        & > *:last-child {
+            width: 100%;
+        }
+    }
+}
+
+/* A resource list that stops being a table on a phone. FlyonUI's .table only offers a
+ * horizontally scrolling container, so at 390px an accounts list shows the Name column and
+ * hides the connection status, and a half-cut second column reads as broken rather than as
+ * something to scroll. Below the md breakpoint each row becomes a stacked block: the column
+ * names move out of the head and into each cell through data-label, the first cell (no
+ * data-label) stays the row's heading, and a cell marked .ee-stack-actions floats its kebab
+ * over that heading. Same layer + :is() reasoning as ee-table-wrap above - the library's cell
+ * rules are utilities-layer :where(), so only a utility of our own can outrank them.
+ * A min-w-[...] that keeps the desktop columns readable has to carry an md: prefix: the
+ * stacked table is a block, so an unprefixed one applies to it and forces a scroller anyway,
+ * and nothing here can override it (same layer, and the utility is emitted later). */
+@utility ee-table-stack {
+    @media (width < 48rem) {
+        display: block;
+
+        & thead {
+            display: none;
+        }
+
+        & tbody {
+            display: block;
+        }
+
+        /* the row separator is .table's own and keeps applying to a display:block row */
+        & tbody tr {
+            display: block;
+            position: relative;
+            padding: 0.75rem 1rem;
+        }
+
+        /* room for the floated kebab, only in the rows that carry one */
+        & tbody tr:has(.ee-stack-actions) {
+            padding-inline-end: 3rem;
+        }
+
+        & :is(td, tbody th) {
+            /* flow-root, not block: the label below is a float, and a plain block box would
+             * let it escape an empty cell and sit beside the next cell's content */
+            display: flow-root;
+            width: auto;
+            padding: 0.125rem 0;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            /* a right-aligned numeric column reads as stray text once the head is gone */
+            text-align: start;
+        }
+
+        /* The label floats rather than taking a flex or grid slot: a cell is free to hold
+         * several blocks (the tokens list puts a scope list, a badge and a sentence in one),
+         * and as flex items those share the row's width and each collapse into a column of
+         * single letters. Floated, the first line runs on after the label and anything
+         * taller simply continues underneath it. */
+        & :is(td, tbody th)[data-label]::before {
+            content: attr(data-label);
+            float: inline-start;
+            margin-inline-end: 0.75rem;
+            color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+            font-size: 0.6875rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            line-height: 1.25rem;
+        }
+
+        /* :not(.hidden) so the re-assertion below still wins for a hidden actions cell -
+         * this selector is one class heavier than it is */
+        & td.ee-stack-actions:not(.hidden) {
+            position: absolute;
+            top: 0.5rem;
+            inset-inline-end: 0.5rem;
+            padding: 0;
+        }
+
+        /* Re-assert display:none. The rules above name an element as well as this class,
+         * so they outrank a bare .hidden and would reveal a row the page keeps collapsed -
+         * the TLS hostname list carries one hidden row per name for the "why the last order
+         * failed" line, and it appeared as an empty info alert. */
+        & .hidden,
+        & [hidden] {
+            display: none;
+        }
+    }
+}

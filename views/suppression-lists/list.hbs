@@ -1,0 +1,92 @@
+{{> ui/breadcrumb parentHref="/admin/suppression-lists" parentLabel="Suppression Lists" current=listId class="mb-6"}}
+
+{{#> ui/card}}
+
+    {{#> ui/detail-toolbar label="Suppression list actions"}}
+    {{> ui/btn variant="primary" style="outline" size="sm" icon="icon-[tabler--plus]" label="Add address" overlay="#addAddressModal"}}
+    {{> ui/btn variant="error" style="outline" size="sm" icon="icon-[tabler--trash]" label="Delete list" overlay="#deleteListModal"}}
+    {{/ui/detail-toolbar}}
+
+    <h6 class="card-title">{{listId}}</h6>
+    <h6 class="mb-6 text-base-content/60">{{total}} suppressed {{#equals total 1}}address{{else}}addresses{{/equals}}</h6>
+
+    <div class="overflow-x-auto">
+        <table class="table ee-table-stack">
+            <thead>
+                <tr>
+                    <th>Address</th>
+                    <th>Reason</th>
+                    <th>Source</th>
+                    <th>Account</th>
+                    <th>Added</th>
+                    <th class="w-12"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {{#each addresses}}
+                <tr class="hover:bg-base-200/60">
+                    <td><strong>{{recipient}}</strong></td>
+                    <td data-label="Reason">{{reason}}</td>
+                    <td data-label="Source">{{source}}</td>
+                    <td data-label="Account">
+                        {{#if account}}
+                        <a href="/admin/accounts/{{urlpart account}}" class="link link-primary">{{account}}</a>
+                        {{else}}
+                        <span class="text-base-content/60">-</span>
+                        {{/if}}
+                    </td>
+                    <td data-label="Added">
+                        {{!-- every other list renders its stamps through app.js; this one printed the raw ISO string --}}
+                        <span class="text-base-content/60 relative-time" data-time="{{created}}">{{created}}</span>
+                    </td>
+                    <td class="ee-stack-actions relative text-end">
+                        {{!-- The condition sits OUTSIDE the ui/row-actions block on purpose: a partial
+                             block whose content is nothing but a {{#if}} wrapper loses its content to a
+                             Handlebars program-association bug (the menu rendered without the items).
+                             Keep the block's first content token a static element. --}}
+                        {{#if unsubscribeUrl}}
+                        {{#> ui/row-actions label="Address actions" deleteModal="#deleteEntry" deleteId=recipient deleteName=recipient}}
+                        <li><a class="dropdown-item" href="{{unsubscribeUrl}}" target="_blank" rel="noopener noreferrer">
+                                <span class="icon-[tabler--external-link] size-4"></span>
+                                Subscription page</a></li>
+                        <li><button type="button" class="dropdown-item copy-btn" data-copy-value="{{unsubscribeUrl}}">
+                                <span class="icon-[tabler--copy] size-4"></span>
+                                Copy page link</button></li>
+                        {{/ui/row-actions}}
+                        {{else}}
+                        {{> ui/row-actions label="Address actions" deleteModal="#deleteEntry" deleteId=recipient deleteName=recipient}}
+                        {{/if}}
+                    </td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+    </div>
+
+    {{> ui/pagination showPaging=showPaging prevPage=prevPage nextPage=nextPage pageLinks=pageLinks}}
+
+{{/ui/card}}
+
+{{#> ui/modal id="addAddressModal" title="Add suppressed address"}}
+<form method="post" action="/admin/suppression-lists/add">
+    <input type="hidden" name="crumb" value="{{crumb}}">
+    <input type="hidden" name="listId" value="{{listId}}">
+    <div class="modal-body space-y-4">
+        {{> ui/form-field id="add-recipient" name="recipient" label="Email address" type="email" required=true placeholder="user@example.com"}}
+        {{> ui/form-field id="add-reason" name="reason" label="Reason" placeholder="block" hint="Optional identifier stored with the entry (default: block)."}}
+    </div>
+    <div class="modal-footer">
+        {{> ui/btn label="Cancel" variant="neutral" style="soft" overlay=closeOverlay}}
+        {{> ui/btn label="Add address" variant="primary" type="submit" icon="icon-[tabler--plus]"}}
+    </div>
+</form>
+{{/ui/modal}}
+
+{{#> ui/delete-modal id="deleteEntry" noun="address" action=(concat "/admin/suppression-lists/list/" listId "/remove") fieldName="recipient"}}
+Remove <strong class="delete-target-name"></strong> from this suppression list? This address will be eligible to receive emails sent with this list ID again.
+{{/ui/delete-modal}}
+
+{{#> ui/confirm-modal id="deleteListModal" title="Delete suppression list" action="/admin/suppression-lists/delete" fieldName="listId" fieldValue=listId submitLabel="Delete list"}}
+Delete <strong>{{listId}}</strong> and all its entries? These addresses will no longer be excluded from emails sent with this list ID. This action cannot be undone.
+{{/ui/confirm-modal}}

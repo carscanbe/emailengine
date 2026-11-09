@@ -75,27 +75,27 @@ function createMockRedis() {
                     }
                     return results;
                 },
-                sadd: function (key, ...members) {
+                sadd(key, ...members) {
                     ops.push(() => redis.sadd(key, ...members));
                     return this;
                 },
-                hmset: function (key, data) {
+                hmset(key, data) {
                     ops.push(() => redis.hmset(key, data));
                     return this;
                 },
-                hdel: function (key, fields) {
+                hdel(key, fields) {
                     ops.push(() => redis.hdel(key, fields));
                     return this;
                 },
-                del: function (key) {
+                del(key) {
                     ops.push(() => redis.del(key));
                     return this;
                 },
-                srem: function (key, ...members) {
+                srem(key, ...members) {
                     ops.push(() => redis.srem(key, ...members));
                     return this;
                 },
-                scard: function (key) {
+                scard(key) {
                     ops.push(() => redis.scard(key));
                     return this;
                 }
@@ -146,10 +146,12 @@ function createMockRedis() {
         disconnect: () => {},
         on: () => {},
         off: () => {},
+        // The lock scripts ioredfour defines. A granted lock answers {1, index, ttl} like the real
+        // script does: ioredfour 2 refuses to release a lock whose index is not a number
         defineCommand: name => {
-            redis[name] = async () => [1, null, 0];
+            redis[name] = async () => [1, 1, 300000];
         },
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -170,9 +172,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -198,6 +198,9 @@ require.cache[ioredfourPath] = {
     parent: null,
     children: [],
     exports: class MockLock {
+        constructor() {
+            require('./helpers/fake-lock').withFakeWithLock(this);
+        }
         async waitAcquireLock(key) {
             return { success: true, id: `mock-lock-${key}`, key };
         }
@@ -205,11 +208,12 @@ require.cache[ioredfourPath] = {
             return { success: true, id: `mock-lock-${key}`, key };
         }
         async releaseLock() {}
+        on() {}
     }
 };
 
 // Now safe to import production modules
-const msgpack = require('msgpack5')();
+const msgpack = require('../lib/msgpack');
 const { oauth2Apps } = require('../lib/oauth2-apps');
 const settings = require('../lib/settings');
 const { GMAIL_PUBSUB_DEFAULT_EXPIRATION_TTL } = require('../lib/consts');
@@ -217,6 +221,7 @@ const { GMAIL_PUBSUB_DEFAULT_EXPIRATION_TTL } = require('../lib/consts');
 // Deterministic: no Gmail subscription TTL override -> ensurePubsub leaves Google's default policy,
 // so the "already exists" subscription path does not attempt a PATCH.
 settings.get = async () => undefined;
+settings.getMulti = async (...keys) => Object.fromEntries(await Promise.all(keys.map(async key => [key, await settings.get(key)])));
 
 const PROJECT = 'test-project';
 const GMAIL_PUBLISHER = 'serviceAccount:gmail-api-push@system.gserviceaccount.com';

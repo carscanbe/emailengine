@@ -39,5 +39,29 @@
         "name": "Dutch",
         "locale": "nl",
         "file": "nl.mo"
+    },
+
+    {
+        "name": "Swedish",
+        "locale": "sv",
+        "file": "sv.mo"
+    },
+
+    {
+        "name": "Spanish",
+        "locale": "es",
+        "file": "es.mo"
+    },
+
+    {
+        "name": "Italian",
+        "locale": "it",
+        "file": "it.mo"
+    },
+
+    {
+        "name": "Turkish",
+        "locale": "tr",
+        "file": "tr.mo"
     }
 ]

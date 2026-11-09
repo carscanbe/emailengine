@@ -3,26 +3,41 @@
 // Unit tests for the license-validation feature beacon (lib/license-beacon.js).
 //
 // Covers the pure helpers (tier bucketing, stable serialization, timeout) and the live collector
-// against the test Redis (DB 13). The collector is best-effort and must never throw, so the shape
-// assertions double as a "does not throw on a real but mostly-empty database" check. These tests
-// are read-only: they never mutate settings, so they are safe to run in the parallel unit tier.
+// against a real Redis. The collector is best-effort and must never throw, so the shape assertions
+// double as a "does not throw against a live database" check. collectBeacon() itself never writes;
+// the one test below that does writes inside this file's own keyspace and cleans up after itself.
 //
-// Requiring lib/license-beacon transitively opens Redis/BullMQ handles (via lib/db), so the test
-// force-exits after cleanup, mirroring test/tokens-test.js and test/ui-routes-table-test.js.
+// The keyspace is load-bearing, not housekeeping. The digest-stability check asserts that two
+// consecutive snapshots of unchanged state agree, and the snapshot it hashes counts accounts and
+// OAuth2 apps and reads instance settings - exactly what sibling files in the parallel tier create,
+// delete and toggle. Two calls straddling one of those writes disagree, and the assertion then fails
+// for a reason that has nothing to do with the collector being deterministic.
+//
+// A prefix rather than a database of this file's own, because only part of the snapshot travels over
+// the client collectBeacon() is handed: settings.getMulti(), oauth2Apps.list() and
+// passkeys.hasPasskeys() each hold lib/db's own connection and go on reading the tier's data
+// whatever client is passed in. All four read paths compose REDIS_PREFIX into their keys, so the
+// prefix isolates every one of them where a second connection isolates one. It is also how the rest
+// of the suite claims a keyspace - see test/tokens-test.js and test/settings-coupling-test.js.
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
+// Set test Redis prefix before loading modules
+process.env.EENGINE_REDIS_PREFIX = 'test_license_beacon';
+
 const { redis } = require('../lib/db');
 const logger = require('../lib/logger');
+const settings = require('../lib/settings');
+const { REDIS_PREFIX } = require('../lib/consts');
 const { collectBeacon, withTimeout, tier, stableStringify } = require('../lib/license-beacon');
+const registerRedisTeardown = require('./helpers/redis-teardown');
+
+// Requiring lib/license-beacon transitively opens Redis/BullMQ handles (via lib/db), which would
+// otherwise keep the runner alive after the tests have passed.
+registerRedisTeardown(redis);
 
 test('license beacon', async t => {
-    t.after(() => {
-        redis.quit();
-        setTimeout(() => process.exit(), 1000).unref();
-    });
-
     await t.test('tier() maps counts to coarse magnitude buckets', () => {
         const cases = [
             [0, 0],
@@ -70,12 +85,12 @@ test('license beacon', async t => {
         assert.match(result.fh, /^[0-9a-f]{12}$/, 'fh is a 12-char hex digest');
         assert.equal(result.diag.v, 1, 'schema version is present');
 
-        for (const key of ['feat', 'prov', 'oapp', 'use', 'dep', 'flags']) {
+        for (const key of ['feat', 'prov', 'oapp', 'use', 'dep']) {
             assert.ok(Array.isArray(result.diag[key]), `${key} is an array`);
         }
 
         // feat/dep/etc. are presence-only: every entry is a non-empty string code, never a boolean.
-        for (const key of ['feat', 'prov', 'oapp', 'use', 'dep', 'flags']) {
+        for (const key of ['feat', 'prov', 'oapp', 'use', 'dep']) {
             for (const entry of result.diag[key]) {
                 assert.equal(typeof entry, 'string', `${key} entries are strings`);
                 assert.ok(entry.length, `${key} entries are non-empty`);
@@ -94,7 +109,31 @@ test('license beacon', async t => {
         assert.equal(result.diag.arch, process.arch);
     });
 
+    await t.test('the collector reads the keyspace this file claims, which is what isolates it from the tier', async () => {
+        // EENGINE_REDIS_PREFIX only takes effect when it is set before lib/consts is first required.
+        // Nothing enforces that ordering, and getting it wrong costs nothing visible: REDIS_PREFIX
+        // falls back to empty, the collector reads the keyspace the whole parallel tier writes to,
+        // and the stability check below starts failing at random instead of failing here.
+        assert.ok(REDIS_PREFIX.startsWith('test_license_beacon'), 'the beacon tests must run in a keyspace of their own');
+
+        // settings.getMulti() is one of the three snapshot inputs that never travel over the client
+        // passed to collectBeacon() - it, oauth2Apps.list() and passkeys.hasPasskeys() each reach
+        // Redis through lib/db's own connection. Handing the collector a separate connection
+        // therefore isolates none of them, and only the shared prefix does. This is what holds them
+        // to it: a settings write inside this keyspace has to reach the digest.
+        const before = (await collectBeacon({ redis, logger })).fh;
+        await settings.set('webhooksEnabled', true);
+        try {
+            const after = (await collectBeacon({ redis, logger })).fh;
+            assert.notEqual(after, before, 'a settings change in this keyspace must reach the digest');
+        } finally {
+            await redis.hdel(`${REDIS_PREFIX}settings`, 'webhooksEnabled');
+        }
+    });
+
     await t.test('collectBeacon() digest is stable across calls when nothing changes', async () => {
+        // Nothing else in the run writes to this file's keyspace, so "nothing changes" holds for
+        // real between the two calls - see the note at the top of the file.
         const first = await collectBeacon({ redis, logger });
         const second = await collectBeacon({ redis, logger });
         assert.equal(first.fh, second.fh, 'identical state must produce an identical digest');

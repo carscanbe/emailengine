@@ -1,5 +1,5 @@
 <input type="hidden" id="wellKnownServices" value="{{wellKnownServices}}">
-<script>
+<script data-cfasync="false" nonce="{{cspNonce}}">
     document.addEventListener('DOMContentLoaded', () => {
         let wellKnownServices = JSON.parse(document.getElementById('wellKnownServices').value);
 
@@ -11,50 +11,42 @@
             }
         }
 
-        $('.basicAutoComplete').autoComplete({
-            resolver: 'custom',
-            events: {
-                search: function (query, callback) {
-                    let matches = wellKnownServices.filter(entry => (`${entry.key} / ${entry.description}`).toLowerCase().indexOf(query.toLowerCase().trim()) >= 0);
-                    callback(matches.map(entry => `${entry.key} / ${entry.description}`))
-                },
-                typed: function (newValue, origJQElement) {
-                    return newValue
-                }
-            },
-            preventEnter: true,
-            minLength: 1
-        }).on('change', function (a) {
-        }).on('autocomplete.select', function (e) {
-            if (e && e.type === 'autocomplete') {
-                let selectedValue = (e.currentTarget && e.currentTarget.value || '').split(' / ').shift().trim();
-                if (selectedValue) {
-                    let entry = wellKnownServices.find(a => a.key.toLowerCase().trim() === selectedValue.toLowerCase().trim())
-                    if (entry) {
-                        for (let key of Object.keys(entry)) {
-                            switch (key) {
-                                case 'host':
-                                    document.getElementById('host').value = entry[key];
-                                    break;
-                                case 'port':
-                                    document.getElementById('port').value = entry[key];
-                                    break;
-                                case 'secure':
-                                    document.getElementById('secure').checked = entry[key];
-                                    break;
-                            }
+        // native datalist suggestions; picking a well-known service autofills
+        // host/port/secure through the input listener below
+        let autoCompleteElms = document.querySelectorAll('.basicAutoComplete');
+        uiDatalist(
+            'well-known-services-list',
+            wellKnownServices.map(entry => entry.key + ' / ' + entry.description),
+            autoCompleteElms
+        );
 
-                        }
-                    }
-                }
-
+        let applyWellKnownService = value => {
+            let selectedValue = (value || '').split(' / ').shift().trim().toLowerCase();
+            if (!selectedValue) {
+                return;
             }
-        });
+            let entry = wellKnownServices.find(a => a.key.toLowerCase().trim() === selectedValue);
+            if (!entry) {
+                return;
+            }
+            if ('host' in entry) {
+                document.getElementById('host').value = entry.host;
+            }
+            if ('port' in entry) {
+                document.getElementById('port').value = entry.port;
+            }
+            if ('secure' in entry) {
+                document.getElementById('secure').checked = entry.secure;
+            }
+        };
+
+        for (let inputElm of autoCompleteElms) {
+            inputElm.addEventListener('input', () => applyWellKnownService(inputElm.value));
+        }
 
         const sendTestPayload = async () => {
 
             const payload = {
-                crumb: document.getElementById('crumb').value,
                 gateway: document.getElementById('gateway').value || '',
                 host: document.getElementById('host').value,
                 port: Number(document.getElementById('port').value) || 0,
@@ -63,28 +55,17 @@
                 secure: document.getElementById('secure').checked
             }
 
-            const res = await fetch('/admin/gateways/test', {
-                method: 'post',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-            if (!res.ok) {
-                throw new Error(`HTTP error! status: ${res.status}`);
-            }
-            const data = await res.json();
-
-            console.log(data)
-
-            return data;
+            return await uiPostJson('/admin/gateways/test', payload);
         }
 
-        document.getElementById('test-verify-btn').addEventListener('click', e => {
+        const testVerifyBtn = document.getElementById('test-verify-btn');
+        testVerifyBtn.addEventListener('click', e => {
             e.preventDefault()
-            sendTestPayload().then(data => {
-                showToast(data.error ? data.error : (data.success ? data.message || 'Connection successful' : 'Failed to establish connection'), data.success ? 'check-circle' : 'alert-triangle');
-            }).catch(err => {
-                showToast('Request failed\n' + err.message, 'alert-triangle');
-            })
+            // Busy for as long as the SMTP server takes to answer - otherwise the button looks
+            // unpressed and gets clicked again, opening another connection to the same server.
+            uiBusyAction(testVerifyBtn, () =>
+                sendTestPayload().then(data => uiToastResult(data, data.message || 'Connection successful', 'Failed to establish connection'))
+            );
         });
     })
 </script>

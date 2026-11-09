@@ -1,0 +1,407 @@
+'use strict';
+
+// The MCP wire protocol state machine (lib/mcp/protocol.js): version negotiation across the two
+// protocol eras, the mirrored-header validation of the modern revision, and method dispatch.
+// Everything here is pure - the dispatch context is stubbed, so no Redis, no Hapi.
+
+const test = require('node:test');
+const assert = require('node:assert').strict;
+
+const {
+    processMcpRequest,
+    decodeHeaderValue,
+    isAllowedOrigin,
+    acceptsEventStream,
+    ERROR_CODES,
+    CACHE_TTLS,
+    MODERN_PROTOCOL_VERSION,
+    LEGACY_PROTOCOL_VERSIONS,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    META_PROTOCOL_VERSION,
+    SERVER_INFO,
+    serverInstructions
+} = require('../lib/mcp/protocol');
+const { COLLAPSE_CLASS } = require('../lib/consts');
+
+const TOOLS = [{ name: 'demo_tool', description: 'demo', inputSchema: { type: 'object', properties: {} } }];
+
+function ctx(overrides) {
+    return Object.assign(
+        {
+            listTools: () => TOOLS,
+            callTool: async name => ({ content: [{ type: 'text', text: `called ${name}` }] }),
+            listResources: async () => [],
+            readResource: async () => [],
+            // The route always supplies per-credential instructions; the stub does the same
+            instructions: serverInstructions({ surfaces: ['mcp-manage', 'mcp'] }),
+            acceptsEventStream: false
+        },
+        overrides || {}
+    );
+}
+
+function modernRequest(method, { id = 1, params = {}, headers = {}, name } = {}) {
+    const body = {
+        jsonrpc: '2.0',
+        id,
+        method,
+        params: Object.assign({ _meta: { [META_PROTOCOL_VERSION]: MODERN_PROTOCOL_VERSION } }, params)
+    };
+
+    const requestHeaders = Object.assign(
+        {
+            'mcp-protocol-version': MODERN_PROTOCOL_VERSION,
+            'mcp-method': method
+        },
+        name !== undefined ? { 'mcp-name': name } : {},
+        headers
+    );
+
+    return { body, headers: requestHeaders };
+}
+
+test('MCP protocol', async t => {
+    await t.test('rejects JSON-RPC batches', async () => {
+        const outcome = await processMcpRequest({ body: [{ jsonrpc: '2.0', id: 1, method: 'ping' }], headers: {}, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 200);
+        assert.equal(outcome.body.error.code, ERROR_CODES.INVALID_REQUEST);
+        assert.equal(outcome.body.id, null);
+    });
+
+    await t.test('rejects a body that is not a JSON-RPC request', async () => {
+        for (const body of [null, 'ping', 42, { id: 1, method: 'ping' }, { jsonrpc: '2.0', id: 1 }]) {
+            const outcome = await processMcpRequest({ body, headers: {}, ctx: ctx() });
+            assert.equal(outcome.body.error.code, ERROR_CODES.INVALID_REQUEST, JSON.stringify(body));
+        }
+    });
+
+    await t.test('origin policy: no header passes, loopback and own origin pass, the rest is refused', () => {
+        const policy = { serviceUrl: 'https://ee.example.com', corsOrigins: ['https://app.example.com'] };
+
+        assert.ok(isAllowedOrigin(undefined, policy));
+        assert.ok(isAllowedOrigin('http://localhost:3210', policy));
+        assert.ok(isAllowedOrigin('https://ee.example.com', policy));
+        assert.ok(isAllowedOrigin('https://app.example.com', policy));
+
+        assert.ok(!isAllowedOrigin('https://evil.example.net', policy));
+        assert.ok(!isAllowedOrigin('null', policy));
+        assert.ok(!isAllowedOrigin('https://evil.example.net', { serviceUrl: 'not a url', corsOrigins: [] }));
+        assert.ok(isAllowedOrigin('https://anywhere.example.net', { serviceUrl: '', corsOrigins: ['*'] }));
+    });
+
+    await t.test('the Accept test honors q-values, not just the media type', () => {
+        assert.ok(acceptsEventStream('application/json, text/event-stream'));
+        assert.ok(acceptsEventStream('text/event-stream;q=0.9'));
+        assert.ok(acceptsEventStream('*/*'));
+        assert.ok(acceptsEventStream('text/*'));
+
+        // The standard way for a JSON-only client to refuse the stream. Matching the media type
+        // and stopping at the ';' handed it an SSE response it had said it cannot consume.
+        assert.ok(!acceptsEventStream('application/json, text/event-stream;q=0'));
+        assert.ok(!acceptsEventStream('text/event-stream; q=0'));
+        assert.ok(!acceptsEventStream('*/*;q=0'));
+
+        assert.ok(!acceptsEventStream('application/json'));
+        assert.ok(!acceptsEventStream(''));
+        assert.ok(!acceptsEventStream(undefined));
+    });
+
+    await t.test('decodes the base64 header sentinel', () => {
+        assert.equal(decodeHeaderValue('plain-value'), 'plain-value');
+        assert.equal(decodeHeaderValue('=?base64?SGVsbG8sIOS4lueVjA==?='), 'Hello, 世界');
+        assert.equal(decodeHeaderValue(undefined), undefined);
+    });
+
+    await t.test('a malformed base64 sentinel decodes to a plain string instead of throwing', () => {
+        // Buffer.from(x, 'base64') is best-effort, so garbage inside the sentinel decodes to
+        // some deterministic string. What matters for the header-mismatch checks is that it
+        // comes back as a string without throwing (a throw would fail this subtest on its own).
+        for (const value of ['=?base64?!!!?=', '=?base64??=', '=?base64?%%bad%%?=', '=?base64?SGVsbG8?extra?=']) {
+            assert.equal(typeof decodeHeaderValue(value), 'string', value);
+        }
+
+        // an incomplete sentinel is not a sentinel: passes through untouched
+        assert.equal(decodeHeaderValue('=?base64?SGVsbG8='), '=?base64?SGVsbG8=');
+        assert.equal(decodeHeaderValue('?base64?SGVsbG8?='), '?base64?SGVsbG8?=');
+    });
+
+    await t.test('modern: requires the header to match the body version', async () => {
+        const { body, headers } = modernRequest('ping');
+        headers['mcp-protocol-version'] = '2025-11-25';
+
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 400);
+        assert.equal(outcome.body.error.code, ERROR_CODES.HEADER_MISMATCH);
+    });
+
+    await t.test('modern: rejects an unknown protocol version with the supported list', async () => {
+        const { body, headers } = modernRequest('ping');
+        body.params._meta[META_PROTOCOL_VERSION] = '2030-01-01';
+        headers['mcp-protocol-version'] = '2030-01-01';
+
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 400);
+        assert.equal(outcome.body.error.code, ERROR_CODES.UNSUPPORTED_PROTOCOL_VERSION);
+        assert.deepEqual(outcome.body.error.data.supported, SUPPORTED_PROTOCOL_VERSIONS);
+        assert.equal(outcome.body.error.data.requested, '2030-01-01');
+    });
+
+    await t.test('modern: requires the Mcp-Method header', async () => {
+        const { body, headers } = modernRequest('ping');
+        delete headers['mcp-method'];
+
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 400);
+        assert.equal(outcome.body.error.code, ERROR_CODES.HEADER_MISMATCH);
+    });
+
+    await t.test('modern: requires Mcp-Name to match the tool name, sentinel encoding included', async () => {
+        const mismatch = modernRequest('tools/call', { params: { name: 'demo_tool', arguments: {} }, name: 'other_tool' });
+        const refused = await processMcpRequest({ body: mismatch.body, headers: mismatch.headers, ctx: ctx() });
+        assert.equal(refused.httpStatus, 400);
+        assert.equal(refused.body.error.code, ERROR_CODES.HEADER_MISMATCH);
+
+        const encoded = modernRequest('tools/call', {
+            params: { name: 'demo_tool', arguments: {} },
+            name: `=?base64?${Buffer.from('demo_tool').toString('base64')}?=`
+        });
+        const accepted = await processMcpRequest({ body: encoded.body, headers: encoded.headers, ctx: ctx() });
+        assert.equal(accepted.httpStatus, 200);
+        assert.equal(accepted.body.result.content[0].text, 'called demo_tool');
+        assert.equal(accepted.body.result.resultType, 'complete');
+    });
+
+    await t.test('modern: server/discover reports versions, capabilities and identity', async () => {
+        const { body, headers } = modernRequest('server/discover');
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+
+        assert.equal(outcome.httpStatus, 200);
+        const result = outcome.body.result;
+        assert.equal(result.resultType, 'complete');
+        assert.deepEqual(result.supportedVersions, SUPPORTED_PROTOCOL_VERSIONS);
+        assert.ok(result.capabilities.tools);
+        assert.deepEqual(result._meta['io.modelcontextprotocol/serverInfo'], SERVER_INFO);
+        assert.ok(result.instructions.length);
+    });
+
+    await t.test('the instructions describe the credential the client is actually holding', () => {
+        // The generic set opens by telling the agent to list the accounts and pass an id, and a
+        // bound credential can do neither - it is refused the listing tools and its tools carry no
+        // account argument at all
+        const SERVER_INSTRUCTIONS = serverInstructions({ surfaces: ['mcp-manage', 'mcp'] });
+        assert.match(SERVER_INSTRUCTIONS, /list_accounts/);
+
+        const bound = serverInstructions({ account: 'acct-1', surfaces: ['mcp'] });
+        assert.doesNotMatch(bound, /list_accounts/);
+        assert.match(bound, /acct-1/);
+        assert.match(bound, /no account argument/);
+
+        // Both tell the model where an email client would put its "show more" control, which is
+        // the only way it can tell this message apart from the thread quoted under it
+        for (const instructions of [SERVER_INSTRUCTIONS, bound]) {
+            assert.match(instructions, new RegExp(COLLAPSE_CLASS));
+        }
+    });
+
+    await t.test('the instructions cover the tool sets the credential holds, and no other', () => {
+        // A management credential is told where to start and what to confirm; the mail lines
+        // (message shape, the collapse marker, the send warning) describe tools it does not have
+        const manage = serverInstructions({ surfaces: ['mcp-manage'] });
+        assert.match(manage, /get_instance_stats/);
+        assert.match(manage, /before anything destructive/);
+        assert.match(manage, /create_account_setup_link/);
+        assert.doesNotMatch(manage, new RegExp(COLLAPSE_CLASS));
+        assert.doesNotMatch(manage, /send_message/);
+
+        // and the other way round
+        const mail = serverInstructions({ surfaces: ['mcp'] });
+        assert.match(mail, /list_accounts/);
+        assert.match(mail, new RegExp(COLLAPSE_CLASS));
+        assert.doesNotMatch(mail, /get_instance_stats/);
+        assert.doesNotMatch(mail, /before anything destructive/);
+
+        // both hear both, once each
+        const both = serverInstructions({ surfaces: ['mcp', 'mcp-manage'] });
+        assert.match(both, /get_instance_stats/);
+        assert.match(both, new RegExp(COLLAPSE_CLASS));
+        assert.equal(both.split('list_accounts').length, 3, 'list_accounts is named as the start and as the source of ids, not more');
+
+        // a bound management credential is told it operates that one account
+        const boundManage = serverInstructions({ account: 'acct-1', surfaces: ['mcp-manage'] });
+        assert.match(boundManage, /acct-1/);
+        assert.match(boundManage, /reconnect or sync it/);
+        assert.doesNotMatch(boundManage, /list_accounts/);
+
+        // and a credential offered nothing is told so rather than handed a workflow
+        assert.match(serverInstructions({}), /offered no tools/);
+        // while one whose catalog holds only the account reads both sets share - a management
+        // token narrowed to read/account - exercises no scope but is not empty-handed, and must not
+        // be told it is
+        const shared = serverInstructions({ surfaces: [], hasTools: true });
+        assert.match(shared, /only the tools both tool sets share/);
+        assert.doesNotMatch(shared, /offered no tools/);
+        assert.doesNotMatch(shared, /get_instance_stats/);
+        // the same line reaches a bound credential in that position, after its binding sentence
+        const boundShared = serverInstructions({ account: 'acct-1', surfaces: [], hasTools: true });
+        assert.match(boundShared, /acct-1/);
+        assert.match(boundShared, /both tool sets share/);
+        // and the management lines come before the mail lines whatever order the surfaces arrive in
+        assert.ok(both.indexOf('take effect immediately') < both.indexOf('send_message'));
+    });
+
+    await t.test('modern: cache hints follow the declared policy for every result-bearing method', async () => {
+        // The Caching utility of the modern revision: complete results of the discovery and
+        // listing methods MUST carry ttlMs >= 0 and a cacheScope; strict clients (Claude Code
+        // among them) refuse a tools/list without them. A null policy entry declares a method
+        // non-cacheable, and its results must not pretend otherwise. Everything this endpoint
+        // serves is caller-shaped, so the scope is always private.
+        //
+        // Driven by the exported policy table, so a method added there without a request recipe
+        // here fails the coverage check instead of going untested.
+        const requestOpts = {
+            'server/discover': {},
+            'tools/list': {},
+            'resources/list': {},
+            'resources/templates/list': {},
+            'resources/read': { params: { uri: 'emailengine://account/a' }, name: 'emailengine://account/a' },
+            ping: {},
+            'tools/call': { params: { name: 'demo_tool', arguments: {} }, name: 'demo_tool' }
+        };
+        assert.deepEqual(Object.keys(CACHE_TTLS).sort(), Object.keys(requestOpts).sort());
+
+        for (const [method, ttlMs] of Object.entries(CACHE_TTLS)) {
+            const { body, headers } = modernRequest(method, requestOpts[method]);
+            const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+            assert.equal(outcome.httpStatus, 200, method);
+
+            const result = outcome.body.result;
+            if (ttlMs === null) {
+                assert.ok(!('ttlMs' in result), method);
+                assert.ok(!('cacheScope' in result), method);
+            } else {
+                assert.equal(result.ttlMs, ttlMs, method);
+                assert.ok(result.ttlMs >= 0, method);
+                assert.equal(result.cacheScope, 'private', method);
+            }
+        }
+    });
+
+    await t.test('modern: unknown methods are 404 with a method-not-found error', async () => {
+        const { body, headers } = modernRequest('prompts/list');
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 404);
+        assert.equal(outcome.body.error.code, ERROR_CODES.METHOD_NOT_FOUND);
+    });
+
+    await t.test('modern: notifications are answered 202 with no body', async () => {
+        const { body, headers } = modernRequest('notifications/whatever');
+        delete body.id;
+        delete headers['mcp-method'];
+
+        const outcome = await processMcpRequest({ body, headers, ctx: ctx() });
+        assert.equal(outcome.httpStatus, 202);
+        assert.equal(outcome.body, undefined);
+    });
+
+    await t.test('modern: subscriptions/listen requires an SSE-accepting client, then hands back a descriptor', async () => {
+        const refused = modernRequest('subscriptions/listen', { params: { notifications: { resourceSubscriptions: ['emailengine://account/a'] } } });
+        const refusedOutcome = await processMcpRequest({ body: refused.body, headers: refused.headers, ctx: ctx({ acceptsEventStream: false }) });
+        assert.equal(refusedOutcome.httpStatus, 400);
+
+        const accepted = modernRequest('subscriptions/listen', { id: 7, params: { notifications: { resourceSubscriptions: ['emailengine://account/a'] } } });
+        const outcome = await processMcpRequest({ body: accepted.body, headers: accepted.headers, ctx: ctx({ acceptsEventStream: true }) });
+        assert.ok(outcome.listen);
+        assert.equal(outcome.listen.id, 7);
+        assert.deepEqual(outcome.listen.filter.resourceSubscriptions, ['emailengine://account/a']);
+    });
+
+    await t.test('legacy: initialize echoes a supported version and counters an unsupported one', async () => {
+        for (const proposed of LEGACY_PROTOCOL_VERSIONS) {
+            const outcome = await processMcpRequest({
+                body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: proposed, capabilities: {}, clientInfo: {} } },
+                headers: {},
+                ctx: ctx()
+            });
+            assert.equal(outcome.body.result.protocolVersion, proposed);
+            assert.deepEqual(outcome.body.result.serverInfo, SERVER_INFO);
+            assert.equal(outcome.body.result.capabilities.resources.subscribe, false);
+        }
+
+        const countered = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: {} } },
+            headers: {},
+            ctx: ctx()
+        });
+        assert.equal(countered.body.result.protocolVersion, LEGACY_PROTOCOL_VERSIONS[0]);
+    });
+
+    await t.test('legacy: results carry no resultType marker and no cache hints', async () => {
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+            headers: { 'mcp-protocol-version': '2025-06-18' },
+            ctx: ctx()
+        });
+        assert.equal(outcome.httpStatus, 200);
+        assert.deepEqual(outcome.body.result.tools, TOOLS);
+        assert.ok(!('resultType' in outcome.body.result));
+        assert.ok(!('ttlMs' in outcome.body.result));
+        assert.ok(!('cacheScope' in outcome.body.result));
+    });
+
+    await t.test('legacy: unknown methods stay HTTP 200', async () => {
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 3, method: 'logging/setLevel', params: {} },
+            headers: {},
+            ctx: ctx()
+        });
+        assert.equal(outcome.httpStatus, 200);
+        assert.equal(outcome.body.error.code, ERROR_CODES.METHOD_NOT_FOUND);
+    });
+
+    await t.test('legacy: a modern version header without modern body metadata is a header mismatch', async () => {
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 4, method: 'ping', params: {} },
+            headers: { 'mcp-protocol-version': MODERN_PROTOCOL_VERSION },
+            ctx: ctx()
+        });
+        assert.equal(outcome.httpStatus, 400);
+        assert.equal(outcome.body.error.code, ERROR_CODES.HEADER_MISMATCH);
+    });
+
+    await t.test('legacy: an unknown version header is refused with the supported list', async () => {
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 5, method: 'ping', params: {} },
+            headers: { 'mcp-protocol-version': '2024-11-05' },
+            ctx: ctx()
+        });
+        assert.equal(outcome.httpStatus, 400);
+        assert.equal(outcome.body.error.code, ERROR_CODES.UNSUPPORTED_PROTOCOL_VERSION);
+    });
+
+    await t.test('legacy: notifications are answered 202', async () => {
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+            headers: {},
+            ctx: ctx()
+        });
+        assert.equal(outcome.httpStatus, 202);
+    });
+
+    await t.test('tools/call reports protocol errors from the dispatcher as JSON-RPC errors', async () => {
+        const failing = ctx({
+            callTool: async () => {
+                const err = new Error('Unknown tool: nope');
+                err.rpcCode = ERROR_CODES.INVALID_PARAMS;
+                throw err;
+            }
+        });
+
+        const outcome = await processMcpRequest({
+            body: { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'nope', arguments: {} } },
+            headers: {},
+            ctx: failing
+        });
+        assert.equal(outcome.httpStatus, 200);
+        assert.equal(outcome.body.error.code, ERROR_CODES.INVALID_PARAMS);
+    });
+});

@@ -1,71 +1,101 @@
-<div class="float-right">
-    <a href="{{newLink}}" class="btn btn-primary btn-icon-split">
-        <span class="icon text-white-50">
-            <i class="fas fa-plus"></i>
-        </span>
-        <span class="text">Create access token</span>
-    </a>
-</div>
+{{#> ui/page-header title="Access Tokens" icon="icon-[tabler--key]" subtitle="Manage credentials for the API, SMTP server, IMAP proxy, metrics, and MCP clients." badgeLabel=total badgeVariant="neutral" class="mb-6"}}
+{{!-- Without an admin session the create form cannot submit, so the button would be an invitation
+     to lose the work. Disabled with the reason rather than hidden: the capability exists, it is the
+     instance that is not ready for it. --}}
+{{#if canProvision}}
+{{> ui/btn href=newLink label="Create access token" icon="icon-[tabler--plus]"}}
+{{else}}
+{{#> ui/tooltip text="Set an admin password to issue access tokens"}}
+{{> ui/btn href="/admin/account/password" variant="primary" style="soft" label="Create access token" icon="icon-[tabler--lock]"}}
+{{/ui/tooltip}}
+{{/if}}
+{{/ui/page-header}}
 
-{{> tokens_header}}
+{{> ui/search-crumb parentHref="/admin/tokens" parentLabel="Access Tokens" query=query}}
 
-<p>
-    To access EmailEngine API, you need to authenticate your API requests with an access token.
-</p>
+{{!-- The scope deep-link filter (the MCP pages link here with ?scope=mcp): named the same way an
+     active search is, with the parent crumb as the way out of it --}}
+{{#if scopeFilter}}
+{{> ui/breadcrumb parentHref="/admin/tokens" parentLabel="Access Tokens" current=(concat 'Tokens with the "' scopeFilter '" scope') class="mb-6"}}
+{{/if}}
 
 {{#if data.tokens}}
-<div class="card mt-4 mb-4">
+<div class="card bg-base-100 shadow-md mb-6">
     {{#if account}}
     <div class="card-body">
         <div>
-            Currently showing tokens for <strong><a
-                    href="/admin/accounts/{{account.account}}">{{account.name}}</a></strong>. These tokens cannot be
+            Showing tokens for <strong><a href="/admin/accounts/{{urlpart account.account}}"
+                    class="link link-animated">{{account.name}}</a></strong>. These tokens cannot be
             used by other accounts.
         </div>
     </div>
     {{/if}}
-    <div class="table-responsive">
-        <table class="table">
-            <thead class="">
+    <div class="overflow-x-auto">
+        <table class="table ee-table-stack">
+            <thead>
                 <tr>
-                    <th class="p-0">
-                        <div class="p-2">Description</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Scopes</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Token ID</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Last used</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">&nbsp;</div>
-                    </th>
+                    <th>Description</th>
+                    {{#if showAccountColumn}}
+                    <th>Bound to</th>
+                    {{/if}}
+                    <th>Scopes</th>
+                    <th>Last used</th>
+                    <th class="w-12"><span class="sr-only">Actions</span></th>
                 </tr>
             </thead>
 
             <tbody>
                 {{#each data.tokens}}
                 <tr>
-                    <td class="p-2">
-                        <strong>{{description}}</strong>
+                    <td>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <strong>{{description}}</strong>
+                            {{#if expiresStr}}
+                            {{> ui/badge label="Expires" variant="warning" soft=true icon="" class=""}}
+                            {{/if}}
+                        </div>
+                        {{> ui/entity-id id=id short=idShort label="Token ID"}}
+                        {{#if expiresStr}}
+                        <div class="text-base-content/60 text-xs">Expires <span class="relative-time" data-time="{{expiresStr}}"></span></div>
+                        {{/if}}
                     </td>
 
-                    <td class="p-2">
+                    {{#if ../showAccountColumn}}
+                    <td class="align-top" data-label="Bound to">
+                        {{#if account}}
+                        {{#if accountKnown}}
+                        <a href="/admin/accounts/{{urlpart account}}" class="link link-animated">{{account}}</a>
+                        {{else}}
+                        <div>{{account}}</div>
+                        {{!-- Deleting an account leaves its tokens behind and they still
+                              authenticate, so this is a state to act on, not a rendering accident --}}
+                        {{> ui/badge label="Account deleted" variant="warning" soft=true icon="" class="mt-1"}}
+                        {{/if}}
+                        {{else}}
+                        <span class="text-base-content/60">All accounts</span>
+                        {{/if}}
+                    </td>
+                    {{/if}}
+
+                    <td class="align-top" data-label="Scopes">
                         {{#if scopes}}
-                        {{#each scopes}}{{#unless first}}, {{/unless}}{{name}}{{/each}}
+                        <div class="max-w-xs whitespace-normal">{{#each scopes}}{{#unless first}}, {{/unless}}{{name}}{{/each}}</div>
+                        {{/if}}
+
+                        {{#if permissionSummary}}
+                        {{#if permissionSummary.unreadable}}
+                        {{> ui/badge label="Unreadable restriction" variant="error" soft=true icon="" class="mt-1"}}
+                        <div class="text-base-content/60 text-xs">This token cannot be used because its permissions could not be read. Delete it and create a replacement.</div>
+                        {{else}}
+                        {{> ui/badge label="Restricted" variant="info" soft=true icon="" class="mt-1"}}
+                        {{!-- Wraps and is width-capped: a token granted several sections produced one
+                              long line that pushed the whole table into horizontal scroll. --}}
+                        <div class="text-base-content/60 text-xs max-w-xs whitespace-normal">{{permissionSummary.sentence}}</div>
+                        {{/if}}
                         {{/if}}
                     </td>
 
-                    <td class="p-2">
-                        {{#if idShort}}
-                        <code data-toggle="tooltip" data-placement="top" title="{{id}}" style="cursor: help;">{{idShort}}</code>
-                        {{/if}}
-                    </td>
-
-                    <td class="p-2">
+                    <td data-label="Last used">
                         {{#if access.timeStr}}
                         <span class="relative-time" data-time="{{access.timeStr}}"></span>
                         {{else}}
@@ -73,10 +103,8 @@
                         {{/if}}
                     </td>
 
-                    <td class="p-2 text-right">
-                        <button type="button" class="btn btn-danger btn-circle btn-sm delete-token-btn"
-                            data-token="{{id}}" data-token-description="{{description}}" data-toggle="tooltip"
-                            data-placement="top" title="Delete this token"><i class="fas fa-trash-alt"></i></button>
+                    <td class="ee-stack-actions text-end">
+                        {{> ui/row-actions label="Token actions" deleteModal="#deleteToken" deleteId=id deleteName=description}}
                     </td>
 
                 </tr>
@@ -84,133 +112,58 @@
             </tbody>
         </table>
     </div>
+
+    {{> ui/pagination showPaging=showPaging prevPage=prevPage nextPage=nextPage pageLinks=pageLinks}}
 </div>
-
-{{#if showPaging}}
-<div class="card-footer">
-
-    <nav aria-label="Page navigation">
-        <ul class="pagination" style="flex-wrap: wrap;">
-
-            {{#if prevPage}}
-            <li class="page-item"><a class="page-link" href="{{prevPage}}">Previous</a></li>
-            {{else}}
-            <li class="page-item disabled"><a class="page-link" href="#">Previous</a></li>
-            {{/if}}
-
-            {{#each pageLinks}}
-            <li class="page-item {{#if active}}active{{/if}}"><a class="page-link" href="{{url}}">{{title}}</a>
-            </li>
-            {{/each}}
-
-            {{#if nextPage}}
-            <li class="page-item"><a class="page-link" href="{{nextPage}}">Next</a></li>
-            {{else}}
-            <li class="page-item disabled"><a class="page-link" href="#">Next</a></li>
-            {{/if}}
-
-        </ul>
-    </nav>
-</div>
-{{/if}}
 
 {{else}}
-<div class="list-group mt-4 mb-4">
-    <div class="list-group-item">
-        {{#if account}}
-        <div>
-            Currently showing tokens for <strong><a href="/admin/accounts/{{account.account}}">{{#if
-                    account.name}}{{account.name}}{{else}}{{account.email}}{{/if}}</a></strong>. These tokens cannot
-            be used by other accounts.
-        </div>
-        <hr>
-        {{/if}}
-
-        <p>
-            {{#if firstPage}}
-            No access tokens have been created yet. <a href="{{newLink}}">Create your first access token</a>.
-            {{else}}
-            No tokens found.
-            {{/if}}
-        </p>
-    </div>
+{{!-- The condition sits OUTSIDE the ui/list-empty block on purpose: a partial block whose
+     content is nothing but a {{#if}} wrapper loses its content to a Handlebars
+     program-association bug (the account note never rendered). Keep the block's first
+     content token a static element. --}}
+{{#if account}}
+{{#> ui/list-empty noun="access tokens" query=query filterActive=scopeFilter firstPage=firstPage createHref=newLink createLabel="Create your first access token" clearHref="/admin/tokens"}}
+<div class="mb-2">
+    Showing tokens for <strong><a href="/admin/accounts/{{urlpart account.account}}"
+            class="link link-animated">{{#if account.name}}{{account.name}}{{else}}{{account.email}}{{/if}}</a></strong>.
+    These tokens cannot be used by other accounts.
 </div>
+{{/ui/list-empty}}
+{{else}}
+{{> ui/list-empty noun="access tokens" query=query filterActive=scopeFilter firstPage=firstPage createHref=newLink createLabel="Create your first access token" clearHref="/admin/tokens"}}
+{{/if}}
 {{/if}}
 
 
-<div class="card mt-4 mb-4">
-    <a href="#showHelp" class="d-block card-header py-3 collapsed" data-toggle="collapse" role="button"
-        aria-expanded="true" aria-controls="showHelp">
-        <h6 class="m-0 font-weight-bold text-primary">Usage instructions</h6>
-    </a>
-    <div class="collapse" id="showHelp">
-        <div class="card-body">
-            <p>You must use either the <em>Authorization: Bearer</em> header (recommended) or the
-                <em>access_token</em> query parameter to make API requests. Avoid using the query parameter as it is
-                not redacted from HTTP logs.
-            </p>
+{{#> ui/details summary="Usage instructions" class="card bg-base-100 shadow-md mb-6"}}
+<div>
+        <p class="mb-4">Send an API-scoped token in the <code>Authorization: Bearer</code> header.
+            The <code>access_token</code> query parameter is also supported, but can expose the token in URL logs.
+        </p>
 
-            <pre>$ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v1/stats?access_token=&lt;token&gt;"
-$ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v1/stats" --header "Authorization: Bearer &lt;token&gt;"</pre>
+        <pre class="ee-code-block">$ curl "<span class="cur-base-url" data-origin="">http://127.0.0.1:3000</span>/v1/stats" --header "Authorization: Bearer &lt;token&gt;"</pre>
 
-            <p>Prometheus endpoint at <code>/metrics</code> also requires an authorization token. Use the following
-                configuration for setting up the token for a scraping endpoint:
-            </p>
+        <p class="mt-4 mb-4">To collect Prometheus metrics from <code>/metrics</code>, use a token with the Metrics scope
+            in your scrape configuration:
+        </p>
 
-            <pre>authorization:
+        <pre class="ee-code-block">authorization:
   type: Bearer
   credentials: &lt;token&gt;</pre>
 
-            <hr>
-            <div class="text-muted">
-                <code>&lt;token&gt;</code> is the full access token string without any quoting.
-            </div>
-            <div class="text-muted">Read more about setting
-                up Prometheus and Grafana with EmailEngine from the <a
-                    href="https://emailengine.app/monitoring#prometheus" target="_blank" rel="noopener noreferrer"
-                    referrerpolicy="no-referrer">documentation</a>.
-            </div>
-
+        <hr class="my-4">
+        <div class="text-base-content/60">
+            <code>&lt;token&gt;</code> is the full access token string without any quoting.
         </div>
-    </div>
-</div>
-
-<div class="modal fade" id="deleteToken" tabindex="-1" aria-labelledby="deleteTokenLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-
-            <div class="modal-header">
-                <h5 class="modal-title" id="deleteTokenLabel">Delete access token</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
-            </div>
-            <div class="modal-body">
-                Are you sure you want to delete <strong id="delete-token-description"></strong>? This action
-                cannot be undone.
-            </div>
-            <div class="modal-footer">
-                <form method="post" action="/admin/tokens/delete">
-                    <input type="hidden" name="crumb" value="{{crumb}}">
-                    <input type="hidden" id="token-delete" name="token" value="">
-                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-danger">Delete token</button>
-                </form>
-            </div>
-
+        <div class="text-base-content/60">Read more about setting
+            up Prometheus and Grafana with EmailEngine from the <a href="https://learn.emailengine.app/docs/advanced/monitoring#prometheus-metrics"
+                target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"
+                class="link link-animated">documentation</a>.
         </div>
-    </div>
-</div>
 
-<script>
-    document.addEventListener('DOMContentLoaded', () => {
-        for (let elm of document.querySelectorAll('.delete-token-btn')) {
-            elm.addEventListener('click', e => {
-                e.preventDefault();
-                document.getElementById('token-delete').value = elm.dataset.token;
-                document.getElementById('delete-token-description').textContent = elm.dataset.tokenDescription;
-                $('#deleteToken').modal('show');
-            });
-        }
-    });
-</script>
+</div>
+{{/ui/details}}
+
+{{#> ui/delete-modal id="deleteToken" noun="access token" action="/admin/tokens/delete" fieldName="token"}}
+Delete <strong class="delete-target-name"></strong>? Apps and clients using this token will lose access immediately. This action cannot be undone.
+{{/ui/delete-modal}}

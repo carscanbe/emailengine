@@ -1,0 +1,83 @@
+{{!-- Shared accounts list card (accounts index + internals thread detail): the
+      card with account rows, live SSE state badges and pagination. Renders
+      nothing when `accounts` is empty - each caller owns its own empty state
+      (accounts index -> ui/list-empty; thread detail -> a plain card).
+      Params:
+        showActions - true to render the trailing kebab (Open / Delete) column;
+                      the page must then also provide a #deleteAccount confirm
+                      modal (accounts index only; omitted on the thread reuse)
+      Context: accounts (row objects incl. stateLabel/type) plus the
+      showPaging/prevPage/nextPage/pageLinks pagination values. --}}
+{{#if accounts}}
+<div class="card bg-base-100 shadow-md mb-6">
+
+    <div class="overflow-x-auto">
+        <table class="table ee-table-stack">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    {{#if showActions}}
+                    <th class="w-12"><span class="sr-only">Actions</span></th>
+                    {{/if}}
+                </tr>
+            </thead>
+
+            <tbody>
+                {{#each accounts}}
+                <tr class="hover:bg-base-200/60">
+                    <td class="relative">
+                        {{> ui/row-link href=(concat "/admin/accounts/" (urlpart account)) label="Open account"}}
+                        <div><strong>{{name}}</strong></div>
+                        {{> ui/entity-id id=account label="Account ID"}}
+                    </td>
+                    <td class="relative" data-label="Email">
+                        {{> ui/row-link href=(concat "/admin/accounts/" (urlpart account))}}{{email}}
+                    </td>
+
+                    <td class="relative" data-label="Type">
+                        {{> ui/row-link href=(concat "/admin/accounts/" (urlpart account))}}
+                        {{#if type.icon}}
+                        {{!-- relative z-[1] lifts the tooltip trigger above the row link --}}
+                        {{#> ui/tooltip text=type.label class="relative z-[1]"}}
+                        <span class="{{type.icon}} size-4 align-text-bottom"></span>
+                        {{/ui/tooltip}}
+                        {{else}}
+                        {{type.name}}
+                        {{#if type.comment}}
+                        <span class="text-base-content/60">({{type.comment}})</span>
+                        {{/if}}
+                        {{/if}}
+                    </td>
+
+                    <td class="relative w-32" data-label="Status">
+                        {{> ui/row-link href=(concat "/admin/accounts/" (urlpart account))}}
+                        {{!-- live state badge: app.js updates the badge-{type} class,
+                              text and error tooltip through the /admin/changes SSE
+                              feed. The wrapping link lifts the badge above the row
+                              overlay so the tooltip fires while clicks still
+                              navigate. --}}
+                        <a href="/admin/accounts/{{urlpart account}}" class="relative z-[1] inline-flex">
+                            {{> ui/state-badge label=stateLabel account=account pointer=true}}
+                        </a>
+                    </td>
+
+                    {{!-- ../showActions: inside {{#each}} the bare name would resolve against the
+                          row, not the partial params, so the cell silently vanished (phantom column) --}}
+                    {{#if ../showActions}}
+                    <td class="ee-stack-actions relative text-end">
+                        {{> ui/row-actions openHref=(concat "/admin/accounts/" (urlpart account)) label="Account actions"
+                        deleteModal="#deleteAccount" deleteName=(when name name email) deleteAction=(concat "/admin/accounts/" (urlpart account) "/delete")}}
+                    </td>
+                    {{/if}}
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+    </div>
+
+    {{> ui/pagination showPaging=showPaging prevPage=prevPage nextPage=nextPage pageLinks=pageLinks}}
+</div>
+{{/if}}

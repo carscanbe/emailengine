@@ -124,6 +124,8 @@ cd /opt/emailengine
 
 Never expose EmailEngine directly to the internet. Use a reverse proxy with TLS.
 
+The image starts EmailEngine with `EENGINE_API_PROXY=true`, so the client address is read from the `X-Forwarded-For` header. Set `EENGINE_API_PROXY_ADDRESSES` in `.env` to the address of your proxy (IPs or CIDRs, comma-separated; for a proxy on the Docker host this is usually the bridge gateway, e.g. `172.17.0.1`, or the proxy container's address). Without it the header is trusted from any peer, EmailEngine logs a warning on every start, and the admin IP allowlist and per-token address restrictions cannot be relied on.
+
 #### Option A: Nginx
 
 ```nginx
@@ -135,10 +137,10 @@ server {
     ssl_certificate_key /path/to/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
+    # EmailEngine sends its own security headers (Content-Security-Policy, X-Frame-Options,
+    # X-Content-Type-Options, Referrer-Policy, Permissions-Policy), and Strict-Transport-Security
+    # once the service URL setting is https. Do not add them here as well: a second copy of a
+    # header is at best redundant and, for Content-Security-Policy, the two are both enforced.
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -154,13 +156,11 @@ server {
         proxy_read_timeout 600;
     }
 
-    # WebSocket support
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:3000/socket.io/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
+    # No extra location is needed for the live updates. EmailEngine streams account state changes as
+    # Server-Sent Events over the ordinary path (/v1/changes and the admin UI's own stream) and sends
+    # `X-Accel-Buffering: no` with them, which nginx honours, so the events are not held in a buffer.
+    # The read timeout above does apply to them: an idle feed is cut after 600s. A browser EventSource
+    # reconnects on its own; a /v1/changes consumer written by hand has to do the same.
 }
 
 server {
@@ -175,11 +175,10 @@ server {
 ```caddyfile
 emailengine.example.com {
     reverse_proxy localhost:3000
-    header Strict-Transport-Security "max-age=31536000"
-    header X-Frame-Options "SAMEORIGIN"
-    header X-Content-Type-Options "nosniff"
 }
 ```
+
+EmailEngine sets the security headers itself (see the note in the Nginx example), so the Caddyfile needs no `header` lines.
 
 ### Step 3: Firewall Configuration
 
@@ -287,8 +286,9 @@ docker-compose logs --tail=50 emailengine
 #### Rollback if Needed
 
 ```bash
-# Specify previous version in .env
-EMAILENGINE_VERSION=2.40.0
+# Specify previous version in .env. The published image tags carry the `v` prefix the git tags
+# carry (v2.82.0, v2.82, v2, latest), so a bare 2.40.0 resolves to no image at all.
+EMAILENGINE_VERSION=v2.40.0
 docker-compose up -d --no-deps emailengine
 ```
 
@@ -391,9 +391,11 @@ docker-compose logs --tail=100 emailengine
 #### Performance Issues
 
 ```bash
-# Enable debug logging temporarily
-docker-compose exec emailengine sh -c 'export EENGINE_LOG_LEVEL=debug'
-docker-compose restart emailengine
+# Enable debug logging. The level is read from the environment at startup, so it has to be set on
+# the container rather than exported inside it - `exec ... export` sets it in a shell that then
+# exits, and `restart` reuses the container's existing environment either way.
+echo 'EENGINE_LOG_LEVEL=debug' >> .env
+docker-compose up -d --no-deps --force-recreate emailengine
 
 # Check slow operations
 docker-compose exec redis redis-cli -a "$REDIS_PASSWORD" SLOWLOG GET 10
@@ -490,6 +492,7 @@ docker-compose restart
 
 ## Support
 
-- Documentation: https://emailengine.app/
-- API Reference: https://api.emailengine.app/
-- Issues: https://github.com/postalsys/emailengine/issues
+- Support: https://emailengine.app/support or support@postalsys.com
+- Documentation: https://learn.emailengine.app/
+- API Reference: https://learn.emailengine.app/docs/api/emailengine-api
+- Bug reports: https://github.com/postalsys/emailengine/issues

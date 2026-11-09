@@ -1,151 +1,83 @@
 <input type="hidden" id="fn-content-element" name="contentFnJson" value="{{values.contentFnJson}}">
 <input type="hidden" id="map-content-element" name="contentMapJson" value="{{values.contentMapJson}}">
 
-<div class="card mb-4">
-    <div class="card-body">
+{{#> ui/card bodyClass="space-y-4"}}
 
+        {{> ui/form-field id="inputName" name="name" label="Name" value=values.name error=errors.name required=true hint="Name shown in the webhook route list."}}
 
-        <div class="form-group">
-            <label for="inputName">Name</label>
-            <input type="text" class="form-control {{#if errors.name}}is-invalid{{/if}}" name="name" id="inputName"
-                aria-describedby="inputNameHelp" value="{{values.name}}" required>
-            {{#if errors.name}}
-            <span class="invalid-feedback">{{errors.name}}</span>
-            {{/if}}
-            <small id="inputNameHelp" class="form-text text-muted">Name for this routing.</small>
+        {{> ui/form-field id="inputDescription" name="description" label="Description" value=values.description error=errors.description hint="Describe which events this route handles and where it sends them."}}
+
+        {{> ui/form-field id="inputTargetUrl" name="targetUrl" type="url" label="Target URL" value=values.targetUrl error=errors.targetUrl placeholder='URL like "https://myservice.com/imap/webhooks"' hint="Destination for matching events. Leave blank to use the default URL in Webhooks settings."}}
+
+        {{> ui/checkbox id="enabled" label="Enable this webhook route" checked=values.enabled error=errors.enabled hint="Send matching events to this route's target URL. New routes are disabled until you enable them."}}
+
+        {{#> ui/details summary="Custom request headers" class="card border border-base-content/10" summaryClass="px-4 py-2" open=values.customHeaders}}
+        <div>
+            <p class="mb-4">Add headers to each request sent by this route, such as an Authorization header.
+            </p>
+
+            {{#> ui/form-field id="customHeaders" label="Custom headers" error=errors.customHeaders hint="Enter one header per line in Header-Name: value format."}}
+            <textarea class="textarea font-mono w-full{{#if errors.customHeaders}} is-invalid{{/if}}" id="customHeaders"
+                name="customHeaders" rows="5" spellcheck="false" data-enable-grammarly="false"
+                placeholder="Custom headers like &quot;Authorization: Bearer secret_token&quot;&mldr;">{{values.customHeaders}}</textarea>
+            {{/ui/form-field}}
+
+        </div>
+        {{/ui/details}}
+
+        <div>
+            <div class="text-base-content/60 float-right code-link">[<a
+                    href="https://learn.emailengine.app/docs/webhooks/pre-processing" target="_blank" rel="noopener noreferrer"
+                    referrerpolicy="no-referrer" class="link link-animated">documentation</a>]</div>
+            <label class="label-text" for="editor-fn">Filter function</label>
+            <div class="mb-2 leading-tight">
+                <small>Return <code>true</code> to send the event, or <code>false</code> to skip it.
+                    A route without a filter sends no events. Access the event data through <code>payload</code>. Use <code>env</code> to access <a href="/admin/config/webhooks#scriptEnv"
+                        class="link link-animated">script variables</a>.</small>
+            </div>
+            {{#> ui/code-editor id="editor-fn" title="Filter function"}}
+            <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
+                <a href="#" id="test-payload-btn">Set test payload</a>
+            </div>
+            <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
+                Evaluation result:
+                <span id="filter-res" class="text-info">no match</span>
+            </div>
+            <div class="editor-embed-content editor-embed-content-right">
+                {{> editor_scope_info}}
+            </div>
+            
+            {{/ui/code-editor}}
+
         </div>
 
-        <div class="form-group">
-            <label for="inputDescription">Description</label>
-            <input type="text" class="form-control {{#if errors.description}}is-invalid{{/if}}" name="description"
-                id="inputDescription" aria-describedby="inputDescriptionHelp" value="{{values.description}}">
-            {{#if errors.description}}
-            <span class="invalid-feedback">{{errors.description}}</span>
-            {{/if}}
-            <small id="inputDescriptionHelp" class="form-text text-muted">Description for this routing.</small>
-        </div>
+        <div>
+            <label class="label-text" for="editor-map">Map function</label>
+            <div class="mb-2 leading-tight">
+                <small>Transform the event data into the format your destination expects. Return the object to send as the webhook
+                    payload. Use <code>env</code> to access <a href="/admin/config/webhooks#scriptEnv"
+                        class="link link-animated">script variables</a>.</small>
+            </div>
 
-        <div class="form-group">
-            <label for="inputTargetUrl">Target URL</label>
-            <input type="url" class="form-control {{#if errors.targetUrl}}is-invalid{{/if}}" name="targetUrl"
-                id="inputTargetUrl" aria-describedby="inputTargetUrlHelp" value="{{values.targetUrl}}"
-                placeholder="URL like &quot;https://myservice.com/imap/webhooks&quot;" required>
-            {{#if errors.targetUrl}}
-            <span class="invalid-feedback">{{errors.targetUrl}}</span>
-            {{/if}}
-            <small id="inputTargetUrlHelp" class="form-text text-muted">Webhook target URL for this routing.</small>
-        </div>
-
-        <div class="form-group form-check">
-            <input type="checkbox" class="form-check-input {{#if errors.enabled}}is-invalid{{/if}}" id="enabled"
-                name="enabled" {{#if values.enabled}}checked{{/if}} />
-            <label class="form-check-label" for="enabled">Enable this Webhook Routing</label>
-            {{#if errors.enabled}}
-            <span class="invalid-feedback">{{errors.enabled}}</span>
-            {{/if}}
-            <small id="inputEnabledHelp" class="form-text text-muted">Webhook routings are not enabled by
-                default.</small>
-        </div>
-
-        <div class="card mb-4">
-            <a href="#customHeadersBlock"
-                class="d-block card-header py-3 {{#unless values.customHeaders}} collapsed{{/unless}}"
-                data-toggle="collapse" role="button" aria-expanded="true" aria-controls="customHeadersBlock">
-                <h6 class="m-0 font-weight-bold text-primary">Custom request headers</h6>
-            </a>
-            <div class="collapse {{#if values.customHeaders}} show{{/if}}" id="customHeadersBlock">
-                <div class="card-body">
-
-                    <p>Here you can list additional request headers to be passed with each webhook request.</p>
-
-                    <div class="form-group">
-                        <label for="customHeaders">List of custom headers</label>
-
-                        <textarea class="form-control text-monospace {{#if errors.customHeaders}}is-invalid{{/if}}"
-                            id="customHeaders" name="customHeaders" rows="5" spellcheck="false"
-                            data-enable-grammarly="false"
-                            placeholder="Custom headers like &quot;Authorization: Bearer secret_token&quot;&mldr;">{{values.customHeaders}}</textarea>
-                        {{#if errors.customHeaders}}
-                        <span class="invalid-feedback">{{errors.customHeaders}}</span>
-                        {{/if}}
-                        <small class="form-text text-muted">Keep one header per line</small>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-12">
+                <div class="sm:col-span-7">
+                    {{#> ui/code-editor id="editor-map" title="Mapping function"}}
+                    <div class="editor-embed-content editor-embed-content-right">
+                        {{> editor_scope_info}}
                     </div>
-
+                    
+                    {{/ui/code-editor}}
                 </div>
-            </div>
-        </div>
-
-        <div class="form-group">
-            <div class="text-muted float-right code-link">[<a href="https://emailengine.app/pre-processing-functions"
-                    target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">documentation</a>]</div>
-            <label for="editor-fn">Filter function</label>
-            <div style="line-height: 1; margin-bottom: 10px;">
-                <small>JavaScript code to determine if the webhook should be sent. If the code evaluates to
-                    <code>true</code> then the webhook is sent, otherwise it is skipped.
-                    The script includes <code>payload</code> as a global variable that contains the webhook
-                    payload. Use <code>env</code> to access <a href="/admin/config/service#scriptEnv">script variables</a>.</small>
-            </div>
-            <div id="editor-fn" class="code-editor"></div>
-            <div class="editor-embed-block">
-                <div class="editor-embed-content editor-embed-content-left">
-                    Filter function
-                </div>
-                <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
-                    <a href="#" class="toggle-fullscreen" data-target="editor-fn">Toggle fullscreen</a>
-                </div>
-                <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
-                    <a href="#" id="test-payload-btn">Set test payload</a>
-                </div>
-                <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
-                    Evaluation result:
-                    <span id="filter-res" class="evalres text-info">no match</span>
-                </div>
-                <div class="editor-embed-content editor-embed-content-right">
-                    {{> editor_scope_info}}
-                </div>
-            </div>
-
-        </div>
-
-        <div class="form-group">
-            <label for="editor-map">Map function</label>
-            <div style="line-height: 1; margin-bottom: 10px;">
-                <small>JavaScript code to modify webhook payload output. Some services might expect incoming data using
-                    a specific format. Whatever is returned by this function will be used as the webhook
-                    payload. Use <code>env</code> to access <a href="/admin/config/service#scriptEnv">script variables</a>.</small>
-            </div>
-
-            <div class="row">
-                <div class="col-sm-7">
-                    <div id="editor-map" class="code-editor"></div>
-                    <div class="editor-embed-block">
-                        <div class="editor-embed-content editor-embed-content-left">
-                            Mapping function
-                        </div>
-                        <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
-                            <a href="#" class="toggle-fullscreen" data-target="editor-map">Toggle fullscreen</a>
-                        </div>
-                        <div class="editor-embed-content editor-embed-content-right">
-                            {{> editor_scope_info}}
-                        </div>
+                <div class="sm:col-span-5">
+                    {{#> ui/code-editor id="editor-map-preview" title="Mapping preview"}}
+                    <div class="editor-embed-content editor-embed-content-right">
+                        <a href="#" id="test-send-btn">Send webhook preview</a>
                     </div>
-                </div>
-                <div class="col-sm-5">
-                    <div id="editor-map-preview" class="code-editor"></div>
-                    <div class="editor-embed-block">
-                        <div class="editor-embed-content editor-embed-content-left">
-                            Mapping preview
-                        </div>
-                        <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
-                            <a href="#" class="toggle-fullscreen" data-target="editor-map-preview">Toggle fullscreen</a>
-                        </div>
-                        <div class="editor-embed-content editor-embed-content-right">
-                            <a href="#" id="test-send-btn">Send webhook preview</a>
-                        </div>
-                    </div>
+                    
+                    {{/ui/code-editor}}
                 </div>
             </div>
         </div>
 
-    </div>
-</div>
+    
+{{/ui/card}}

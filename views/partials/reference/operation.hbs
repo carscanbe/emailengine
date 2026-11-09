@@ -1,0 +1,161 @@
+{{!--
+    reference/operation - one API operation: signature, parameters, request body,
+    responses, code samples and the try-it panel.
+
+    Context is an operation view model from lib/api-reference/model.js, decorated with
+    per-request `samples` in lib/api-reference/index.js.
+
+    descriptionHtml fields are pre-escaped in lib/api-reference/format.js (escape first,
+    then a closed tag set added back), which is why they render unescaped.
+
+    Tab ids (response.tabId, sample.tabId) are precomputed in the model: ui/tabs
+    neutralizes its own hash params inside the partial block, so the operation id is
+    not reachable from there to compose them with.
+--}}
+<section id="{{id}}" class="ee-ref-op card bg-base-100 mb-6 shadow-md">
+    <div class="card-body">
+
+        <div class="flex flex-wrap items-center gap-2">
+            {{> ui/badge label=methodLabel variant=methodVariant icon="" class="font-mono" soft=""}}
+            <code class="text-sm font-semibold break-all">{{path}}</code>
+            {{#if deprecated}}
+            {{> ui/badge label="Deprecated" variant="warning" soft=true icon="" class=""}}
+            {{/if}}
+            {{> reference/anchor-link target=id label="Link to this operation" class="ms-auto" small=""}}
+        </div>
+
+        {{#if summary}}
+        <h3 class="text-base-content mt-2 text-lg font-semibold">{{summary}}</h3>
+        {{/if}}
+
+        {{#if descriptionHtml}}
+        <div class="text-base-content/70 mt-1 text-sm"><p>{{{descriptionHtml}}}</p></div>
+        {{/if}}
+
+        {{#if behavior.length}}
+        {{!-- notes are pre-escaped by formatDescription, hence the triple stash --}}
+        <div class="alert alert-soft alert-info mt-4 flex items-start gap-3" role="note">
+            <span class="icon-[tabler--info-circle] size-5 shrink-0"></span>
+            <div class="min-w-0 text-sm">
+                <div class="mb-1 font-semibold">Behavior</div>
+                <ul class="list-disc space-y-1 ps-4">
+                    {{#each behavior}}<li>{{{this}}}</li>{{/each}}
+                </ul>
+            </div>
+        </div>
+        {{/if}}
+
+        {{> reference/params title="Path parameters" params=pathParams flags=""}}
+        {{> reference/params title="Query parameters" params=queryParams flags=queryFlags}}
+        {{> reference/params title="Headers" params=headerParams flags=""}}
+
+        {{!-- Example first, and open. It used to sit collapsed below the property tree, so on
+              a 128-property response the one artifact that answers "what does this look like"
+              was 6,700 pixels down and behind a click. The shape is what orients a reader
+              before any individual field matters. --}}
+        {{#if body}}
+        <div class="mt-5">
+            {{> reference/section-heading label="Request body" suffix=body.contentType class="mb-2"}}
+            {{#if body.descriptionHtml}}
+            <div class="text-base-content/70 mb-2 text-sm"><p>{{{body.descriptionHtml}}}</p></div>
+            {{/if}}
+            {{!-- Two views where they differ, one where they do not. The typical payload is
+                  the curated one and stays the default; the complete one fills in every key
+                  the curated example leaves out, which on submit is 61 of 71 fields. Only 8
+                  of the document's 34 bodies differ, and completeJson is non-empty only when
+                  exampleJson is - both come from the same schema - so the tab strip is
+                  conditional inside one disclosure rather than the disclosure being written
+                  out twice. See buildBody() in lib/api-reference/model.js. --}}
+            {{#if body.exampleJson}}
+            {{#> reference/disclosure label="Example request body" open=true class="mb-3"}}
+            <div>
+                {{#if body.completeJson}}
+                {{#> ui/tabs label="Request body examples" class="mt-2 mb-2"}}
+                {{> ui/tab target=body.exampleTabId label="Typical" active=true}}
+                {{> ui/tab target=body.completeTabId label="Every field" active=""}}
+                {{/ui/tabs}}
+                <div id="{{body.exampleTabId}}" role="tabpanel" aria-labelledby="{{body.exampleTabId}}-tab">
+                    <pre class="ee-code-block ee-ref-example"><code class="language-json">{{body.exampleJson}}</code></pre>
+                </div>
+                <div id="{{body.completeTabId}}" role="tabpanel" aria-labelledby="{{body.completeTabId}}-tab" class="hidden">
+                    <p class="text-base-content/50 mb-2 text-xs">Every documented field, with a sample value. Send only
+                        the ones you need.</p>
+                    <pre class="ee-code-block ee-ref-example"><code class="language-json">{{body.completeJson}}</code></pre>
+                </div>
+                {{else}}
+                <pre class="ee-code-block ee-ref-example mt-2"><code class="language-json">{{body.exampleJson}}</code></pre>
+                {{/if}}
+            </div>
+            {{/reference/disclosure}}
+            {{/if}}
+            {{#if body.tree.showTools}}
+            {{> reference/schema-tools scope=body.scopeId label="Filter request body fields"}}
+            {{/if}}
+            {{#if body.tree}}
+            <div id="{{body.scopeId}}" class="mt-2">{{> reference/schema body.tree}}</div>
+            {{/if}}
+        </div>
+        {{/if}}
+
+        {{#if responses.length}}
+        <div class="mt-5">
+            {{> reference/section-heading label="Responses" class="mb-2"}}
+            {{#> ui/tabs label="Response status codes" class="mb-3"}}
+            {{#each responses}}
+            {{> ui/tab target=tabId label=code active=active}}
+            {{/each}}
+            {{/ui/tabs}}
+            {{#each responses}}
+            <div id="{{tabId}}" role="tabpanel" aria-labelledby="{{tabId}}-tab" {{#unless active}}class="hidden" {{/unless}}>
+                <div class="flex flex-wrap items-center gap-2">
+                    {{> ui/badge label=code variant=variant soft=true icon="" class=""}}
+                    {{#if contentType}}<span class="text-base-content/50 text-xs">{{contentType}}</span>{{/if}}
+                </div>
+                {{#if descriptionHtml}}
+                <div class="text-base-content/70 mt-1 text-sm"><p>{{{descriptionHtml}}}</p></div>
+                {{/if}}
+                {{#if exampleJson}}
+                {{#> reference/disclosure label="Example response" open=true class="mt-3 mb-3"}}
+                <pre class="ee-code-block ee-ref-example mt-2"><code class="language-json">{{exampleJson}}</code></pre>
+                {{/reference/disclosure}}
+                {{/if}}
+                {{#if tree.showTools}}
+                {{> reference/schema-tools scope=scopeId label="Filter response fields"}}
+                {{/if}}
+                {{#if tree}}
+                <div id="{{scopeId}}" class="mt-2">{{> reference/schema tree}}</div>
+                {{/if}}
+            </div>
+            {{/each}}
+        </div>
+        {{/if}}
+
+        {{!-- data-sample-tabs marks this strip for static/js/reference.js, which reselects the
+              language the reader last chose so a page of 13 operations does not reset to curl
+              on every one of them --}}
+        {{#if samples.length}}
+        <div class="mt-5" data-sample-tabs>
+            {{> reference/section-heading label="Code samples" class="mb-2"}}
+            {{#> ui/tabs label="Code sample languages" class="mb-3"}}
+            {{#each samples}}
+            {{> ui/tab target=tabId label=label active=active key=id}}
+            {{/each}}
+            {{/ui/tabs}}
+            {{#each samples}}
+            <div id="{{tabId}}" role="tabpanel" aria-labelledby="{{tabId}}-tab" {{#unless active}}class="hidden" {{/unless}}>
+                <div class="relative">
+                    <button type="button" class="copy-btn btn btn-text btn-xs absolute end-2 top-2"
+                        data-copy-target="#{{tabId}}-code" aria-label="Copy to clipboard">
+                        <span class="icon-[tabler--copy] size-4"></span>
+                    </button>
+                    <pre class="ee-code-block"><code id="{{tabId}}-code" class="language-{{language}}">{{code}}</code></pre>
+                </div>
+            </div>
+            {{/each}}
+        </div>
+        {{/if}}
+
+        {{> reference/try-it}}
+
+    </div>
+</section>

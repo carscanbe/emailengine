@@ -4,6 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert').strict;
 const http = require('node:http');
 
+// Body-capturing server shared with test/outlook-client-sendmail-test.js
+const { stopServer, withCapturingServer } = require('./helpers/capture-http-server');
+// The real endpoint/encoding selection GmailClient.submitMessage() calls
+const { buildSendRequest, JSON_SEND_LIMIT } = require('../lib/email-client/gmail/send-request');
+const exitWhenStandalone = require('./helpers/exit-standalone');
+
 async function startTestServer(behavior) {
     const requestCounts = {};
 
@@ -37,36 +43,9 @@ async function startTestServer(behavior) {
     };
 }
 
-async function stopServer(server) {
-    await new Promise(resolve => server.close(resolve));
-}
-
-async function startBodyCapturingServer() {
-    let capturedBody = null;
-
-    const server = http.createServer((req, res) => {
-        const chunks = [];
-        req.on('data', chunk => chunks.push(chunk));
-        req.on('end', () => {
-            capturedBody = Buffer.concat(chunks);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
-        });
-    });
-
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const { port } = server.address();
-
-    return {
-        server,
-        baseUrl: `http://127.0.0.1:${port}`,
-        getBody: () => capturedBody
-    };
-}
-
 test('Buffer payload dispatcher and Gmail endpoint selection', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     const { GmailOauth } = require('../lib/oauth/gmail');
@@ -87,74 +66,41 @@ test('Buffer payload dispatcher and Gmail endpoint selection', async t => {
         return new MailRuOauth(baseOpts);
     }
 
-    // Empty Buffer payloads should use retryAgent (retry on 429),
-    // non-empty Buffer payloads should use fetchAgent (no retry).
+    // The OAuth2 clients send a provider API request exactly once, whatever the payload shape:
+    // which failures are worth repeating is decided by the request layer above them
+    // (lib/email-client/api-retry.js), which knows the method and the provider's answers. The
+    // transport used to retry on its own as well, and one throttled call became up to 24 requests
+    for (const [label, createClient, method, payload] of [
+        ['Gmail: an empty Buffer payload', createGmail, 'post', Buffer.alloc(0)],
+        ['Gmail: a non-empty Buffer payload', createGmail, 'post', Buffer.from('binary-data')],
+        ['Gmail: a JSON object payload', createGmail, 'post', { key: 'value' }],
+        ['Gmail: a GET', createGmail, 'get', null],
+        ['Outlook: an empty Buffer payload', createOutlook, 'delete', Buffer.alloc(0)],
+        ['Outlook: a non-empty Buffer payload', createOutlook, 'post', Buffer.from('data')],
+        ['Outlook: a JSON object payload', createOutlook, 'post', { key: 'value' }],
+        ['Outlook: a GET', createOutlook, 'get', null]
+    ]) {
+        await t.test(`${label} is sent once and a 429 surfaces with its Retry-After`, async () => {
+            const { server, baseUrl, requestCounts } = await startTestServer('always-429');
+            try {
+                await assert.rejects(
+                    () => createClient().request('fake-token', `${baseUrl}/once`, method, payload),
+                    err => {
+                        assert.strictEqual(err.statusCode, 429);
+                        assert.strictEqual(err.oauthRequest.status, 429);
+                        assert.strictEqual(err.retryAfter, 0, 'the Retry-After header is parsed for the retry layer');
+                        assert.strictEqual(err.oauthRequest.retryAfter, 0);
+                        return true;
+                    }
+                );
+                assert.strictEqual(requestCounts['/once'], 1);
+            } finally {
+                await stopServer(server);
+            }
+        });
+    }
 
-    await t.test('Gmail: empty Buffer payload retries on 429', async () => {
-        const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
-        try {
-            const result = await createGmail().request('fake-token', `${baseUrl}/gmail-empty-buf`, 'post', Buffer.alloc(0));
-            assert.deepStrictEqual(result, { ok: true, attempt: 2 });
-            assert.ok(requestCounts['/gmail-empty-buf'] >= 2, 'Empty buffer POST should be retried on 429');
-        } finally {
-            await stopServer(server);
-        }
-    });
-
-    await t.test('Gmail: non-empty Buffer payload does not retry on 429', async () => {
-        const { server, baseUrl, requestCounts } = await startTestServer('always-429');
-        try {
-            await assert.rejects(
-                () => createGmail().request('fake-token', `${baseUrl}/gmail-nonempty-buf`, 'post', Buffer.from('binary-data')),
-                err => {
-                    assert.strictEqual(err.oauthRequest.status, 429);
-                    return true;
-                }
-            );
-            assert.strictEqual(requestCounts['/gmail-nonempty-buf'], 1, 'Non-empty buffer should not retry');
-        } finally {
-            await stopServer(server);
-        }
-    });
-
-    await t.test('Gmail: JSON object payload retries on 429 (baseline)', async () => {
-        const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
-        try {
-            const result = await createGmail().request('fake-token', `${baseUrl}/gmail-json`, 'post', { key: 'value' });
-            assert.deepStrictEqual(result, { ok: true, attempt: 2 });
-            assert.ok(requestCounts['/gmail-json'] >= 2, 'JSON payload should be retried on 429');
-        } finally {
-            await stopServer(server);
-        }
-    });
-
-    await t.test('Outlook: empty Buffer payload retries on 429', async () => {
-        const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
-        try {
-            const result = await createOutlook().request('fake-token', `${baseUrl}/outlook-empty-buf`, 'delete', Buffer.alloc(0));
-            assert.deepStrictEqual(result, { ok: true, attempt: 2 });
-            assert.ok(requestCounts['/outlook-empty-buf'] >= 2, 'Empty buffer DELETE should be retried on 429');
-        } finally {
-            await stopServer(server);
-        }
-    });
-
-    await t.test('Outlook: non-empty Buffer payload does not retry on 429', async () => {
-        const { server, baseUrl, requestCounts } = await startTestServer('always-429');
-        try {
-            await assert.rejects(
-                () => createOutlook().request('fake-token', `${baseUrl}/outlook-nonempty-buf`, 'post', Buffer.from('data')),
-                err => {
-                    assert.strictEqual(err.oauthRequest.status, 429);
-                    return true;
-                }
-            );
-            assert.strictEqual(requestCounts['/outlook-nonempty-buf'], 1, 'Non-empty buffer should not retry');
-        } finally {
-            await stopServer(server);
-        }
-    });
-
+    // Mail.ru keeps the transport-level retry (its API is only asked for the user profile)
     await t.test('Mail.ru: empty Buffer payload retries on 429', async () => {
         const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
         try {
@@ -182,147 +128,192 @@ test('Buffer payload dispatcher and Gmail endpoint selection', async t => {
         }
     });
 
-    // Gmail send endpoint selection logic (mirrors gmail-client.js submitMessage)
-    function selectGmailSendEndpoint(rawLength, threadId) {
-        const JSON_SEND_LIMIT = 3.5 * 1024 * 1024;
+    await t.test('Outlook: the send requests are marked noRetry', async () => {
+        const { buildStructuredSendMailRequest, buildDraftSendRequest, buildRawSendMailRequest } = require('../lib/email-client/outlook/send-request');
+        assert.strictEqual(buildStructuredSendMailRequest({ subject: 'x' }, 'me').options.noRetry, true);
+        assert.strictEqual(buildDraftSendRequest('msg-1', 'me').options.noRetry, true);
+        assert.strictEqual(buildRawSendMailRequest(Buffer.from('raw'), 'me').options.noRetry, true);
+    });
 
-        if (rawLength <= JSON_SEND_LIMIT) {
-            return {
-                contentType: 'application/json',
-                targetEndpoint: '/gmail/v1/users/me/messages/send',
-                hasThreadId: !!threadId,
-                isMultipart: false
-            };
-        } else if (threadId) {
-            return {
-                contentType: 'multipart/related',
-                targetEndpoint: '/upload/gmail/v1/users/me/messages/send?uploadType=multipart',
-                hasThreadId: true,
-                isMultipart: true
-            };
-        } else {
-            return {
-                contentType: 'message/rfc822',
-                targetEndpoint: '/upload/gmail/v1/users/me/messages/send',
-                hasThreadId: false,
-                isMultipart: false
-            };
-        }
+    // The retry layer, driven through the real OAuth2 clients against the local server: a
+    // throttled read is repeated after the Retry-After the server sent, a send is not
+    const gmailApi = require('../lib/email-client/gmail/gmail-api');
+    const graphApi = require('../lib/email-client/outlook/graph-api');
+    const { noopLogger } = require('./helpers/auth-failure');
+
+    function apiContext(oAuth2Client) {
+        return {
+            account: 'test-account',
+            logger: noopLogger,
+            getTokenData: async () => ({ accessToken: 'fake-token', cached: false }),
+            invalidateAccessToken: async () => {},
+            oAuth2Client
+        };
     }
 
-    await t.test('Gmail endpoint: small message uses JSON endpoint', async () => {
-        const result = selectGmailSendEndpoint(1024, null);
-        assert.strictEqual(result.targetEndpoint, '/gmail/v1/users/me/messages/send');
-        assert.strictEqual(result.contentType, 'application/json');
-        assert.strictEqual(result.hasThreadId, false);
+    await t.test('Gmail: the request layer repeats a throttled read once the server allows it', async () => {
+        const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
+        try {
+            const result = await gmailApi.request(apiContext(createGmail()), `${baseUrl}/gmail-throttled-get`, 'get');
+            assert.deepStrictEqual(result, { ok: true, attempt: 2 });
+            assert.strictEqual(requestCounts['/gmail-throttled-get'], 2);
+        } finally {
+            await stopServer(server);
+        }
     });
 
-    await t.test('Gmail endpoint: large message uses upload endpoint', async () => {
-        const result = selectGmailSendEndpoint(4 * 1024 * 1024, null);
-        assert.strictEqual(result.targetEndpoint, '/upload/gmail/v1/users/me/messages/send');
-        assert.strictEqual(result.contentType, 'message/rfc822');
+    await t.test('Gmail: a noRetry send is sent exactly once', async () => {
+        const { server, baseUrl, requestCounts } = await startTestServer('always-429');
+        try {
+            await assert.rejects(
+                () => gmailApi.request(apiContext(createGmail()), `${baseUrl}/gmail-send`, 'post', { raw: 'abc' }, { noRetry: true }),
+                err => err.oauthRequest.status === 429
+            );
+            assert.strictEqual(requestCounts['/gmail-send'], 1);
+        } finally {
+            await stopServer(server);
+        }
     });
 
-    await t.test('Gmail endpoint: small threaded reply uses JSON endpoint with threadId', async () => {
-        const result = selectGmailSendEndpoint(1024, 'thread-123');
-        assert.strictEqual(result.targetEndpoint, '/gmail/v1/users/me/messages/send');
-        assert.strictEqual(result.contentType, 'application/json');
-        assert.strictEqual(result.hasThreadId, true);
+    await t.test('Outlook: the request layer repeats a throttled read once the server allows it', async () => {
+        const { server, baseUrl, requestCounts } = await startTestServer('429-then-200');
+        try {
+            const outlook = createOutlook();
+            outlook.apiBase = baseUrl;
+            const result = await graphApi.requestWithRetry(apiContext(outlook), '/outlook-throttled-get', 'get');
+            assert.deepStrictEqual(result, { ok: true, attempt: 2 });
+            assert.strictEqual(requestCounts['/v1.0/outlook-throttled-get'], 2);
+        } finally {
+            await stopServer(server);
+        }
     });
 
-    await t.test('Gmail endpoint: large threaded reply uses multipart upload with threadId', async () => {
-        // Large threaded replies use multipart/related upload to preserve explicit
-        // threadId via JSON metadata alongside the raw RFC822 message body.
-        const result = selectGmailSendEndpoint(4 * 1024 * 1024, 'thread-456');
-        assert.strictEqual(result.targetEndpoint, '/upload/gmail/v1/users/me/messages/send?uploadType=multipart');
-        assert.strictEqual(result.contentType, 'multipart/related');
-        assert.strictEqual(result.hasThreadId, true);
-        assert.strictEqual(result.isMultipart, true);
+    await t.test('Outlook: a noRetry send is sent exactly once', async () => {
+        const { server, baseUrl, requestCounts } = await startTestServer('always-429');
+        try {
+            const { buildStructuredSendMailRequest } = require('../lib/email-client/outlook/send-request');
+            const outlook = createOutlook();
+            outlook.apiBase = baseUrl;
+            const structured = buildStructuredSendMailRequest({ subject: 'x' }, 'me');
+            await assert.rejects(
+                () => graphApi.requestWithRetry(apiContext(outlook), structured.path, 'post', structured.body, structured.options),
+                err => err.oauthRequest.status === 429
+            );
+            assert.strictEqual(requestCounts['/v1.0/me/sendMail'], 1);
+        } finally {
+            await stopServer(server);
+        }
     });
 
-    await t.test('Gmail endpoint: message exactly at JSON_SEND_LIMIT uses JSON endpoint', async () => {
-        const JSON_SEND_LIMIT = 3.5 * 1024 * 1024;
-        const result = selectGmailSendEndpoint(JSON_SEND_LIMIT, null);
-        assert.strictEqual(result.targetEndpoint, '/gmail/v1/users/me/messages/send');
+    // $value endpoints return raw MIME; a text round-trip replaced every non-UTF-8 byte with U+FFFD
+    await t.test('Outlook: returnBuffer keeps 8-bit bytes intact', async () => {
+        const body = Buffer.from([0x53, 0x75, 0x62, 0x6a, 0x3a, 0x20, 0xe4, 0xf6, 0xfc, 0xff, 0x80]);
+        const binServer = http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+            res.end(body);
+        });
+        await new Promise(resolve => binServer.listen(0, '127.0.0.1', resolve));
+        try {
+            const result = await createOutlook().request('fake-token', `http://127.0.0.1:${binServer.address().port}/$value`, 'get', Buffer.alloc(0), {
+                returnBuffer: true
+            });
+            assert.ok(Buffer.isBuffer(result));
+            assert.ok(result.equals(body));
+        } finally {
+            await stopServer(binServer);
+        }
     });
 
-    await t.test('Gmail endpoint: message one byte over JSON_SEND_LIMIT uses upload endpoint', async () => {
-        const JSON_SEND_LIMIT = 3.5 * 1024 * 1024;
-        const result = selectGmailSendEndpoint(JSON_SEND_LIMIT + 1, null);
-        assert.strictEqual(result.targetEndpoint, '/upload/gmail/v1/users/me/messages/send');
+    // Gmail send endpoint selection - drives lib/email-client/gmail/send-request.js, the module
+    // GmailClient.submitMessage() actually calls. These cases used to run against a copy of the
+    // branch declared in this file (including its own JSON_SEND_LIMIT), so moving the threshold,
+    // renaming an endpoint or dropping the base64url encoding left every assertion green while
+    // outbound mail broke.
+    const jsonMessage = size => Buffer.alloc(size, 'a');
+
+    await t.test('Gmail endpoint: small message uses the JSON endpoint with base64url', async () => {
+        const raw = Buffer.from('From: a@b.com\r\nSubject: Small\r\n\r\nBody');
+        const { targetEndpoint, contentType, payload } = buildSendRequest(raw);
+
+        assert.strictEqual(targetEndpoint, '/gmail/v1/users/me/messages/send');
+        assert.strictEqual(contentType, 'application/json');
+        assert.strictEqual(payload.threadId, undefined);
+        assert.deepStrictEqual(Buffer.from(payload.raw, 'base64url'), raw, 'the message must round trip through base64url');
     });
 
-    await t.test('Gmail endpoint: large non-threaded message uses simple upload', async () => {
-        const result = selectGmailSendEndpoint(4 * 1024 * 1024, null);
-        assert.strictEqual(result.targetEndpoint, '/upload/gmail/v1/users/me/messages/send');
-        assert.strictEqual(result.contentType, 'message/rfc822');
-        assert.strictEqual(result.hasThreadId, false);
-        assert.strictEqual(result.isMultipart, false);
+    await t.test('Gmail endpoint: small threaded reply keeps the threadId in the JSON body', async () => {
+        const raw = Buffer.from('From: a@b.com\r\nSubject: Reply\r\n\r\nBody');
+        const { targetEndpoint, contentType, payload } = buildSendRequest(raw, 'thread-123');
+
+        assert.strictEqual(targetEndpoint, '/gmail/v1/users/me/messages/send');
+        assert.strictEqual(contentType, 'application/json');
+        assert.strictEqual(payload.threadId, 'thread-123', 'a dropped threadId detaches the reply from its conversation');
     });
 
-    await t.test('Gmail multipart upload body contains valid structure', async () => {
-        const crypto = require('node:crypto');
-        const threadId = 'thread-abc123';
-        const rawMessage = Buffer.from('From: a@b.com\r\nTo: c@d.com\r\nSubject: Test\r\n\r\nBody');
+    await t.test('Gmail endpoint: a large non-threaded message uses the simple upload', async () => {
+        const raw = jsonMessage(JSON_SEND_LIMIT + 1);
+        const { targetEndpoint, contentType, payload } = buildSendRequest(raw);
 
-        const boundary = `ee_${crypto.randomBytes(16).toString('hex')}`;
-        const metadata = JSON.stringify({ threadId });
-        const preamble = Buffer.from(
-            `--${boundary}\r\n` +
-                `Content-Type: application/json; charset=UTF-8\r\n` +
-                `\r\n` +
-                `${metadata}\r\n` +
-                `--${boundary}\r\n` +
-                `Content-Type: message/rfc822\r\n` +
-                `\r\n`
-        );
-        const epilogue = Buffer.from(`\r\n--${boundary}--`);
-        const body = Buffer.concat([preamble, rawMessage, epilogue]);
-        const bodyStr = body.toString();
-
-        // Verify multipart structure
-        assert.ok(bodyStr.startsWith(`--${boundary}\r\n`), 'Should start with boundary');
-        assert.ok(bodyStr.includes('Content-Type: application/json'), 'Should contain JSON part');
-        assert.ok(bodyStr.includes(`"threadId":"${threadId}"`), 'Should contain threadId in metadata');
-        assert.ok(bodyStr.includes('Content-Type: message/rfc822'), 'Should contain RFC822 part');
-        assert.ok(bodyStr.includes('From: a@b.com'), 'Should contain the raw message');
-        assert.ok(bodyStr.endsWith(`\r\n--${boundary}--`), 'Should end with closing boundary');
-
-        // Verify boundary does not appear in the raw message content
-        assert.ok(!rawMessage.toString().includes(boundary), 'Boundary should not collide with message content');
+        assert.strictEqual(targetEndpoint, '/upload/gmail/v1/users/me/messages/send');
+        assert.strictEqual(contentType, 'message/rfc822');
+        assert.strictEqual(payload, raw, 'the upload endpoint takes the raw RFC822 buffer unencoded');
     });
 
-    await t.test('Gmail multipart body overhead stays well under 35MB upload limit', async () => {
-        // A message just under 35MB should produce a multipart body that
-        // still fits within the upload limit (overhead is ~200 bytes).
+    await t.test('Gmail endpoint: the JSON limit is inclusive, one byte over switches to upload', async () => {
+        // The boundary is the whole point of the branch: base64url inflates the body by ~4/3, so
+        // a message above the limit would be rejected by the 5MB JSON endpoint.
+        assert.strictEqual(buildSendRequest(jsonMessage(JSON_SEND_LIMIT)).targetEndpoint, '/gmail/v1/users/me/messages/send');
+        assert.strictEqual(buildSendRequest(jsonMessage(JSON_SEND_LIMIT + 1)).targetEndpoint, '/upload/gmail/v1/users/me/messages/send');
+    });
+
+    await t.test('Gmail endpoint: a large threaded reply is uploaded as multipart/related', async () => {
+        const raw = Buffer.concat([Buffer.from('From: a@b.com\r\nSubject: Big reply\r\n\r\n'), jsonMessage(JSON_SEND_LIMIT + 1)]);
+        const { targetEndpoint, contentType, payload } = buildSendRequest(raw, 'thread-abc123');
+
+        assert.strictEqual(targetEndpoint, '/upload/gmail/v1/users/me/messages/send?uploadType=multipart');
+
+        const boundary = /boundary=(\S+)/.exec(contentType)[1];
+        assert.ok(boundary, `content type must carry the boundary, got ${contentType}`);
+        assert.ok(contentType.startsWith('multipart/related;'));
+
+        const body = payload.toString('binary');
+        assert.ok(body.startsWith(`--${boundary}\r\n`), 'the body must open with the declared boundary');
+        assert.ok(body.includes('Content-Type: application/json'), 'the metadata part carries the threadId');
+        assert.ok(body.includes('"threadId":"thread-abc123"'));
+        assert.ok(body.includes('Content-Type: message/rfc822'), 'the second part is the message itself');
+        assert.ok(body.includes('Subject: Big reply'));
+        assert.ok(body.endsWith(`\r\n--${boundary}--`), 'the body must close the boundary');
+        assert.ok(!raw.toString('binary').includes(boundary), 'a random boundary must not collide with the message content');
+    });
+
+    await t.test('Gmail endpoint: each multipart send gets its own boundary', async () => {
+        const raw = jsonMessage(JSON_SEND_LIMIT + 1);
+        const first = buildSendRequest(raw, 'thread-1').contentType;
+        const second = buildSendRequest(raw, 'thread-1').contentType;
+
+        assert.notStrictEqual(first, second, 'a fixed boundary would collide with message content sooner or later');
+    });
+
+    await t.test('Gmail endpoint: the encodings stay inside the provider limits', async () => {
+        // base64url expands by ~4/3, so the JSON threshold has to leave room under Gmail's 5MB
+        // JSON body limit, and the multipart overhead has to leave room under the 35MB upload
+        // limit. Both are computed from the real payloads rather than from a re-declared constant.
+        const jsonBody = JSON.stringify(buildSendRequest(jsonMessage(JSON_SEND_LIMIT), 'some-thread-id-value').payload);
+        assert.ok(jsonBody.length < 5 * 1024 * 1024, `a maximum JSON send body is ${jsonBody.length} bytes, over Gmail's 5MB limit`);
+
         const nearLimit = 34 * 1024 * 1024;
-        const boundary = `ee_${'a'.repeat(32)}`;
-        const metadata = JSON.stringify({ threadId: 'thread-id' });
-        const preambleLen =
-            `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: message/rfc822\r\n\r\n`.length;
-        const epilogueLen = `\r\n--${boundary}--`.length;
-        const totalOverhead = preambleLen + epilogueLen;
-
-        assert.ok(nearLimit + totalOverhead < 35 * 1024 * 1024, `Multipart overhead (${totalOverhead} bytes) should not push payload over 35MB`);
-    });
-
-    await t.test('Gmail endpoint: base64url overhead keeps JSON payload under 5MB limit', async () => {
-        // Verify the JSON_SEND_LIMIT (3.5MB) provides adequate safety margin.
-        // base64url expands data by ~4/3, so 3.5MB raw -> ~4.67MB encoded,
-        // plus JSON wrapper overhead, well under Gmail's 5MB JSON body limit.
-        const JSON_SEND_LIMIT = 3.5 * 1024 * 1024;
-        const base64urlSize = Math.ceil((JSON_SEND_LIMIT * 4) / 3);
-        const jsonOverhead = '{"raw":"","threadId":"some-thread-id-value"}'.length;
-        const totalJsonBody = base64urlSize + jsonOverhead;
-        const GMAIL_JSON_LIMIT = 5 * 1024 * 1024;
-
-        assert.ok(totalJsonBody < GMAIL_JSON_LIMIT, `Max JSON body (${totalJsonBody} bytes) should be under Gmail 5MB limit (${GMAIL_JSON_LIMIT} bytes)`);
+        const multipart = buildSendRequest(jsonMessage(nearLimit), 'thread-id').payload;
+        assert.ok(multipart.length < 35 * 1024 * 1024, `multipart overhead pushes a ${nearLimit} byte message to ${multipart.length}, over the 35MB limit`);
     });
 
     // Outlook sendMail: Buffer payload with text/plain must not be JSON-quoted
     await t.test('Outlook: Buffer payload with text/plain contentType is sent without JSON quoting', async () => {
-        const { server, baseUrl, getBody } = await startBodyCapturingServer();
-        try {
+        const respondWithJson = res => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        };
+
+        await withCapturingServer(respondWithJson, async ({ baseUrl, getCaptured }) => {
             const outlook = createOutlook();
             const base64Content = Buffer.from('From: a@b.com\r\nTo: c@d.com\r\nSubject: Test\r\n\r\nHello').toString('base64');
             const payload = Buffer.from(base64Content);
@@ -332,14 +323,12 @@ test('Buffer payload dispatcher and Gmail endpoint selection', async t => {
                 returnText: true
             });
 
-            const receivedBody = getBody().toString();
+            const receivedBody = getCaptured().body.toString();
 
             // The body must be the raw base64 string, not wrapped in JSON quotes
             assert.strictEqual(receivedBody, base64Content, 'Body should be raw base64, not JSON-stringified');
             assert.ok(!receivedBody.startsWith('"'), 'Body must not start with a JSON quote');
             assert.ok(!receivedBody.endsWith('"'), 'Body must not end with a JSON quote');
-        } finally {
-            await stopServer(server);
-        }
+        });
     });
 });

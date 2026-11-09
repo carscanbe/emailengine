@@ -1,30 +1,15 @@
 'use strict';
 
 // Unit tests for lib/email-client/notification-handler.js. The pure, hermetic
-// surfaces are covered here: payload assembly (buildPayload), BullMQ job-option
-// derivation and retention (buildJobOptions), the document-store gating
-// short-circuits (shouldSyncDocuments), the metrics post error path
-// (postMetrics), and the thread-id early returns (generateThreadId). The
-// queue/webhook/ElasticSearch round-trips are intentionally out of scope.
+// surfaces are covered here: payload assembly (buildPayload) and the metrics
+// post error path (postMetrics). The queue/webhook round-trips are
+// intentionally out of scope.
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
-const {
-    NotificationHandler,
-    DOCUMENT_SYNC_EVENTS,
-    DEFAULT_JOB_OPTIONS,
-    DOCUMENT_JOB_OPTIONS,
-    postMetrics
-} = require('../lib/email-client/notification-handler');
-const {
-    MESSAGE_NEW_NOTIFY,
-    MESSAGE_DELETED_NOTIFY,
-    MESSAGE_UPDATED_NOTIFY,
-    EMAIL_BOUNCE_NOTIFY,
-    MAILBOX_DELETED_NOTIFY,
-    AUTH_ERROR_NOTIFY
-} = require('../lib/consts');
+const { NotificationHandler, postMetrics } = require('../lib/email-client/notification-handler');
+const { MESSAGE_NEW_NOTIFY } = require('../lib/consts');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 
@@ -33,7 +18,7 @@ registerRedisTeardown(redis);
 const noopLogger = { trace() {}, debug() {}, info() {}, warn() {}, error() {} };
 
 function makeHandler(overrides) {
-    return new NotificationHandler(Object.assign({ account: 'acc-1', logger: noopLogger, flowProducer: {}, documentsQueue: {} }, overrides));
+    return new NotificationHandler(Object.assign({ account: 'acc-1', logger: noopLogger }, overrides));
 }
 
 test('buildPayload', async t => {
@@ -76,54 +61,6 @@ test('buildPayload', async t => {
     });
 });
 
-test('buildJobOptions', async t => {
-    const handler = makeHandler();
-
-    await t.test('maps a numeric queueKeep to age+count retention', () => {
-        const opts = handler.buildJobOptions(500);
-        const retention = { age: 24 * 3600, count: 500 };
-        assert.deepStrictEqual(opts.notify.removeOnComplete, retention);
-        assert.deepStrictEqual(opts.notify.removeOnFail, retention);
-        assert.deepStrictEqual(opts.documents.removeOnComplete, retention);
-        // Attempt counts come from the respective base option sets.
-        assert.strictEqual(opts.notify.attempts, 10);
-        assert.strictEqual(opts.documents.attempts, 16);
-    });
-
-    await t.test('passes a boolean queueKeep through unchanged', () => {
-        const opts = handler.buildJobOptions(true);
-        assert.strictEqual(opts.notify.removeOnComplete, true);
-        assert.strictEqual(opts.notify.removeOnFail, true);
-        assert.strictEqual(opts.documents.removeOnComplete, true);
-    });
-
-    await t.test('does not mutate the shared base option objects', () => {
-        const beforeDefault = JSON.stringify(DEFAULT_JOB_OPTIONS);
-        const beforeDocument = JSON.stringify(DOCUMENT_JOB_OPTIONS);
-        handler.buildJobOptions(7);
-        assert.strictEqual(JSON.stringify(DEFAULT_JOB_OPTIONS), beforeDefault);
-        assert.strictEqual(JSON.stringify(DOCUMENT_JOB_OPTIONS), beforeDocument);
-        // The base retention is unchanged (count 1000), proving a copy was made.
-        assert.strictEqual(DEFAULT_JOB_OPTIONS.removeOnComplete.count, 1000);
-    });
-});
-
-test('shouldSyncDocuments gating', async t => {
-    await t.test('returns false when canSync is false', async () => {
-        assert.strictEqual(await makeHandler().shouldSyncDocuments(MESSAGE_NEW_NOTIFY, false), false);
-    });
-
-    await t.test('returns false when there is no documents queue', async () => {
-        assert.strictEqual(await makeHandler({ documentsQueue: null }).shouldSyncDocuments(MESSAGE_NEW_NOTIFY, true), false);
-    });
-
-    await t.test('returns false for an event that never syncs to the document store', async () => {
-        // AUTH_ERROR_NOTIFY is not in DOCUMENT_SYNC_EVENTS, so this short-circuits
-        // before any document-store/Redis lookup.
-        assert.strictEqual(await makeHandler().shouldSyncDocuments(AUTH_ERROR_NOTIFY, true), false);
-    });
-});
-
 test('postMetrics', async t => {
     await t.test('never throws into the caller and routes a failed post to the logger', () => {
         // Contract: metrics are best-effort, so postMetrics must swallow any failure
@@ -138,32 +75,47 @@ test('postMetrics', async t => {
     });
 });
 
-test('generateThreadId early returns', async t => {
-    await t.test('does nothing when the payload has no data', async () => {
-        const payload = { account: 'a' };
-        await makeHandler().generateThreadId(payload);
-        assert.deepStrictEqual(payload, { account: 'a' });
+test('buildPayload specialUse for API clients', async t => {
+    await t.test('reads specialUse off a plain { path, specialUse } mailbox object', () => {
+        // The Gmail API and Graph clients pass this shape instead of an IMAP Mailbox with a
+        // listingEntry, and their webhooks used to lack the top-level specialUse
+        const payload = makeHandler().buildPayload({ path: 'Sent Items', specialUse: '\\Sent' }, MESSAGE_NEW_NOTIFY, { id: 'm1' }, null);
+        assert.strictEqual(payload.path, 'Sent Items');
+        assert.strictEqual(payload.specialUse, '\\Sent');
     });
 
-    await t.test('leaves an existing threadId untouched', async () => {
-        const payload = { data: { id: 'm1', threadId: 'thread-existing' } };
-        await makeHandler().generateThreadId(payload);
-        assert.strictEqual(payload.data.threadId, 'thread-existing');
+    await t.test('the listing entry still wins when both are present', () => {
+        const payload = makeHandler().buildPayload(
+            { path: 'INBOX', specialUse: '\\Sent', listingEntry: { specialUse: '\\Inbox' } },
+            MESSAGE_NEW_NOTIFY,
+            {},
+            null
+        );
+        assert.strictEqual(payload.specialUse, '\\Inbox');
     });
 });
 
-test('exported constants', async t => {
-    await t.test('DOCUMENT_SYNC_EVENTS lists exactly the document-syncing events', () => {
-        assert.deepStrictEqual(
-            [...DOCUMENT_SYNC_EVENTS].sort(),
-            [MESSAGE_NEW_NOTIFY, MESSAGE_DELETED_NOTIFY, MESSAGE_UPDATED_NOTIFY, EMAIL_BOUNCE_NOTIFY, MAILBOX_DELETED_NOTIFY].sort()
-        );
+test('notify', async t => {
+    const { webhooks } = require('../lib/webhooks');
+    const savedEnqueue = Object.prototype.hasOwnProperty.call(webhooks, 'enqueue') ? webhooks.enqueue : undefined;
+    t.after(() => {
+        if (savedEnqueue) {
+            webhooks.enqueue = savedEnqueue;
+        } else {
+            delete webhooks.enqueue;
+        }
     });
 
-    await t.test('document jobs retry more than default jobs', () => {
-        assert.strictEqual(DEFAULT_JOB_OPTIONS.attempts, 10);
-        assert.strictEqual(DOCUMENT_JOB_OPTIONS.attempts, 16);
-        assert.strictEqual(DEFAULT_JOB_OPTIONS.backoff.delay, 5000);
-        assert.strictEqual(DEFAULT_JOB_OPTIONS.backoff.jitter, 0.2);
+    await t.test('hands the payload to the webhook queue', async () => {
+        const enqueued = [];
+        webhooks.enqueue = async (event, payload) => enqueued.push({ event, payload });
+
+        await makeHandler().notify({ path: 'INBOX' }, MESSAGE_NEW_NOTIFY, { id: 'm1' });
+
+        assert.strictEqual(enqueued.length, 1);
+        assert.strictEqual(enqueued[0].event, MESSAGE_NEW_NOTIFY);
+        assert.strictEqual(enqueued[0].payload.account, 'acc-1');
+        assert.strictEqual(enqueued[0].payload.path, 'INBOX');
+        assert.deepStrictEqual(enqueued[0].payload.data, { id: 'm1' });
     });
 });

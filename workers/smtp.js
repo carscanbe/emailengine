@@ -6,23 +6,19 @@ const packageData = require('../package.json');
 const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
-const { getDuration, emitChangeEvent, readEnvValue, threadStats, loadTlsConfig, getByteSize } = require('../lib/tools');
-const { createSmtpAuthHandler } = require('../lib/smtp-auth');
+const { getDuration, emitChangeEvent, readEnvValue, threadStats, loadTlsConfig, assertTlsCredentials, getByteSize } = require('../lib/tools');
+const { createTlsContext, applyTlsContext } = require('../lib/tls/context');
+const { createSmtpAuthHandler, createSmtpAccountResolver, sessionDisabledCommands } = require('../lib/smtp-auth');
 
 const { initSentry } = require('../lib/sentry');
 initSentry('smtp');
 
 const { SMTPServer } = require('smtp-server');
 const util = require('util');
-const { redis } = require('../lib/db');
-const { Account } = require('../lib/account');
-const getSecret = require('../lib/get-secret');
-const { Splitter, Joiner } = require('@zone-eu/mailsplit');
-const { HeadersRewriter } = require('../lib/headers-rewriter');
+const { collectMessage } = require('../lib/smtp-message-processor');
 const settings = require('../lib/settings');
 
-const { encrypt, decrypt } = require('../lib/encrypt');
-const { Certs } = require('@postalsys/certs');
+const { createCertHandler } = require('../lib/cert-handler');
 
 config.smtp = config.smtp || {
     enabled: false,
@@ -34,50 +30,34 @@ config.smtp = config.smtp || {
 
 config.service = config.service || {};
 
-const { REDIS_PREFIX, DEFAULT_MAX_SMTP_MESSAGE_SIZE } = require('../lib/consts');
+const { DEFAULT_MAX_SMTP_MESSAGE_SIZE } = require('../lib/consts');
+
+// On shutdown, how long open sessions get before they are told 421 and closed. Shorter than
+// WORKER_DRAIN_TIMEOUT in server.js, so the 421 goes out before the thread is terminated
+const SMTP_CLOSE_TIMEOUT = 5 * 1000;
 
 const DEFAULT_EENGINE_TIMEOUT = 10 * 1000;
 
 const MAX_SMTP_MESSAGE_SIZE = getByteSize(readEnvValue('EENGINE_MAX_SMTP_MESSAGE_SIZE') || config.smtp.maxMessageSize) || DEFAULT_MAX_SMTP_MESSAGE_SIZE;
 const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.service.commandTimeout) || DEFAULT_EENGINE_TIMEOUT;
 
+// Every connection buffers its message in memory up to MAX_SMTP_MESSAGE_SIZE before it is queued,
+// so the concurrent connection count is what bounds this worker's memory. Excess connections are
+// refused with a 421, which any SMTP client retries. The default matches Postfix's smtpd limit.
+const DEFAULT_SMTP_MAX_CLIENTS = 100;
+const SMTP_MAX_CLIENTS = Number(readEnvValue('EENGINE_SMTP_MAX_CLIENTS') || config.smtp.maxClients) || DEFAULT_SMTP_MAX_CLIENTS;
+
 const ACCOUNT_CACHE = new WeakMap();
 
-let callQueue = new Map();
-let mids = 0;
+// The running listener and the TLS material it serves, kept at module level so the certificate
+// reload command can reach both. A renewal used to terminate this worker, which cut every
+// submission in flight; the listener can be handed a new secure context instead.
+let smtpServer = null;
+let tlsContext = null;
 
-async function call(message, transferList) {
-    return new Promise((resolve, reject) => {
-        let mid = `${Date.now()}:${++mids}`;
-
-        let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
-        let timer = setTimeout(() => {
-            let err = new Error('Timeout waiting for command response [T4]');
-            err.statusCode = 504;
-            err.code = 'Timeout';
-            err.ttl = ttl;
-            callQueue.delete(mid);
-            reject(err);
-        }, ttl);
-
-        callQueue.set(mid, { resolve, reject, timer });
-
-        try {
-            parentPort.postMessage(
-                {
-                    cmd: 'call',
-                    mid,
-                    message
-                },
-                transferList
-            );
-        } catch (err) {
-            clearTimeout(timer);
-            callQueue.delete(mid);
-            return reject(err);
-        }
-    });
-}
+const { createRpcClient, respond, isCall } = require('../lib/worker-rpc');
+const rpc = createRpcClient({ port: parentPort, defaultTimeout: EENGINE_TIMEOUT, timeoutTag: 'T4' });
+const call = rpc.call;
 
 async function metrics(logger, key, method, ...args) {
     try {
@@ -108,71 +88,11 @@ for (let level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {
     };
 }
 
-// Authentication logic lives in lib/smtp-auth.js so it can be unit tested
-// without booting this worker. The shared ACCOUNT_CACHE and call() are injected
-// so onAuth caches the Account for later processing steps.
+// Authentication and account resolution live in lib/smtp-auth.js so they can be unit tested
+// without booting this worker. The shared ACCOUNT_CACHE and call() are injected so onAuth
+// caches the Account that the resolver hands to the submission.
 const onAuth = createSmtpAuthHandler({ accountCache: ACCOUNT_CACHE, call });
-
-function processMessage(stream, session, meta) {
-    meta = meta || {};
-    const splitter = new Splitter();
-    const joiner = new Joiner();
-
-    const headersRewriter = new HeadersRewriter(async headers => {
-        let requestedAccount = headers.getFirst('x-ee-account');
-        headers.remove('x-ee-account');
-        if (requestedAccount) {
-            meta.requestedAccount = requestedAccount;
-        }
-
-        let idempotencyKey = headers.getFirst('x-ee-idempotency-key');
-        headers.remove('x-ee-idempotency-key');
-        if (idempotencyKey) {
-            meta.idempotencyKey = idempotencyKey;
-        }
-    });
-
-    stream.once('error', err => joiner.emit('error', err));
-    headersRewriter.once('error', err => joiner.emit('error', err));
-
-    return stream.pipe(splitter).pipe(headersRewriter).pipe(joiner);
-}
-
-async function checkAccountData(session, messageMeta) {
-    let accountObject;
-
-    if (!session.eeAuthEnabled && messageMeta.requestedAccount) {
-        // load account data
-        accountObject = new Account({ account: messageMeta.requestedAccount, redis, call, secret: await getSecret() });
-        let accountData;
-        try {
-            // throws if unknown user
-            accountData = await accountObject.loadAccountData();
-            if (accountData) {
-                ACCOUNT_CACHE.set(session, accountObject);
-                logger.info({ msg: 'Resolved requested account', account: messageMeta.requestedAccount });
-            }
-        } catch (err) {
-            logger.error({ msg: 'Failed resolving requested account', account: messageMeta.requestedAccount, err });
-        }
-    } else {
-        accountObject = ACCOUNT_CACHE.get(session);
-    }
-
-    if (!session.eeAuthEnabled && !messageMeta.requestedAccount && !accountObject) {
-        let err = new Error('Sender account ID not provided, can not send mail');
-        err.responseCode = 451;
-        throw err;
-    }
-
-    if (!accountObject) {
-        let err = new Error('Failed to load account');
-        err.responseCode = 451;
-        throw err;
-    }
-
-    return accountObject;
-}
+const resolveAccount = createSmtpAccountResolver({ accountCache: ACCOUNT_CACHE, call });
 
 async function init() {
     let server;
@@ -184,43 +104,27 @@ async function init() {
         disableReverseLookup: true,
         banner: 'EmailEngine MSA',
         size: MAX_SMTP_MESSAGE_SIZE,
-        useProxy: await settings.get('smtpServerProxy')
+        // The server answers an oversized message with 552 itself, also when the client sent no
+        // SIZE= parameter. onData still has to keep the truncated message out of the queue, see
+        // the sizeExceeded check below
+        rejectOversized: true,
+        maxClients: SMTP_MAX_CLIENTS,
+        useProxy: await settings.get('smtpServerProxy'),
+        closeTimeout: SMTP_CLOSE_TIMEOUT
     };
 
-    let certs = new Certs({
-        redis,
-        namespace: `${REDIS_PREFIX}`,
-
-        environment: 'ee',
-
-        logger: logger.child({ sub: 'acme' }),
-
-        encryptFn: async value => {
-            const encryptSecret = await getSecret();
-            return encrypt(value, encryptSecret);
-        },
-
-        decryptFn: async value => {
-            const encryptSecret = await getSecret();
-            return decrypt(value, encryptSecret);
-        }
-    });
+    // Reads what the API worker provisioned; this one never orders a certificate itself.
+    let certs = createCertHandler(logger);
 
     // check and update authentication settings on connection
     serverOptions.onConnect = (session, callback) => {
         settings
             .get('smtpServerAuthEnabled')
             .then(authEnabled => {
-                if (authEnabled && server.options.disabledCommands.includes('AUTH')) {
-                    let disabledCommands = new Set(server.options.disabledCommands);
-                    disabledCommands.delete('AUTH');
-                    server.options.disabledCommands = Array.from(disabledCommands);
-                    logger.info({ msg: 'Enabled authentication for the SMTP server', disabledCommands: server.options.disabledCommands });
-                } else if (!authEnabled && !server.options.disabledCommands.includes('AUTH')) {
-                    server.options.disabledCommands.push('AUTH');
-                    logger.info({ msg: 'Disabled authentication for the SMTP server', disabledCommands: server.options.disabledCommands });
-                }
-
+                // Per session, so switching authentication on or off takes effect for the next
+                // connection without changing what connections already open were offered. It used
+                // to rewrite the server-wide list, which every open session reads on each command
+                session.disabledCommands = sessionDisabledCommands(server.options.disabledCommands, authEnabled);
                 session.eeAuthEnabled = !!authEnabled;
 
                 return settings.get('smtpServerProxy');
@@ -243,74 +147,65 @@ async function init() {
     };
 
     serverOptions.onData = (rawStream, session, callback) => {
-        let chunks = [];
-        let chunklen = 0;
-
         let messageMeta = {};
-        let stream = processMessage(rawStream, session, messageMeta);
 
-        stream.on('readable', () => {
-            let chunk;
-            while ((chunk = stream.read()) !== null) {
-                if (!stream.sizeExceeded) {
-                    chunks.push(chunk);
-                    chunklen += chunk.length;
+        // Collecting the message lives in lib/smtp-message-processor.js so that the control
+        // header stripping, the stream error handling and the size verdict are unit testable -
+        // this worker can not be required from a test, it boots an SMTP server on load.
+        // collectMessage() rejects on a processing error instead of leaving it unhandled, which
+        // used to kill the entire worker thread rather than the one failing submission.
+        collectMessage(rawStream, messageMeta)
+            .then(async ({ message, sizeExceeded }) => {
+                if (sizeExceeded) {
+                    let err = new Error('Message exceeds fixed maximum message size');
+                    err.responseCode = 552;
+                    throw err;
                 }
-            }
-        });
 
-        stream.on('end', () => {
-            let err;
-            if (stream.sizeExceeded) {
-                err = new Error('Message exceeds fixed maximum message size');
-                err.responseCode = 552;
-                return callback(err);
-            }
+                let accountObject = await resolveAccount(session, messageMeta);
 
-            checkAccountData(session, messageMeta)
-                .then(accountObject => {
-                    let message = Buffer.concat(chunks, chunklen);
+                let payload = {
+                    envelope: {
+                        from: session.envelope.mailFrom.address,
+                        to: session.envelope.rcptTo.map(entry => entry.address)
+                    },
+                    raw: message
+                };
 
-                    let payload = {
-                        envelope: {
-                            from: session.envelope.mailFrom.address,
-                            to: session.envelope.rcptTo.map(entry => entry.address)
-                        },
-                        raw: message
-                    };
+                let res = await accountObject.queueMessage(payload, {
+                    source: 'smtp',
+                    idempotencyKey: messageMeta.idempotencyKey
+                });
 
-                    accountObject
-                        .queueMessage(payload, {
-                            source: 'smtp',
-                            idempotencyKey: messageMeta.idempotencyKey
-                        })
-                        .then(res => {
-                            // queued for later
-                            metrics(logger, 'events', 'inc', {
-                                event: 'smtpSubmitQueued'
-                            });
+                // queued for later
+                metrics(logger, 'events', 'inc', {
+                    event: 'smtpSubmitQueued'
+                });
 
-                            logger.info({
-                                msg: 'Message queued',
-                                account: session.user,
-                                messageId: res.messageId,
-                                sendAt: res.sendAt,
-                                queueId: res.queueId,
-                                idempotency: res.idempotency
-                            });
+                logger.info({
+                    msg: 'Message queued',
+                    account: accountObject.account,
+                    messageId: res.messageId,
+                    sendAt: res.sendAt,
+                    queueId: res.queueId,
+                    idempotency: res.idempotency
+                });
 
-                            return callback(null, `Message queued for delivery as ${res.queueId} (${new Date(res.sendAt).toISOString()})`);
-                        })
-                        .catch(err => {
-                            metrics(logger, 'events', 'inc', {
-                                event: 'smtpSubmitFail'
-                            });
-                            logger.error({ msg: 'Failed to submit message', account: session.user, err });
-                            callback(err);
-                        });
-                })
-                .catch(err => callback(err));
-        });
+                callback(null, `Message queued for delivery as ${res.queueId} (${new Date(res.sendAt).toISOString()})`);
+            })
+            .catch(err => {
+                metrics(logger, 'events', 'inc', {
+                    event: 'smtpSubmitFail'
+                });
+                // a responseCode means the submission was refused with an SMTP reply,
+                // which is a client-caused rejection rather than a server fault
+                logger[err.responseCode ? 'warn' : 'error']({
+                    msg: 'Failed to submit message',
+                    account: session.user || messageMeta.requestedAccount,
+                    err
+                });
+                callback(err);
+            });
     };
 
     let tls = await settings.get('smtpServerTLSEnabled');
@@ -319,30 +214,28 @@ async function init() {
         serverOptions.secure = true;
         serverOptions.allowInsecureAuth = false;
 
+        // Environment and config-file material first. It used to be loaded here and then
+        // overwritten by whatever Let's Encrypt had provisioned, so an operator who pinned a
+        // certificate through EENGINE_SMTP_TLS_CERT was silently served a different one.
+        // lib/tls/context.js keeps it ahead of every automatic source instead.
         loadTlsConfig(serverOptions, 'EENGINE_SMTP_TLS_');
 
-        // load certificates
-        let serviceUrl = await settings.get('serviceUrl');
-        let hostname = (new URL(serviceUrl).hostname || '').toString().toLowerCase().trim();
-        if (hostname) {
-            let certificateData = await certs.getCertificate(hostname, true);
-            if (certificateData && certificateData.status === 'valid') {
-                serverOptions.cert =
-                    certificateData.cert +
-                    '\n' +
-                    []
-                        .concat(certificateData.ca || [])
-                        .flatMap(entry => entry)
-                        .join('\n');
-                serverOptions.key = certificateData.privateKey;
-            }
-        }
+        // The material loaded above is snapshotted inside, at entry. The resolved material is
+        // written back into serverOptions below, so a later refresh reading this object again would
+        // believe the operator had supplied whatever it resolved through the environment.
+        tlsContext = await createTlsContext({ certs, logger, listener: 'smtp', listenerOptions: serverOptions });
+        Object.assign(serverOptions, tlsContext.options);
+
+        // Reached only when there is no material at all, which now means the self-signed fallback
+        // could not be generated either - a broken instance rather than a missing certificate.
+        assertTlsCredentials(serverOptions, 'The SMTP server');
     } else {
         serverOptions.disabledCommands = ['STARTTLS'];
         serverOptions.hideSTARTTLS = true;
     }
 
     server = new SMTPServer(serverOptions);
+    smtpServer = server;
 
     let port = await settings.get('smtpServerPort');
     let host = await settings.get('smtpServerHost');
@@ -356,14 +249,14 @@ async function init() {
                         return;
                     }
                     logger.error({
-                        msg: 'SMTP Server Error',
+                        msg: 'SMTP server error',
                         err
                     });
                 });
                 resolve();
             });
         });
-        await emitChangeEvent(logger, null, 'smtpServerState', 'listening');
+        await emitChangeEvent(logger, null, 'smtpServerState', 'listening', { tls: tlsContext ? tlsContext.active : null });
     } catch (err) {
         await emitChangeEvent(logger, null, 'smtpServerState', 'failed', {
             error: { message: err.message, code: err.code || null }
@@ -374,10 +267,46 @@ async function init() {
     return server;
 }
 
+/**
+ * Re-resolves the TLS material and hands it to the running listener.
+ *
+ * Connections already established keep the context they negotiated with; the next handshake gets
+ * the new one. Nothing here restarts the server, which is the whole point: a renewal is not a
+ * reason to drop a submission that is halfway through DATA.
+ *
+ * @returns {Promise<Object>} What the listener is serving after the reload
+ */
+async function reloadCertificates() {
+    const result = await applyTlsContext({
+        context: smtpServer ? tlsContext : null,
+        apply: options => smtpServer.updateSecureContext(options),
+        logger
+    });
+
+    if (result.updated) {
+        await emitChangeEvent(logger, null, 'smtpServerState', 'listening', { tls: result.tls });
+    }
+
+    return result;
+}
+
 async function onCommand(command) {
     switch (command.cmd) {
         case 'resource-usage':
             return threadStats.usage();
+
+        case 'smtpReloadCertificates':
+            return await reloadCertificates();
+
+        // Shutdown drain. Signals reach the main thread only, so server.js forwards them here.
+        // Stops accepting connections and lets a submission halfway through DATA be queued and
+        // answered, instead of cutting it at process exit: a client that never sees the 250 for
+        // a message that was already queued sends it again
+        case 'close':
+            if (smtpServer) {
+                await new Promise(resolve => smtpServer.close(resolve));
+            }
+            return true;
         default:
             logger.debug({ msg: 'Unhandled command', command });
             return 999;
@@ -397,55 +326,25 @@ setInterval(() => {
 parentPort.postMessage({ cmd: 'ready' });
 
 parentPort.on('message', message => {
-    if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
-        let { resolve, reject, timer } = callQueue.get(message.mid);
-        clearTimeout(timer);
-        callQueue.delete(message.mid);
-        if (message.error) {
-            let err = new Error(message.error);
-            if (message.code) {
-                err.code = message.code;
-            }
-            if (message.statusCode) {
-                err.statusCode = message.statusCode;
-            }
-            return reject(err);
-        } else {
-            return resolve(message.response);
-        }
+    if (rpc.handleResponse(message)) {
+        return;
     }
 
-    if (message && message.cmd === 'call' && message.mid) {
-        return onCommand(message.message)
-            .then(response => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    response
-                });
-            })
-            .catch(err => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    error: err.message,
-                    code: err.code,
-                    statusCode: err.statusCode
-                });
-            });
+    if (isCall(message)) {
+        return respond(parentPort, message, onCommand, { logger });
     }
 });
 
 init()
     .then(smtpServer => {
         let address = smtpServer.server.address();
-        logger.debug({
+        logger.info({
             msg: 'Started SMTP server thread',
             address,
             version: packageData.version
         });
     })
     .catch(err => {
-        logger.error({ msg: 'Failed to initialize SMTP', err });
+        logger.fatal({ msg: 'Failed to initialize SMTP server', err });
         logger.flush(() => process.exit(3));
     });

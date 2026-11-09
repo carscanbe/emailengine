@@ -23,8 +23,10 @@ generate_secret() {
     openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 64 | head -n 1
 }
 
+# Hex rather than base64: the password goes into a redis:// URL, where "/" and "+" of a base64
+# value made the URL unparseable about half the time
 generate_password() {
-    openssl rand -base64 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1
+    openssl rand -hex 24 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 48 | head -n 1
 }
 
 print_message $GREEN "==================================="
@@ -40,7 +42,16 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
+# Docker Compose ships either as the `docker compose` plugin - every current Docker Desktop and
+# Docker Engine install - or as the standalone `docker-compose` binary. Resolved into one variable
+# here and used everywhere below: the check accepted either form while the start step ran the binary,
+# so a host carrying only the plugin passed this script's own prerequisite check and then failed to
+# start anything.
+if docker compose version &> /dev/null; then
+    COMPOSE="docker compose"
+elif command -v docker-compose &> /dev/null; then
+    COMPOSE="docker-compose"
+else
     print_message $RED "Error: Docker Compose is not installed"
     exit 1
 fi
@@ -55,6 +66,10 @@ if [ ! -f "docker-compose.yml" ]; then
     exit 1
 fi
 
+# Everything this script writes from here on (the .env file and its backup) holds EENGINE_SECRET and
+# generated passwords, so create them owner-only from birth instead of tightening after the fact.
+umask 077
+
 # Create .env file if it doesn't exist
 if [ -f ".env" ]; then
     print_message $YELLOW "Warning: .env file already exists"
@@ -64,8 +79,9 @@ if [ -f ".env" ]; then
         print_message $YELLOW "Setup cancelled. Existing .env file preserved."
         exit 0
     fi
-    # Backup existing .env
-    cp .env .env.backup.$(date +%Y%m%d-%H%M%S)
+    # Backup existing .env. It holds EENGINE_SECRET and generated passwords; umask 077 (set above)
+    # keeps the copy owner-only from creation rather than leaving a world-readable window.
+    cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
     print_message $GREEN "✓ Existing .env backed up"
 fi
 
@@ -112,7 +128,7 @@ EENGINE_SETTINGS={"smtpServerEnabled": true, "smtpServerPort": 2525, "smtpServer
 # ===========================================
 
 # Redis is used as a database - no memory limit, no eviction
-# Monitor usage with: docker-compose exec redis redis-cli INFO memory
+# Monitor usage with: ${COMPOSE} exec redis redis-cli INFO memory
 REDIS_LOG_LEVEL=notice
 
 # ===========================================
@@ -171,14 +187,14 @@ read -p "Would you like to start EmailEngine now? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     print_message $YELLOW "Starting EmailEngine services..."
-    docker-compose pull
-    docker-compose up -d
+    $COMPOSE pull
+    $COMPOSE up -d
     
     # Wait for services to start
     sleep 5
     
     # Check status
-    if docker-compose ps | grep -q "Up"; then
+    if $COMPOSE ps | grep -q "Up"; then
         print_message $GREEN "✓ EmailEngine is running!"
         echo
         print_message $GREEN "Access the web interface at: http://localhost:3000"
@@ -190,11 +206,11 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Password: (not set - you'll be prompted to create one on first login)"
     else
         print_message $RED "Warning: Some services may not have started correctly"
-        print_message $YELLOW "Check logs with: docker-compose logs"
+        print_message $YELLOW "Check logs with: $COMPOSE logs"
     fi
 else
     print_message $YELLOW "To start EmailEngine later, run:"
-    echo "docker-compose up -d"
+    echo "$COMPOSE up -d"
 fi
 
 echo

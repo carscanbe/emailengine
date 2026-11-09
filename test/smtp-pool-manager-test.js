@@ -17,6 +17,7 @@ const {
     closePooledConnection,
     getPoolSize,
     generatePoolKey,
+    cleanupIdlePools,
     SMTP_POOL_MAX_IDLE,
     SMTP_POOL_CLEANUP_INTERVAL
 } = require('../lib/email-client/smtp-pool-manager');
@@ -58,6 +59,16 @@ test('generatePoolKey', async t => {
         assert.strictEqual(key, generatePoolKey(makeSettings()));
     });
 
+    await t.test('separates accounts that log their transactions, and nothing else', () => {
+        // the transaction log is written through the account's own logger, so a logged pool is
+        // per account; an unlogged pool to the same server is still shared
+        const base = makeSettings({ transactionLog: true });
+        assert.notStrictEqual(generatePoolKey(Object.assign({}, base, { account: 'a' })), generatePoolKey(Object.assign({}, base, { account: 'b' })));
+        assert.strictEqual(generatePoolKey(Object.assign({}, base, { account: 'a' })), generatePoolKey(Object.assign({}, base, { account: 'a' })));
+        const quiet = makeSettings({ transactionLog: false });
+        assert.strictEqual(generatePoolKey(Object.assign({}, quiet, { account: 'a' })), generatePoolKey(Object.assign({}, quiet, { account: 'b' })));
+    });
+
     await t.test('is independent of property insertion order', () => {
         const a = { host: 'h', port: 25, secure: true, auth: { user: 'u' } };
         const b = { auth: { user: 'u' }, secure: true, port: 25, host: 'h' };
@@ -87,7 +98,10 @@ test('generatePoolKey', async t => {
             name: makeSettings({ name: 'clienthost' }),
             localAddress: makeSettings({ localAddress: '10.0.0.9' }),
             proxy: makeSettings({ proxy: 'socks5://127.0.0.1:1080' }),
-            transactionLog: makeSettings({ transactionLog: true })
+            transactionLog: makeSettings({ transactionLog: true }),
+            tls: makeSettings({ tls: { rejectUnauthorized: false } }),
+            requireTLS: makeSettings({ requireTLS: true }),
+            ignoreTLS: makeSettings({ ignoreTLS: true })
         };
         for (const [field, settings] of Object.entries(variants)) {
             assert.notStrictEqual(generatePoolKey(settings), base, `${field} should affect the pool key`);
@@ -140,4 +154,87 @@ test('exported metadata', () => {
     assert.strictEqual(typeof getPoolSize(), 'number');
     assert.strictEqual(SMTP_POOL_MAX_IDLE, 10 * 60 * 1000);
     assert.strictEqual(SMTP_POOL_CLEANUP_INTERVAL, 2 * 60 * 1000);
+});
+
+test('the idle sweep does not close a pool while a message is on the wire', async () => {
+    // The sweep used to check a property nodemailer never had, so a transmission that outlasted
+    // the idle window (measured from when the message was handed over) was cut off mid-send
+    const { SMTPServer } = require('smtp-server');
+    let releaseData;
+    const dataStarted = new Promise(resolve => {
+        releaseData = resolve;
+    });
+    let finishData;
+    const server = new SMTPServer({
+        authOptional: true,
+        disabledCommands: ['STARTTLS'],
+        logger: false,
+        onData(stream, session, callback) {
+            stream.on('data', () => false);
+            stream.on('end', () => {
+                releaseData();
+                // hold the reply until the test has run the sweep
+                finishData = () => callback();
+            });
+        }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+    const settings = { host: '127.0.0.1', port: server.server.address().port, secure: false, ignoreTLS: true, auth: false };
+    const transport = transportFor(settings);
+    const key = generatePoolKey(settings);
+    try {
+        const sent = transport.sendMail({ from: 'a@example.com', to: 'b@example.com', subject: 'x', text: 'y' });
+        await dataStarted;
+
+        // Other tests' pools are idle too and go in the same sweep, so the pool is checked by identity
+        cleanupIdlePools(Date.now() + SMTP_POOL_MAX_IDLE + 1000);
+        assert.strictEqual(getMailTransport(settings), transport, 'the busy pool is kept');
+
+        finishData();
+        await sent;
+
+        // once nothing is in flight, the same sweep removes it
+        await new Promise(resolve => setImmediate(resolve));
+        cleanupIdlePools(Date.now() + 2 * SMTP_POOL_MAX_IDLE + 1000);
+        assert.notStrictEqual(getMailTransport(settings), transport, 'an idle pool is closed');
+    } finally {
+        closePooledConnection(key);
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('a replaced pool does not drop its successor', async t => {
+    for (const event of ['clear', 'error']) {
+        await t.test(`on a late '${event}' event`, () => {
+            const settings = makeSettings({ host: `replaced-${event}.example.com` });
+            const key = generatePoolKey(settings);
+            const first = transportFor(settings);
+
+            closePooledConnection(key);
+            const second = transportFor(settings);
+            assert.notStrictEqual(first, second);
+
+            // the old transporter reports its teardown after the new one took its place
+            first.emit(event, new Error('late'));
+
+            assert.strictEqual(transportFor(settings), second, 'the live transport is still the one handed out');
+        });
+    }
+});
+
+test('idle cleanup and deliveries in progress', async t => {
+    await t.test('keeps a pool that nodemailer reports deliveries pending for, closes it once there are none', () => {
+        const settings = makeSettings({ host: 'pending.example.com' });
+        const transport = transportFor(settings);
+        let pending = 1;
+        transport.transporter.pendingCount = () => pending;
+
+        cleanupIdlePools(Date.now() + SMTP_POOL_MAX_IDLE + 1000);
+        assert.strictEqual(transportFor(settings), transport, 'a pool with a message on the wire is not closed');
+
+        pending = 0;
+        cleanupIdlePools(Date.now() + SMTP_POOL_MAX_IDLE + 1000);
+        assert.notStrictEqual(transportFor(settings), transport, 'an idle pool is closed and replaced on the next get');
+    });
 });

@@ -1,5 +1,17 @@
-#  node:22.13.1-alpine
-FROM --platform=${TARGETPLATFORM} node@sha256:e2b39f7b64281324929257d0f8004fb6cb4bf0fdfb9aa8cedb235a766aec31da
+# Pinned by tag AND digest: the digest is what actually gets pulled, so a rebuild of an old commit
+# resolves the same Node layer, and the tag next to it keeps the line readable and lets Dependabot
+# parse it (it does not follow an ARG-defined image). Both stages must stay on the same pin.
+#
+# The pin has to be moved deliberately - it sat on node:22.13.1-alpine for 19 months, which is how
+# the image ended up shipping 21 unpatched Alpine CVEs. `apk upgrade` below covers the drift between
+# pin bumps, and the docker_scan job in .github/workflows/test.yml fails the build once a fix for a
+# HIGH/CRITICAL exists but is not picked up.
+
+# Build stage. Everything that needs a package manager, a shell or a writable source tree happens
+# here; the runtime stage below copies out only the finished tree, so npm and its dependencies never
+# reach the published image. npm accounted for 38 of the 59 HIGH/CRITICAL findings in the old image
+# (a vendored tar, pacote, sigstore, minimatch) and nothing at runtime ever invokes it.
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -21,6 +33,15 @@ RUN addgroup -S emailenginegroup && adduser -S emailengineuser -G emailenginegro
 
 WORKDIR /emailengine
 
+# Install dependencies before copying any source. npm ci is by far the slowest step in this
+# build - it runs under QEMU emulation for the non-native architecture - and Docker invalidates
+# every layer below a changed one. With the sources copied first, an edit to any file busted
+# this layer and re-ran the whole install; keeping it above them means it is only re-run when
+# the lockfile actually changes.
+COPY package.json package.json
+COPY package-lock.json package-lock.json
+RUN npm ci --omit=dev
+
 # Copy app folders
 COPY bin bin
 COPY config config
@@ -32,10 +53,13 @@ COPY views views
 COPY workers workers
 
 # Copy required root level files
+# NB: bin/emailengine.js requires ../encrypt and ../scan for the `encrypt` and `scan`
+# subcommands. This COPY list is an allowlist, so any root-level module the CLI dispatches
+# to must be named here or the command fails with MODULE_NOT_FOUND inside the container.
 COPY LICENSE_EMAILENGINE.txt LICENSE_EMAILENGINE.txt
-COPY package.json package.json
-COPY package-lock.json package-lock.json
+COPY encrypt.js encrypt.js
 COPY sbom.json sbom.json
+COPY scan.js scan.js
 COPY server.js server.js
 
 # Copy cron stuff
@@ -47,15 +71,35 @@ RUN chmod +x /run_monitor.sh
 RUN mkdir -p .git/refs/heads
 COPY .git/refs/heads/master .git/refs/heads/master
 
+# version-info.json is generated here and the script is dropped again, so it does not end up in the
+# runtime image. The `:?` check is the whole enforcement that a commit was supplied: update-info.sh
+# deliberately falls through to an empty commit rather than failing, because its non-Docker callers
+# (render.yaml, the deploy workflow) do not all have one to give. Here it is required, so a build that
+# forgets the arg fails loudly instead of shipping an image that cannot say what it is built from.
 COPY update-info.sh update-info.sh
+RUN : "${EE_COMMIT_HASH:?EE_COMMIT_HASH build arg is required, e.g. --build-arg EE_COMMIT_HASH=\$(git rev-parse HEAD)}" \
+    && ./update-info.sh \
+    && rm -f update-info.sh
 
-RUN npm ci --omit=dev
-RUN npm run prepare-docker
-RUN chmod +x ./update-info.sh
-RUN ./update-info.sh
+# Runtime stage.
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
 
-# Ensure permissions are set correctly for the non-root user
-RUN chown -R emailengineuser:emailenginegroup /emailengine
+# `apk upgrade` patches the Alpine packages that the base image itself lags on - at the time of
+# writing node:24-alpine still carries an openssl below 3.5.8-r0. dumb-init reaps zombies as PID 1.
+# npm is removed outright: it is a build-time tool, and leaving it in only adds scan surface.
+RUN apk add --no-cache dumb-init \
+    && apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
+# Create a non-root user and group
+RUN addgroup -S emailenginegroup && adduser -S emailengineuser -G emailenginegroup
+
+WORKDIR /emailengine
+
+# Owned by root and only readable by the runtime user, so a compromised process cannot rewrite the
+# code it runs or plant a module the next start would load. Nothing at runtime writes under
+# /emailengine: exports go to EENGINE_EXPORT_PATH, which defaults to the system temporary directory.
+COPY --from=builder /emailengine /emailengine
 
 RUN node -e "console.log('node arch: ' + os.arch())"
 RUN node -e "console.log(process.versions)"
@@ -65,6 +109,23 @@ USER emailengineuser
 
 ENV EENGINE_HOST=0.0.0.0
 ENV EENGINE_API_PROXY=true
+# The pure JavaScript msgpackr decoder is what the pkg binary uses, so npm and Docker installs decode the same way and no native addon is loaded
+ENV MSGPACKR_NATIVE_ACCELERATION_DISABLED=true
+# Caps each thread's young generation at the size Node 22 used. Node 24 (V8 13.6) quadrupled the
+# default, and every worker thread grows to it during startup, which raised the startup RSS of an
+# empty instance by about half. The limit applies to each thread separately, not to the process. A
+# NODE_OPTIONS given at run time replaces this one, so keep the flag in it to keep the cap. The pkg
+# binary bakes the same value in package.json, and test/node-heap-options-test.js keeps the two equal.
+ENV NODE_OPTIONS=--max-semi-space-size=16
+
+EXPOSE 3000
+
+# The liveness check: answers while the process can serve HTTP, without waiting on Redis or the
+# workers, so an orchestrator restarts the container only when restarting can help. Readiness
+# (workers and Redis) is /health/ready, for whatever routes traffic to it. A Node script rather than
+# wget so the probe follows the API's own port, bind address and TLS switch (lib/health-probe.js).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD ["node", "/emailengine/bin/healthcheck.js"]
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 #CMD ["node", "/emailengine/server.js"]

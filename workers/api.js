@@ -8,9 +8,17 @@ const logger = require('../lib/logger');
 const Path = require('path');
 const Gettext = require('@postalsys/gettext');
 const { loadTranslations, gt, joiLocales, locales } = require('../lib/translations');
+const {
+    accountStateLabel,
+    formatServerState,
+    identityErrorView,
+    workspaceErrorView,
+    renderRedirect,
+    isClientError
+} = require('../lib/ui-routes/route-helpers');
 const util = require('util');
 const { webhooks: Webhooks } = require('../lib/webhooks');
-const featureFlags = require('../lib/feature-flags');
+const { lists } = require('../lib/lists');
 const Bell = require('@hapi/bell');
 const marked = require('marked');
 
@@ -27,16 +35,19 @@ const {
     isEmail,
     getWorkerCount,
     runPrechecks,
-    matcher,
     readEnvValue,
+    readEnvList,
     threadStats,
     hasEnvValue,
     getBoolean,
     loadTlsConfig,
-    maybeReloadHttpProxyAgent,
-    resolveOAuthErrorStatus
+    resolveOAuthErrorStatus,
+    verifyServiceSignature,
+    SIGNING_PURPOSE,
+    setAdminSession,
+    isEndedSession
 } = require('../lib/tools');
-const { matchIp, detectAutomatedRequest } = require('../lib/utils/network');
+const { matchIp, resolveClientIp, detectAutomatedRequest, getAccountHttpRoute } = require('../lib/utils/network');
 
 const { initSentry } = require('../lib/sentry');
 initSentry('api');
@@ -46,42 +57,60 @@ const Boom = require('@hapi/boom');
 const Cookie = require('@hapi/cookie');
 const Crumb = require('@hapi/crumb');
 const Joi = require('joi');
-const hapiPino = require('hapi-pino');
+const requestLogger = require('../lib/hapi-request-logger');
 const Inert = require('@hapi/inert');
 const Vision = require('@hapi/vision');
 const Accept = require('@hapi/accept');
-const HapiSwagger = require('hapi-swagger');
 
 const pathlib = require('path');
 
 const crypto = require('crypto');
-const { Transform, finished } = require('stream');
-const { oauth2Apps, OAUTH_PROVIDERS } = require('../lib/oauth2-apps');
+const { registeredPublishers, openChangeStream, recheckChangeStreams } = require('../lib/response-stream');
+const { onRevocation } = require('../lib/revocation-events');
+const { oauth2Apps } = require('../lib/oauth2-apps');
+const { decodeJwtPayload } = require('../lib/oauth/decode-jwt-payload');
+const { resolveOutlookUserInfo, readTenantVerifiedDomains } = require('../lib/oauth/outlook-identity');
+const { resolveOutlookMailbox } = require('../lib/oauth/outlook-mailbox');
+const { isValidOAuthState } = require('../lib/oauth/state');
+const { completeAccountSetup } = require('../lib/ui-routes/account-setup');
+const { buildRetrySetup } = require('../lib/oauth/retry-setup');
+const { matchesExpectedIdentity, pendingSetupExpectation, resolveExpectedIdentity } = require('../lib/account/expected-identity');
 
 const handlebars = require('handlebars');
-const AuthBearer = require('hapi-auth-bearer-token');
+const { apiTokenScheme, SCHEME_NAME: API_TOKEN_SCHEME } = require('../lib/api-token-scheme');
+const { createApiTokenValidator } = require('../lib/api-token-auth');
 const tokens = require('../lib/tokens');
+const { mcpFeatureEnabled } = require('../lib/mcp');
+const mcpListen = require('../lib/mcp/listen');
+const tokenAuditLog = require('../lib/token-audit-log');
 
-const { redis, documentsQueue } = require('../lib/db');
+const { redis } = require('../lib/db');
+const { createHealthChecks } = require('../lib/health');
+const { requireSessionOnceSecured, TOTP_EXEMPT_PATHS } = require('../lib/session-default');
+const { setupDbsc, registerDbscExtensions } = require('../lib/dbsc');
 const { Account } = require('../lib/account');
 const settings = require('../lib/settings');
 
 const getSecret = require('../lib/get-secret');
-const { getESClient, documentStoreFeatureEnabled } = require('../lib/document-store');
+
+const sso = require('../lib/sso');
 
 const routesUi = require('../lib/routes-ui');
+const specOptions = require('../lib/swagger-options');
+const { registerOpenApiRoute } = require('../lib/openapi');
+const { getModel: getApiReferenceModel, clearServiceUrlCache } = require('../lib/api-reference');
 
-const { encrypt, decrypt } = require('../lib/encrypt');
-const { Certs } = require('@postalsys/certs');
-const net = require('net');
+const { createCertHandler } = require('../lib/cert-handler');
+const { createTlsContext, applyTlsContext } = require('../lib/tls/context');
+const { apiPort, apiHost, apiTlsConfig } = require('../lib/api-listener');
+const { reconcileCertificates, requestProvisioning } = require('../lib/tls/provision');
+const { buildCertificateStatus } = require('../lib/tls/status');
 
 const consts = require('../lib/consts');
 const {
     TRACK_OPEN_NOTIFY,
     TRACK_CLICK_NOTIFY,
     REDIS_PREFIX,
-    RENEW_TLS_AFTER,
-    BLOCK_TLS_RENEW,
     TLS_RENEW_CHECK_INTERVAL,
     DEFAULT_CORS_MAX_AGE,
     LIST_UNSUBSCRIBE_NOTIFY,
@@ -90,52 +119,41 @@ const {
     DEFAULT_EENGINE_TIMEOUT,
     DEFAULT_MAX_ATTACHMENT_SIZE,
     MAX_FORM_TTL,
-    NONCE_BYTES
+    NONCE_BYTES,
+    LAST_DOCUMENT_STORE_VERSION
 } = consts;
 
-const templateRoutes = require('../lib/api-routes/template-routes');
-const chatRoutes = require('../lib/api-routes/chat-routes');
-const bullBoardRoutes = require('../lib/api-routes/bull-board-routes');
-const accountRoutes = require('../lib/api-routes/account-routes');
-const messageRoutes = require('../lib/api-routes/message-routes');
-const exportRoutes = require('../lib/api-routes/export-routes');
-const pubsubRoutes = require('../lib/api-routes/pubsub-routes');
-const tokenRoutes = require('../lib/api-routes/token-routes');
-const mailboxRoutes = require('../lib/api-routes/mailbox-routes');
-const settingsRoutes = require('../lib/api-routes/settings-routes');
-const statsRoutes = require('../lib/api-routes/stats-routes');
-const licenseRoutes = require('../lib/api-routes/license-routes');
-const outboxRoutes = require('../lib/api-routes/outbox-routes');
-const webhookRouteRoutes = require('../lib/api-routes/webhook-route-routes');
-const oauth2AppRoutes = require('../lib/api-routes/oauth2-app-routes');
-const gatewayRoutes = require('../lib/api-routes/gateway-routes');
-const deliveryTestRoutes = require('../lib/api-routes/delivery-test-routes');
-const blocklistRoutes = require('../lib/api-routes/blocklist-routes');
-const submitRoutes = require('../lib/api-routes/submit-routes');
+const registerApiRoutes = require('../lib/api-routes');
+const {
+    securityHeadersExt,
+    attachSecurityContext,
+    isAdminPath,
+    isMachineRoute,
+    acceptsSession,
+    isSecureOrigin,
+    CSP_MODES
+} = require('../lib/security-headers');
+const { deprecationExt } = require('../lib/deprecations');
+const { errorCodeExt } = require('../lib/api-error-codes');
+const { apiCallDuration } = require('../lib/request-timing');
+const { registerHandlebarsHelpers } = require('../lib/handlebars-helpers');
 
-const { imapSchema, smtpSchema, oauth2Schema, accountIdSchema, headerTimeoutSchema, errorResponses } = require('../lib/schemas');
-
-const OAuth2ProviderSchema = Joi.string()
-    .valid(...Object.keys(OAUTH_PROVIDERS))
-    .required()
-    .example('gmail')
-    .description('OAuth2 provider')
-    .label('OAuth2Provider');
-
-const AccountTypeSchema = Joi.string()
-    .valid(...['imap'].concat(Object.keys(OAUTH_PROVIDERS)).concat(['oauth2', 'delegated', 'sending', 'invalid']))
-    .example('outlook')
-    .description(
-        'Account type: "imap" for IMAP accounts, an OAuth2 provider name for OAuth2 accounts, "oauth2" when the OAuth2 application is missing, "delegated" for delegated accounts, "sending" for send-only accounts, "invalid" when delegation cannot be resolved'
-    )
-    .required()
-    .label('AccountType');
+const {
+    imapSchema,
+    smtpSchema,
+    oauth2Schema,
+    accountIdSchema,
+    apiHeadersSchema,
+    headerTimeoutSchema,
+    oauth2ProviderSchema: OAuth2ProviderSchema,
+    accountTypeSchema: AccountTypeSchema
+} = require('../lib/schemas');
 
 const SUPPORTED_LOCALES = locales.map(locale => locale.locale);
 
 const FLAG_SORT_ORDER = ['\\Inbox', '\\Flagged', '\\Sent', '\\Drafts', '\\All', '\\Archive', '\\Junk', '\\Trash'];
 
-const { GMAIL_SCOPES, OPENID_SCOPES } = require('../lib/oauth/gmail');
+const { GMAIL_SCOPES, OPENID_SCOPES, workspaceDomainOf, verifiedEmailOf } = require('../lib/oauth/gmail');
 const { MAIL_RU_SCOPES } = require('../lib/oauth/mail-ru');
 
 const GMAIL_SCOPE_DESCRIPTIONS = {
@@ -161,7 +179,7 @@ function formatScopeDescription(scope) {
     return shortName.replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-const REDACTED_KEYS = ['req.headers.authorization', 'req.headers.cookie', 'err.rawPacket'];
+const { graphNotificationEntries, partitionGraphEntries, logRejectedGraphEntries, logUnknownGraphSubscription } = require('../lib/graph-notifications');
 
 const SMTP_TEST_HOST = 'https://api.nodemailer.com';
 
@@ -181,18 +199,37 @@ const OKTA_OAUTH2_CLIENT_SECRET = readEnvValue('OKTA_OAUTH2_CLIENT_SECRET');
 const OKTA_BASE_URL = OKTA_OAUTH2_ISSUER ? new URL(OKTA_OAUTH2_ISSUER).origin : null;
 const USE_OKTA_AUTH = !!(OKTA_OAUTH2_ISSUER && OKTA_OAUTH2_CLIENT_ID && OKTA_OAUTH2_CLIENT_SECRET);
 
+// Generic OIDC SSO (Keycloak, Authentik, Azure AD/Entra, Google, ...). Config lives
+// in lib/sso.js; the email and group allow-lists are parsed once here and consulted
+// both in the session validate() and in the /admin/login/oidc callback.
+const USE_OIDC_AUTH = sso.USE_OIDC_AUTH;
+const oidcAllowList = sso.parseAllowList(sso.OIDC_ALLOWED_USERS);
+const oidcAllowGroups = sso.parseGroupList(sso.OIDC_ALLOWED_GROUPS);
+
+// Bound to this instance's allow-lists; see sso.ssoSessionAdmitted()
+const ssoSessionAdmitted = session => sso.ssoSessionAdmitted(session, oidcAllowList, oidcAllowGroups);
+
 const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.service.commandTimeout) || DEFAULT_EENGINE_TIMEOUT;
 const MAX_ATTACHMENT_SIZE = getByteSize(readEnvValue('EENGINE_MAX_SIZE') || config.api.maxSize) || DEFAULT_MAX_ATTACHMENT_SIZE;
 
-const API_PORT =
-    (hasEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (hasEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
-const API_HOST = readEnvValue('EENGINE_HOST') || config.api.host;
+const API_PORT = apiPort(config.api);
+const API_HOST = apiHost(config.api);
 
 // Either an object (TLS enabled) or `false` (TLS disabled)
-const API_TLS = hasEnvValue('EENGINE_API_TLS') ? getBoolean(readEnvValue('EENGINE_API_TLS')) && (config.api.tls || {}) : config.api.tls || false;
+const API_TLS = apiTlsConfig(config.api);
 
 // Merge TLS settings from config params and environment
 loadTlsConfig(API_TLS, 'EENGINE_API_TLS_');
+
+// How the Content-Security-Policy is delivered: enforce (default), report-only, or off.
+// An unknown value falls back to enforce, and says so once
+const CSP_MODE_CONFIGURED = String(hasEnvValue('EENGINE_CSP_MODE') ? readEnvValue('EENGINE_CSP_MODE') : config.api.cspMode || '')
+    .trim()
+    .toLowerCase();
+const CSP_MODE = CSP_MODES.includes(CSP_MODE_CONFIGURED) ? CSP_MODE_CONFIGURED : 'enforce';
+if (CSP_MODE_CONFIGURED && CSP_MODE_CONFIGURED !== CSP_MODE) {
+    logger.warn({ msg: 'Unknown Content-Security-Policy mode, enforcing the policy', configured: CSP_MODE_CONFIGURED, cspMode: CSP_MODE });
+}
 
 // Per-worker thread metadata. With multiple API workers (EENGINE_WORKERS_API > 1) the
 // main thread assigns each one an index and whether to bind with SO_REUSEPORT. Only
@@ -203,12 +240,14 @@ const USE_REUSE_PORT = !!(workerData && workerData.reusePort);
 // that must execute exactly once across all API workers.
 const IS_PRIMARY_API_WORKER = WORKER_INDEX === 0;
 
-const ADMIN_ACCESS_ADDRESSES = hasEnvValue('EENGINE_ADMIN_ACCESS_ADDRESSES')
-    ? readEnvValue('EENGINE_ADMIN_ACCESS_ADDRESSES')
-          .split(',')
-          .map(v => v.trim())
-          .filter(v => v)
-    : null;
+const ADMIN_ACCESS_ADDRESSES = readEnvList('EENGINE_ADMIN_ACCESS_ADDRESSES');
+
+// Peers allowed to set X-Forwarded-For. Unset means the header is honored from any peer whenever
+// the API proxy setting is on, which is the historical behavior; see resolveClientIp().
+const API_PROXY_ADDRESSES = readEnvList('EENGINE_API_PROXY_ADDRESSES');
+
+// How long a shutdown waits for requests in flight, just below the main thread's WORKER_DRAIN_TIMEOUT
+const API_DRAIN_TIMEOUT = 6000;
 
 const IMAP_WORKER_COUNT = getWorkerCount(readEnvValue('EENGINE_WORKERS') || (config.workers && config.workers.imap)) || 4;
 
@@ -237,7 +276,12 @@ const CORS_CONFIG = !CORS_ORIGINS
                   )
               ) || ['*']
           ),
-          additionalHeaders: ['X-EE-Timeout'],
+          // The MCP entries are what lets a browser-based MCP client reach /mcp at all: the
+          // modern revision mirrors the method and tool name into routing headers and carries
+          // the protocol version in one, so a preflight lists all four and Hapi rejects it
+          // unless they are allowed here (lib/mcp/protocol.js isAllowedOrigin admits the origin,
+          // this admits the headers).
+          additionalHeaders: ['X-EE-Timeout', 'MCP-Protocol-Version', 'Mcp-Method', 'Mcp-Name', 'Mcp-Session-Id'],
           additionalExposedHeaders: ['Accept'],
           preflightStatusCode: 204,
           maxAge:
@@ -264,109 +308,9 @@ logger.info({
 
 const TRACKER_IMAGE = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
-let registeredPublishers = new Set();
-
-class ResponseStream extends Transform {
-    constructor() {
-        super();
-        registeredPublishers.add(this);
-        this.periodicKeepAliveTimer = false;
-        this.updateTimer();
-
-        this._finalized = false;
-
-        // Ensure cleanup on all stream end scenarios
-        this.on('error', () => this.finalize());
-        this.once('close', () => this.finalize());
-        this.once('end', () => this.finalize());
-    }
-
-    updateTimer() {
-        clearTimeout(this.periodicKeepAliveTimer);
-        this.periodicKeepAliveTimer = setTimeout(() => {
-            if (this._finalized || this.destroyed) return;
-            this.write(': still here\n\n');
-            if (this._compressor) {
-                this._compressor.flush();
-            }
-            this.updateTimer();
-        }, 90 * 1000);
-        this.periodicKeepAliveTimer.unref();
-    }
-
-    setCompressor(compressor) {
-        this._compressor = compressor;
-    }
-
-    sendMessage(payload) {
-        if (this._finalized || this.destroyed) return;
-        let sendData = JSON.stringify(payload);
-        this.write('event: message\ndata:' + sendData + '\n\n');
-        if (this._compressor) {
-            this._compressor.flush();
-        }
-        this.updateTimer();
-    }
-
-    finalize() {
-        if (this._finalized) return; // Prevent double cleanup
-        this._finalized = true;
-
-        clearTimeout(this.periodicKeepAliveTimer);
-        registeredPublishers.delete(this);
-
-        if (!this.destroyed) {
-            this.destroy();
-        }
-    }
-
-    _transform(data, encoding, done) {
-        this.push(data);
-        done();
-    }
-
-    _flush(done) {
-        this.finalize();
-        done();
-    }
-}
-
-let callQueue = new Map();
-let mids = 0;
-
-async function call(message, transferList) {
-    return new Promise((resolve, reject) => {
-        let mid = `${Date.now()}:${++mids}`;
-
-        let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
-
-        let timer = setTimeout(() => {
-            let err = new Error('Timeout waiting for command response [T2]');
-            err.statusCode = 504;
-            err.code = 'Timeout';
-            err.ttl = ttl;
-            callQueue.delete(mid);
-            reject(err);
-        }, ttl);
-
-        callQueue.set(mid, { resolve, reject, timer });
-
-        try {
-            parentPort.postMessage(
-                {
-                    cmd: 'call',
-                    mid,
-                    message
-                },
-                transferList
-            );
-        } catch (err) {
-            clearTimeout(timer);
-            callQueue.delete(mid);
-            return reject(err);
-        }
-    });
-}
+const { createRpcClient, respond, isCall } = require('../lib/worker-rpc');
+const rpc = createRpcClient({ port: parentPort, defaultTimeout: EENGINE_TIMEOUT, timeoutTag: 'T2' });
+const call = rpc.call;
 
 async function checkRateLimit(key, count, allowed, windowSize) {
     return await call({ cmd: 'rate-limit', key, count, allowed, windowSize });
@@ -413,163 +357,135 @@ async function sendWebhook(account, event, data) {
         payload.data = data;
     }
 
-    await Webhooks.pushToQueue(event, await Webhooks.formatPayload(event, payload));
+    await Webhooks.enqueue(event, payload);
 }
 
 async function onCommand(command) {
     switch (command.cmd) {
         case 'resource-usage':
             return threadStats.usage();
+
+        case 'apiReloadCertificates':
+            // Every API worker gets this, not just the one that ordered the certificate: the
+            // reconciler is a singleton but the HTTPS listeners are not, and a sibling worker that
+            // kept its old context would go on serving the certificate that was just replaced.
+            return refreshApiTls ? await refreshApiTls() : { updated: false };
+        case 'close':
+            return await drainApiServer();
         default:
             logger.debug({ msg: 'Unhandled command', command });
             return 999;
     }
 }
 
+/**
+ * Stops taking new connections and waits for the requests in flight, so a shutdown no longer cuts
+ * them. Readiness turns 503 first, which tells a load balancer to stop sending traffic here. The
+ * main thread bounds the whole wait with its own drain timeout, this one is just below it.
+ */
+async function drainApiServer() {
+    apiDraining = true;
+    if (!sessionAuthServer) {
+        return true;
+    }
+    try {
+        await sessionAuthServer.stop({ timeout: API_DRAIN_TIMEOUT });
+    } catch (err) {
+        logger.warn({ msg: 'Failed to stop the API server cleanly', err });
+    }
+    return true;
+}
+
 function publishChangeEvent(data) {
+    // Nothing to do (and no reason to compute the badge label) when no SSE client is
+    // subscribed - the common case whenever no admin browser has the dashboard open.
+    if (!registeredPublishers.size) {
+        return;
+    }
+
     let { account, type, key, payload } = data;
+
+    // resolve the badge descriptor server-side so the SSE repaint in app.js uses
+    // the exact same mapping (and translations) as the server-rendered views
+    let stateLabel = null;
+    switch (type) {
+        case 'state':
+            stateLabel = accountStateLabel(key, { lastErrorState: payload && payload.error }, gt);
+            break;
+        case 'smtpServerState':
+        case 'imapProxyServerState':
+            stateLabel = formatServerState(key, payload);
+            break;
+    }
 
     for (let stream of registeredPublishers) {
         try {
-            stream.sendMessage({ account, type, key, payload });
+            stream.sendMessage({ account, type, key, payload, stateLabel });
         } catch (err) {
-            logger.error({ msg: 'Failed to publish change event', err, account, type, key, payload });
+            logger.warn({ msg: 'Failed to publish change event', err, account, type, key, payload });
         }
     }
 }
 
+// The Hapi server, published by init() once the session strategy is registered and the boot-time
+// default has been decided, so the authData branch of the settings dispatcher below cannot set a
+// strategy that does not exist yet or race the boot-time server.auth.default() call. Also what the
+// shutdown drain stops
+let sessionAuthServer = null;
+
+// Installs a renewed certificate on this worker's own HTTPS listener. Published by init() when the
+// API is serving TLS, and called through the apiReloadCertificates command.
+let refreshApiTls = null;
+
 parentPort.on('message', message => {
-    if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
-        let { resolve, reject, timer } = callQueue.get(message.mid);
-        clearTimeout(timer);
-        callQueue.delete(message.mid);
-
-        if (message.error) {
-            let err = new Error(message.error);
-            if (message.code) {
-                err.code = message.code;
-            }
-            if (message.statusCode) {
-                err.statusCode = message.statusCode;
-            }
-            if (message.info) {
-                err.info = message.info;
-            }
-
-            return reject(err);
-        } else {
-            return resolve(message.response);
-        }
+    if (rpc.handleResponse(message)) {
+        return;
     }
 
-    if (message && message.cmd === 'call' && message.mid) {
-        return onCommand(message.message)
-            .then(response => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    response
-                });
-            })
-            .catch(err => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    error: err.message,
-                    code: err.code,
-                    statusCode: err.statusCode
-                });
-            });
+    if (isCall(message)) {
+        return respond(parentPort, message, onCommand, { logger });
     }
 
     if (message && message.cmd === 'change') {
         publishChangeEvent(message);
+        // The MCP subscriptions/listen streams ride the same fanout as the admin change feed,
+        // but frame the event as a JSON-RPC notification, so they keep their own registry
+        mcpListen.publishAccountChange(message, logger);
     }
 
     if (message && message.cmd === 'settings') {
-        // Keep this worker's in-memory HTTP proxy agent in sync when proxy settings change
-        maybeReloadHttpProxyAgent(message.data);
+        // the API reference memoizes serviceUrl, which its code samples embed
+        clearServiceUrlCache();
+
+        // The first admin password is saved by whichever API worker served the form, and only
+        // that worker's server gets the default strategy in-process (lib/ui-routes/auth-routes.js).
+        // The same handler broadcasts a settings change carrying the authData key, so with
+        // EENGINE_WORKERS_API > 1 the other workers stop serving /admin open here instead of at
+        // the next restart. hapi refuses a second default, hence the guard, which also covers
+        // the sender.
+        if (message.data && message.data.authData && sessionAuthServer && !sessionAuthServer.auth.settings.default) {
+            sessionAuthServer.auth.default('session');
+            logger.info({ msg: 'Admin session authentication enabled after the first password was set' });
+        }
     }
 });
 
-const init = async () => {
-    await loadTranslations();
+// Set by the certificate timer from the startup prechecks (scheduleCertificateReconciler) and read
+// by the onPreResponse extension (registerResponseExtensions)
+let assertPreconditionResult;
 
-    gt.setLocale((await settings.get('locale')) || 'en');
-
-    handlebars.registerHelper('_', (...args) => {
-        let params = args.slice(1, args.length - 1);
-
-        let locale = params.shift();
-
-        let localGt = locale ? gt.useLocale(locale) : gt;
-
-        let translated = localGt.gettext(args[0]);
-        if (params.length) {
-            translated = util.format(translated, ...params);
-        }
-
-        return new handlebars.SafeString(translated);
-    });
-
-    handlebars.registerHelper('isodate', time => new Date(Number(time)).toISOString());
-
-    handlebars.registerHelper('ngettext', (msgid, plural, count) => util.format(gt.ngettext(msgid, plural, count), count));
-
-    handlebars.registerHelper('featureFlag', function (flag, options) {
-        if (featureFlags.enabled(flag)) {
-            return options.fn(this);
-        }
-        return options.inverse(this);
-    });
-
-    handlebars.registerHelper('equals', function (compareVal, baseVal, options) {
-        if (baseVal === compareVal) {
-            return options.fn(this);
-        }
-        return options.inverse(this);
-    });
-
-    handlebars.registerHelper('inc', (nr, inc) => Number(nr) + Number(inc));
-
-    handlebars.registerHelper('json', payload => {
-        let res;
-        try {
-            res = typeof payload === 'undefined' ? 'undefined' : JSON.stringify(payload, false, 2);
-        } catch (err) {
-            res = util.inspect(payload, false, 4, false);
-        }
-        return new handlebars.SafeString(res);
-    });
-
-    handlebars.registerHelper('lastVal', (value, separator) => {
-        separator = separator || '/';
-
-        let res = (value || '').toString().split(separator).pop();
-
-        return new handlebars.SafeString(res);
-    });
-
-    handlebars.registerHelper('formatInteger', (intVal, locale) => {
-        if (isNaN(intVal)) {
-            // ignore non-numbers
-            return intVal;
-        }
-
-        locale = (locale || 'en_US').replace(/_/g, '-');
-
-        let formatter;
-        try {
-            formatter = new Intl.NumberFormat(locale, {});
-        } catch (err) {
-            formatter = new Intl.NumberFormat('en-US', {});
-        }
-
-        return formatter.format(intVal);
-    });
-
+/**
+ * Builds the hapi server, with the API TLS context when the API is served over HTTPS
+ * @returns {Promise<Object>} The server, the certificate handler, the API TLS context and the
+ *   SO_REUSEPORT listener (null unless several API workers share the port)
+ */
+async function createApiServer() {
     // Base Hapi options shared by both the default and SO_REUSEPORT binding paths
     const serverOptions = {
+        // hapi's default prints every internal request error to stderr; the request error
+        // listener below logs them through pino instead
+        debug: false,
+
         state: {
             strictHeader: false
         },
@@ -583,15 +499,37 @@ const init = async () => {
                     messages: joiLocales,
                     convert: true,
                     errors: {
-                        language: 'en' // Default language
+                        // Resolved per request from request.app.locale, which onPreAuth sets and
+                        // hapi exposes to joi as the $app.request context. A locale with no
+                        // joi catalog falls through to joi's own English messages. This has to be
+                        // a reference: the route settings are shared by every request on the
+                        // route, so writing the locale into them races concurrent requests
+                        language: Joi.ref('$app.request.locale')
                     }
                 },
-                headers: Joi.object({
-                    'x-ee-timeout': headerTimeoutSchema
-                }).unknown()
+                headers: apiHeadersSchema
             }
         }
     };
+
+    let certHandler = createCertHandler(logger);
+
+    // The admin UI and REST API over HTTPS. EENGINE_API_TLS_* and [api.tls] supply the certificate
+    // when the operator has one; everything they leave out comes from the same sources every other
+    // listener uses, so an instance that already holds a Let's Encrypt certificate for its own
+    // service domain no longer needs a second, external pipeline to serve it here.
+    let apiTlsContext = null;
+    if (API_TLS) {
+        apiTlsContext = await createTlsContext({
+            certs: certHandler,
+            logger,
+            listener: 'api',
+            // The operator's material and handshake settings are snapshotted inside, at entry,
+            // before the resolved options are merged back into this same object below
+            listenerOptions: API_TLS
+        });
+        Object.assign(API_TLS, apiTlsContext.options);
+    }
 
     // With multiple API workers we provide our own listener and bind it ourselves with
     // SO_REUSEPORT so the kernel load-balances connections. Hapi forbids port/host when
@@ -613,104 +551,62 @@ const init = async () => {
 
     const server = Hapi.server(serverOptions);
 
-    let assertPreconditionResult;
-    server.decorate('toolkit', 'getESClient', async (...args) => await getESClient(...args));
+    if (apiTlsContext && typeof server.listener.setSecureContext === 'function') {
+        // Connections already established keep the context they negotiated with; the next handshake
+        // gets the new one, which is why this does not restart anything.
+        refreshApiTls = async () =>
+            await applyTlsContext({
+                context: apiTlsContext,
+                // setSecureContext() replaces the context rather than merging into it: anything
+                // left out reverts to Node's default, so a reload that sent only the certificate
+                // and key dropped the operator's ca, ciphers and version bounds at the first
+                // renewal. SNICallback is a listener option and is not one of them.
+                apply: options => {
+                    const secureContext = Object.assign({}, options);
+                    delete secureContext.SNICallback;
+                    server.listener.setSecureContext(secureContext);
+                },
+                logger
+            });
+    }
 
-    let getServiceDomain = async () => {
-        let serviceUrl = await settings.get('serviceUrl');
-        let parsedUrl;
+    return { server, certHandler, apiTlsContext, reusePortListener };
+}
 
-        try {
-            parsedUrl = new URL(serviceUrl);
-        } catch (err) {
-            parsedUrl = {};
-        }
-
-        let hostname = (parsedUrl.hostname || '').toString().toLowerCase().trim();
-        if (!hostname || net.isIP(hostname) || ['localhost'].includes(hostname) || /(\.local|\.lan)$/i.test(hostname)) {
-            return false;
-        }
-        return hostname;
+function decorateApiToolkit(server, certHandler, apiTlsContext) {
+    // A read-only view of the certificate store for routes. Ordering a certificate is the
+    // reconciler's job - it owns the state a page follows, the retry pacing and the listener
+    // reload - and the difference between reading and ordering is one argument
+    // (`getCertificate(host, false)`), which is not a difference a route should be able to make by
+    // accident. Routes that need one ask through requestCertificates() below.
+    const readOnlyCerts = {
+        getCertificate: async hostname => await certHandler.getCertificate(hostname, true),
+        deleteCertificateData: async hostname => await certHandler.deleteCertificateData(hostname),
+        routeHandler: async (...args) => await certHandler.routeHandler(...args)
     };
 
-    let certHandler = new Certs({
-        redis,
-        namespace: `${REDIS_PREFIX}`,
+    server.decorate('toolkit', 'certs', readOnlyCerts);
 
-        acme: {
-            environment: 'emailengine',
-            directoryUrl: 'https://acme-v02.api.letsencrypt.org/directory'
-            //directoryUrl: 'https://acme-staging-v02.api.letsencrypt.org/directory',
-        },
-
-        logger: logger.child({ sub: 'acme' }),
-
-        encryptFn: async value => {
-            const encryptSecret = await getSecret();
-            return encrypt(value, encryptSecret);
-        },
-
-        decryptFn: async value => {
-            const encryptSecret = await getSecret();
-            return decrypt(value, encryptSecret);
-        }
-    });
-
-    server.decorate('toolkit', 'serviceDomain', getServiceDomain);
-    server.decorate('toolkit', 'certs', certHandler);
+    server.decorate(
+        'toolkit',
+        'requestCertificates',
+        async (hostnames, requestLogger) => await requestProvisioning({ certs: certHandler, logger: requestLogger || logger, call, hostnames })
+    );
 
     server.decorate('toolkit', 'checkRateLimit', checkRateLimit);
 
-    server.decorate('toolkit', 'getCertificate', async provision => {
-        let hostname = await getServiceDomain();
-        let certificateData;
+    // The certificate model the admin UI renders. Reading it never provisions anything: ordering a
+    // certificate is the reconciler's job, and a page render that could start an ACME order was
+    // exactly how a checkbox came to hold an HTTP request open for the length of one.
+    server.decorate('toolkit', 'tlsStatus', async () => await buildCertificateStatus({ certs: readOnlyCerts }));
 
-        if (hostname) {
-            certificateData = await certHandler.getCertificate(hostname, !provision);
-        }
+    server.decorate('toolkit', 'apiTlsInfo', () => ({
+        enabled: !!API_TLS,
+        active: apiTlsContext ? apiTlsContext.active : null
+    }));
+}
 
-        if (!certificateData) {
-            certificateData = {
-                domain: hostname,
-                status: 'self_signed',
-                label: { type: 'warning', text: 'Self-signed', title: 'Using a self-signed certificate' }
-            };
-        } else if (certificateData.status !== 'valid') {
-            switch (certificateData.status) {
-                case 'pending':
-                    certificateData.label = { type: 'info', text: 'Provisioning...', title: 'Currently provisioning a certificate' };
-                    break;
-                case 'failed':
-                    certificateData.label = {
-                        type: 'danger',
-                        text: 'Failed',
-                        title: (certificateData.lastError && certificateData.lastError.err) || 'Failed to generate a certificate'
-                    };
-                    break;
-            }
-        } else if (certificateData.validFrom > new Date()) {
-            certificateData.label = {
-                type: 'warning',
-                text: 'Future certificate',
-                title: 'Certificate is not yet valid'
-            };
-        } else if (certificateData.validTo < new Date()) {
-            certificateData.label = {
-                type: 'warning',
-                text: 'Expired certificate',
-                title: (certificateData.lastError && certificateData.lastError.err) || 'Certificate has been expired'
-            };
-        } else {
-            certificateData.label = {
-                type: 'success',
-                text: 'Valid certificate',
-                title: certificateData.fingerprint
-            };
-        }
-
-        return certificateData;
-    });
-
+function registerLocaleExtension(server) {
     server.ext('onPreAuth', async (request, h) => {
         const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
         // Skip if it's a static file route
@@ -779,42 +675,45 @@ const init = async () => {
             request.app.gt = gt;
         }
 
-        // Make sure validation errors use selected locale
-        if (request.route.settings.validate && request.route.settings.validate.options) {
-            // Get user's locale
-            const locale = request.app.locale || 'en';
-
-            // Create new validation options for this request
-            const validationOptions = Object.assign({}, request.route.settings.validate.options, {
-                errors: {
-                    language: locale
-                }
-            });
-
-            // Apply to this request only
-            request.route.settings.validate.options = validationOptions;
-        }
+        // Validation errors pick their language up from request.app.locale through the
+        // errors.language reference in the server-wide route defaults (see serverOptions), so
+        // nothing per request is written into the shared route settings here
 
         return h.continue;
     });
+}
 
+function registerRequestContextExtension(server) {
     server.ext('onRequest', async (request, h) => {
         // set default, will be overriden once active language is resolved
         request.app.gt = gt;
 
+        // Both settings are needed on every request and neither depends on the other, so they are
+        // read in a single HMGET rather than two serialized round trips
+        let { enableApiProxy, disableTokens, serviceUrl, dbscEnabled } = await settings.getMulti(
+            'enableApiProxy',
+            'disableTokens',
+            'serviceUrl',
+            'dbscEnabled'
+        );
+
+        // Device-bound admin sessions only work on an https origin, which is what serviceUrl says
+        // the admin UI is reached on (the same signal that marks the cookies Secure)
+        request.app.dbscEnabled = !!dbscEnabled && isSecureOrigin(serviceUrl);
+
+        // Before anything can render a view (the allowlist refusal below does), so the nonce
+        // the template stamps on its scripts is the one the response header carries
+        attachSecurityContext(request, { secureOrigin: isSecureOrigin(serviceUrl) });
+
         // check if client IP is resolved from X-Forwarded-For or not
-        let enableApiProxy = (await settings.get('enableApiProxy')) || false;
-        if (enableApiProxy) {
-            // check for the IP address from the Forwarded-For header
-            const xFF = request.headers['x-forwarded-for'];
-            request.app.ip = xFF ? xFF.split(',')[0] : request.info.remoteAddress;
-        } else {
-            // use socket address
-            request.app.ip = request.info.remoteAddress;
-        }
+        request.app.ip = resolveClientIp({
+            remoteAddress: request.info.remoteAddress,
+            forwardedFor: request.headers['x-forwarded-for'],
+            enableApiProxy: enableApiProxy || false,
+            trustedProxies: API_PROXY_ADDRESSES
+        });
 
         // check if access tokens for api requests are required
-        let disableTokens = await settings.get('disableTokens');
         if (disableTokens && !request.url.searchParams.get('access_token') && !request.headers.authorization) {
             // make sure that we have a access_token value set in query args
             let url = new URL(request.url.href);
@@ -822,14 +721,23 @@ const init = async () => {
             request.setUrl(`${url.pathname}${url.search}`);
         }
 
-        // make license info available for the request
-        request.app.licenseInfo = await call({ cmd: 'license', timeout: request.headers['x-ee-timeout'] });
+        // make license info available for the request. An MCP-dispatched inject seeds it from
+        // the outer request (lib/mcp/inject.js), so the IPC round trip is not paid twice for
+        // one answer that cannot differ within a request.
+        if (!request.app.licenseInfo) {
+            // This runs before route validation, so the header is still the raw string here. The
+            // route schema decides what it accepts (a bad value is that route's 400 later); a value
+            // it would refuse is ignored rather than handed to the timer, where a non-number or an
+            // overflow collapses to a 1 ms timeout and a 500 before validation ever runs.
+            const { error: timeoutError, value: requestTimeout } = headerTimeoutSchema.validate(request.headers['x-ee-timeout']);
+            request.app.licenseInfo = await call({ cmd: 'license', timeout: timeoutError ? undefined : requestTimeout });
+        }
 
         // flash notifications
         request.flash = async message => await flash(redis, request, message);
 
         if (ADMIN_ACCESS_ADDRESSES && ADMIN_ACCESS_ADDRESSES.length) {
-            if (request.path.startsWith('/admin') && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
+            if (isAdminPath(request.path) && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
                 logger.info({
                     msg: 'Blocked access from unlisted IP address',
                     remoteAddress: request.app.ip,
@@ -860,408 +768,87 @@ const init = async () => {
 
         return h.continue;
     });
+}
 
-    const swaggerOptions = {
-        swaggerUI: true,
-        jsonPath: '/swagger.json',
-        swaggerUIPath: '/admin/swagger/resources/',
+function buildOpenApiOptions() {
+    const openApiOptions = {
+        // Spec-shaping options (tag list and order, security scheme, external docs) live in
+        // lib/swagger-options.js so the document can be reproduced outside a running server
+        ...specOptions,
 
-        OAS: 'v3.0',
+        // The running version is the only part of `info` this worker owns - the rest is static
+        // and lives with the other document metadata in lib/swagger-options.js, so the tests
+        // see the same values a real instance serves
+        info: Object.assign({}, specOptions.info, { version: packageData.version }),
 
-        expanded: 'list',
-        sortEndpoints: 'method',
-        sortTags: 'unsorted',
-
-        tryItOutEnabled: true,
-
-        templates: Path.join(__dirname, '..', 'views', 'swagger', 'ui'),
-
-        grouping: 'tags',
-
-        info: {
-            title: 'EmailEngine API',
-            version: packageData.version,
-
-            description: `EmailEngine provides a RESTful API for managing email accounts, sending messages, and processing email data across multiple providers.
-
-<h3>Authentication</h3>
-All API requests require authentication using an Access Token. You can generate and manage your tokens from the <a href="/admin/tokens" target="_parent"><strong>Access Tokens</strong></a> page.
-
-Include your token in requests using one of these methods:
-- Query parameter: <code>?access_token=YOUR_TOKEN</code>
-- Authorization header: <code>Authorization: Bearer YOUR_TOKEN</code>
-
-<h3>Request Processing</h3>
-
-<strong>Sequential Processing:</strong> Requests to the same email account are processed sequentially to maintain data consistency. Multiple simultaneous requests will be queued.
-
-<strong>Timeouts:</strong> Long-running operations may cause queued requests to timeout. Configure appropriate timeout values using the <code>X-EE-Timeout</code> header (in milliseconds).
-
-<h3>Getting Started</h3>
-1. <a href="/admin/tokens" target="_parent">Generate an Access Token</a>
-2. <a href="/admin/accounts" target="_parent">Add an email account</a>
-3. Start making API requests using the endpoints below`,
-
-            contact: {
-                name: 'EmailEngine Support',
-                url: 'https://emailengine.app/support',
-                email: 'support@emailengine.app'
-            },
-
-            license: {
-                name: 'EmailEngine License',
-                url: 'https://emailengine.dev/LICENSE_EMAILENGINE.txt'
-            }
-        },
-
-        externalDocs: {
-            description: 'EmailEngine Documentation',
-            url: 'https://emailengine.app/'
-        },
-
-        securityDefinitions: {
-            bearerAuth: {
-                type: 'http',
-                scheme: 'bearer',
-                bearerFormat: 'JWT',
-                description: 'Enter your access token'
-            }
-        },
-
-        security: [{ bearerAuth: [] }],
-
-        definitionPrefix: 'useLabel',
-
-        cors: !!CORS_CONFIG,
-        cache: {
-            expiresIn: 7 * 24 * 60 * 60 * 1000
-        },
-
-        tags: [
-            {
-                name: 'Account',
-                description: 'Manage email accounts, including IMAP/SMTP configuration, OAuth2 authentication, and account health monitoring'
-            },
-            {
-                name: 'Mailbox',
-                description: 'List, create, modify, and manage mailbox folders. Retrieve folder statistics and special-use designations'
-            },
-            {
-                name: 'Message',
-                description: 'Search, retrieve, update, and delete email messages. Manage flags, labels, and message content'
-            },
-            {
-                name: 'Submit',
-                description:
-                    'Send emails with attachments, reply to threads, forward messages, and upload to folders. Supports both immediate and scheduled sending',
-                externalDocs: {
-                    description: 'Sending Emails Documentation',
-                    url: 'https://emailengine.app/sending-emails'
-                }
-            },
-            {
-                name: 'Outbox',
-                description: 'Monitor and manage the email sending queue. View pending messages, retry failed deliveries, and track sending progress'
-            },
-            {
-                name: 'Delivery Test',
-                description: 'Test email deliverability and authentication. Verify SPF, DKIM signatures, DMARC alignment, and analyze potential delivery issues'
-            },
-            {
-                name: 'Access Tokens',
-                description: 'Create and manage API access tokens with customizable permissions, IP restrictions, and rate limits'
-            },
-            {
-                name: 'Settings',
-                description: 'Configure EmailEngine runtime settings including webhooks, tracking, AI features, and email processing options'
-            },
-            {
-                name: 'Templates',
-                description: 'Create and manage reusable email templates with variable substitution, HTML/text content, and attachments',
-                externalDocs: {
-                    description: 'Email Templates Documentation',
-                    url: 'https://emailengine.app/email-templates'
-                }
-            },
-            {
-                name: 'Logs',
-                description: 'Access system and account-level logs for debugging, monitoring, and audit purposes'
-            },
-            {
-                name: 'Stats',
-                description: 'Retrieve usage statistics, performance metrics, and account activity data',
-                externalDocs: {
-                    description: 'Monitoring and Analytics',
-                    url: 'https://emailengine.app/monitoring'
-                }
-            },
-            {
-                name: 'License',
-                description: 'Manage EmailEngine licensing, view license status, and handle license-related operations'
-            },
-            {
-                name: 'Webhooks',
-                description: 'Configure webhook endpoints, manage event subscriptions, and monitor webhook delivery status',
-                externalDocs: {
-                    description: 'Webhooks Guide',
-                    url: 'https://emailengine.app/webhooks'
-                }
-            },
-            {
-                name: 'OAuth2 Applications',
-                description: 'Configure OAuth2 applications for Gmail, Outlook, and other providers. Manage client credentials and authentication flows',
-                externalDocs: {
-                    description: 'OAuth2 Configuration Guide',
-                    url: 'https://emailengine.app/oauth2-configuration'
-                }
-            },
-            {
-                name: 'SMTP Gateway',
-                description: 'Configure and manage the built-in SMTP server for receiving emails and integrating with external systems'
-            },
-            {
-                name: 'Blocklists',
-                description: 'Manage email address blocklists to prevent sending to specific recipients or domains'
-            },
-            {
-                name: 'Multi Message Actions',
-                description: 'Perform bulk operations on multiple messages simultaneously, such as marking as read, moving, or deleting'
-            },
-            {
-                name: 'Export (Beta)',
-                description:
-                    'Bulk export messages from email accounts. This feature is in beta and the API may change in future releases. Export files are encrypted at rest when a service secret is configured.'
-            }
-        ],
-
-        // Custom vendor extensions for additional metadata
-        'x-logo': {
-            url: 'https://emailengine.dev/static/logo.png',
-            altText: 'EmailEngine Logo'
-        }
+        cors: !!CORS_CONFIG
     };
 
-    await server.register(AuthBearer);
+    return openApiOptions;
+}
+
+function registerApiTokenAuth(server) {
+    server.auth.scheme(API_TOKEN_SCHEME, apiTokenScheme);
 
     // Authentication for API calls
-    server.auth.strategy('api-token', 'bearer-access-token', {
+    server.auth.strategy('api-token', API_TOKEN_SCHEME, {
         allowQueryToken: true, // optional, false by default
-        validate: async (request, token /*, h*/) => {
-            let disableTokens = await settings.get('disableTokens');
-            if (disableTokens && (!token || token === 'preauth')) {
-                // tokens checks are disabled, allow all if token is not set
-                return {
-                    isValid: true,
-                    credentials: {},
-                    artifacts: {}
-                };
-            }
-
-            let scope = false;
-            let tags = (request.route && request.route.settings && request.route.settings.tags) || [];
-            if (tags.includes('api')) {
-                scope = 'api';
-            } else {
-                for (let tag of tags) {
-                    if (/^scope:/.test(tag)) {
-                        scope = tag.substr('scope:'.length);
-                    }
-                }
-            }
-
-            if (token.startsWith('sess_') && scope === 'api') {
-                // seems like a session token
-                let isValidSessionToken = await tokens.validateSessionToken(
-                    request.state && request.state.ee && request.state.ee.sid,
-                    token,
-                    request.params.account,
-                    900
-                );
-                if (isValidSessionToken) {
-                    return {
-                        isValid: true,
-                        credentials: {},
-                        artifacts: {}
-                    };
-                }
-            }
-
-            let tokenData;
-            try {
-                tokenData = await tokens.get(token, false, { log: true, remoteAddress: request.app.ip });
-            } catch (err) {
-                return {
-                    isValid: false,
-                    credentials: {},
-                    artifacts: { err: err.message }
-                };
-            }
-
-            // Bind the token hash (id) to the request logger so it is included in the per-request
-            // log entry, allowing API requests to be correlated to the token that made them.
-            if (request.logger && typeof request.logger.setBindings === 'function') {
-                request.logger.setBindings({ tokenId: tokenData.id, tokenAccount: tokenData.account || null });
-            }
-
-            if (scope && tokenData.scopes && !tokenData.scopes.includes(scope) && !tokenData.scopes.includes('*')) {
-                // failed scope validation
-                logger.error({
-                    msg: 'Trying to use invalid scope for a token',
-                    tokenAccount: tokenData.account,
-                    tokenId: tokenData.id,
-                    requestedScope: scope,
-                    tokenScopes: tokenData.scopes
-                });
-
-                let error = Boom.forbidden('Unauthorized scope');
-                error.output.payload.requestedScope = scope;
-                throw error;
-            }
-
-            if (tokenData.account) {
-                // account token
-
-                let accountIdSource;
-
-                // allow specific routes that have an account component but not in the URL params section
-                switch (request.route.path) {
-                    case '/v1/templates':
-                        switch (request.method) {
-                            case 'get':
-                                accountIdSource = request.query && request.query.account;
-                                break;
-                        }
-                        break;
-
-                    case '/v1/templates/template/{template}': {
-                        let isAccountTemplate =
-                            request.params.template && (await redis.sismember(`${REDIS_PREFIX}tpl:${tokenData.account}:i`, request.params.template));
-                        if (isAccountTemplate) {
-                            accountIdSource = tokenData.account;
-                        }
-                        break;
-                    }
-
-                    case '/v1/templates/template': {
-                        switch (request.method) {
-                            case 'post':
-                                request.app.enforceAccount = tokenData.account;
-                                accountIdSource = tokenData.account;
-                                break;
-                        }
-                        break;
-                    }
-
-                    default:
-                        accountIdSource = request.params && request.params.account;
-                        break;
-                }
-
-                if (accountIdSource !== tokenData.account) {
-                    logger.error({
-                        msg: 'Trying to use invalid account for a token',
-                        tokenAccount: tokenData.account,
-                        tokenId: tokenData.id,
-                        account: (request.params && request.params.account) || null
-                    });
-
-                    let error = Boom.forbidden('Unauthorized account');
-                    throw error;
-                }
-            }
-
-            if (tokenData.restrictions) {
-                if (tokenData.restrictions.addresses && !matchIp(request.app.ip, tokenData.restrictions.addresses)) {
-                    logger.error({
-                        msg: 'Trying to use invalid IP for a token',
-                        tokenAccount: tokenData.account,
-                        tokenId: tokenData.id,
-                        account: (request.params && request.params.account) || null,
-                        remoteAddress: request.app.ip,
-                        addressAllowlist: tokenData.restrictions.addresses
-                    });
-
-                    let error = Boom.forbidden('Unauthorized address');
-                    error.output.payload.remoteAddress = request.app.ip;
-                    throw error;
-                }
-
-                if (
-                    tokenData.restrictions.referrers &&
-                    tokenData.restrictions.referrers.length &&
-                    !matcher(tokenData.restrictions.referrers, request.headers.referer)
-                ) {
-                    logger.error({
-                        msg: 'Trying to use invalid referer for a token',
-                        tokenAccount: tokenData.account,
-                        tokenId: tokenData.id,
-                        account: (request.params && request.params.account) || null,
-                        referer: request.headers.referer,
-                        referrerAllowlist: tokenData.restrictions.referrers
-                    });
-
-                    let error = Boom.forbidden('Unauthorized referrer');
-                    throw error;
-                }
-
-                if (tokenData.restrictions.rateLimit) {
-                    let rateLimit = await checkRateLimit(
-                        `api:${tokenData.id}`,
-                        1,
-                        tokenData.restrictions.rateLimit.maxRequests,
-                        tokenData.restrictions.rateLimit.timeWindow
-                    );
-
-                    if (!rateLimit.success) {
-                        logger.error({ msg: 'Rate limited', token: tokenData.id, rateLimit });
-                        let error = Boom.tooManyRequests('Rate limit exceeded');
-                        error.output.payload.ttl = Math.ceil(rateLimit.ttl);
-                        error.output.headers = {
-                            'X-RateLimit-Limit': rateLimit.allowed,
-                            'X-RateLimit-Reset': Math.ceil(rateLimit.ttl)
-                        };
-                        throw error;
-                    } else {
-                        request.app.rateLimitHeaders = {
-                            'X-RateLimit-Limit': rateLimit.allowed,
-                            'X-RateLimit-Reset': Math.ceil(rateLimit.ttl),
-                            'X-RateLimit-Remaining': rateLimit.allowed - rateLimit.count
-                        };
-                    }
-                }
-            }
-
-            return { isValid: true, credentials: { token }, artifacts: tokenData };
-        }
+        validate: createApiTokenValidator({
+            settings,
+            tokens,
+            tokenAuditLog,
+            redis,
+            checkRateLimit,
+            sessionPasswordVersion,
+            sessionAdmitted: ssoSessionAdmitted,
+            adminAccessAddresses: ADMIN_ACCESS_ADDRESSES,
+            logger
+        })
     });
+}
 
+// The version an SSO login stamps into its session, so the checks that end a session later can
+// compare against it. The password logins in lib/ui-routes/auth-routes.js stamp the same field
+// from the same place; without it a session is refused on the first request after any version
+// bump, which is a forced re-login rather than a lockout.
+//
+// Read by both strategies that accept a session: the cookie strategy below, and the session
+// token branch of the api-token strategy above - the two credentials the same cookie carries,
+// and "log out all sessions" has to end both.
+const sessionPasswordVersion = async () => {
+    const authData = await settings.get('authData');
+    return (authData && authData.passwordVersion) || 0;
+};
+
+/**
+ * Registers the cookie plugins and the admin session strategy
+ * @returns {Promise<boolean>} Whether the cookies are marked Secure
+ */
+async function registerSessionAuth(server) {
     // needed for auth session and flash messages
     await server.register(Cookie);
     await server.register(Bell);
 
-    let secureCookie = false;
-    try {
-        let serviceUrl = await settings.get('serviceUrl');
-        if (serviceUrl) {
-            let parsedUrl = new URL(serviceUrl);
-            secureCookie = parsedUrl.protocol === 'https:';
-        }
-    } catch (err) {
-        // skip
-    }
+    // the signal HSTS keys on too, so the cookies and the header agree on what "https" means
+    let secureCookie = isSecureOrigin(await settings.get('serviceUrl'));
 
     server.state('locale', {
         ttl: null,
         encoding: 'base64json',
         clearInvalid: true,
-        path: '/'
+        path: '/',
+        // Same signal as the session and CSRF cookies. hapi's default is Secure, which a browser
+        // drops on a plain-http instance, so the chosen locale never stuck there
+        isSecure: secureCookie
     });
+
+    const cookiePassword = await settings.get('cookiePassword');
 
     // Authentication for admin pages
     server.auth.strategy('session', 'cookie', {
         cookie: {
             name: 'ee',
-            password: await settings.get('cookiePassword'),
+            password: cookiePassword,
             isSecure: secureCookie,
             path: '/',
             isSameSite: 'Lax'
@@ -1270,30 +857,49 @@ Include your token in requests using one of these methods:
         redirectTo: '/admin/login',
 
         async validate(request, session) {
+            const authData = await settings.get('authData');
+
+            // "Log out all sessions" and a password change both bump authData.passwordVersion, and
+            // a session stamped with an older one is over. Checked before the provider switch
+            // because it is true of every session: the SSO branch used to return before reaching
+            // it, so an SSO session outlived the click that was supposed to end every session.
+            // Only reachable when a local password exists at all, which is also the only case
+            // where this strategy is installed (isInstanceSecured() is `!!authData`).
+            //
+            // This ends the admin session. The browse page's `sess_` API token rides the same
+            // cookie and never reaches this strategy, so it applies the same predicate for itself
+            // in the api-token strategy above - neither check covers the other.
+            if (isEndedSession((authData && authData.passwordVersion) || 0, session)) {
+                // force logout
+                return { isValid: false };
+            }
+
             switch (session.provider) {
-                case 'okta': {
-                    if (session.profile && session.profile.id) {
-                        let profile = session.profile;
-                        return {
-                            isValid: true,
-                            credentials: {
-                                enabled: true,
-                                user: profile.username
-                            }
-                        };
+                case 'okta':
+                case 'oidc': {
+                    if (!ssoSessionAdmitted(session)) {
+                        return { isValid: false };
                     }
-                    return { isValid: false };
+                    return {
+                        isValid: true,
+                        credentials: {
+                            enabled: true,
+                            user: session.profile.username
+                        },
+                        // Expose the SSO provider on artifacts so the "SSO users can't manage
+                        // local password/TOTP/passkeys" guards in the UI routes fire. idToken is
+                        // carried for OIDC RP-initiated logout (undefined for Okta).
+                        artifacts: {
+                            provider: session.provider,
+                            profile: session.profile,
+                            idToken: session.idToken
+                        }
+                    };
                 }
             }
 
-            const authData = await settings.get('authData');
             if (!authData) {
                 return { isValid: true, credentials: { enabled: false } };
-            }
-
-            if (authData.passwordVersion && authData.passwordVersion !== session.passwordVersion) {
-                // force logout
-                return { isValid: false };
             }
 
             const account = authData.user === session.user;
@@ -1302,13 +908,8 @@ Include your token in requests using one of these methods:
                 return { isValid: false };
             }
 
-            // unless it is a login or TOPT (or public) page, require TOTP code
-            if (
-                session.requireTotp &&
-                !['/{any*}', '/admin/totp', '/admin/login', '/admin/passkey/auth/options', '/admin/passkey/auth/verify'].includes(
-                    request.route && request.route.path
-                )
-            ) {
+            // unless it is a login or TOTP (or public) page, require TOTP code
+            if (session.requireTotp && !TOTP_EXEMPT_PATHS.includes(request.route && request.route.path)) {
                 request.requireTotp = true;
             }
 
@@ -1324,13 +925,38 @@ Include your token in requests using one of these methods:
         }
     });
 
-    if (USE_OKTA_AUTH) {
-        let redirectUrl = new URL((await settings.get('serviceUrl')) || `http://${API_HOST}${API_PORT !== 80 ? `:${API_PORT}` : ''}`);
+    // Device-bound sessions ride on the same cookie settings (lib/dbsc)
+    setupDbsc(server, { redis, logger, secure: secureCookie, password: cookiePassword });
 
-        server.decorate('toolkit', 'validateOktaConfig', async () => {
-            let activeRedirectUrl = new URL((await settings.get('serviceUrl')) || `http://${API_HOST}${API_PORT !== 80 ? `:${API_PORT}` : ''}`);
-            return activeRedirectUrl.origin === redirectUrl.origin && USE_OKTA_AUTH;
-        });
+    return secureCookie;
+}
+
+// Shared by the SSO strategies. The redirect URL is captured at strategy registration;
+// the validators re-read it from settings so an origin change after startup (which would
+// break the registered callback URL) disables the SSO button instead of failing mid-flow.
+let getServiceRedirectUrl = async () => new URL((await settings.get('serviceUrl')) || `http://${API_HOST}${API_PORT !== 80 ? `:${API_PORT}` : ''}`);
+let serviceOriginUnchanged = async redirectUrl => (await getServiceRedirectUrl()).origin === redirectUrl.origin;
+// A sign-in the IdP denied, or the user cancelled, comes back as an unauthenticated try-mode
+// request. It gets the same flash-and-redirect the allow-list denial in the OIDC handler
+// uses, so the user lands on the login form with a way to try again rather than on the
+// generic error page with bell's raw message. The reason goes to the log only. ?sso_denied=1
+// stops a forced instance from auto-redirecting straight back into the flow.
+let ssoFailureRedirect = async (request, h, method) => {
+    request.logger.warn({
+        msg: 'SSO login failed',
+        method,
+        reason: (request.auth.error && request.auth.error.message) || 'unknown',
+        remoteAddress: request.app.ip
+    });
+    await request.flash({ type: 'danger', message: 'Single sign-on failed or was cancelled. Please try again' });
+    return h.redirect('/admin/login?sso_denied=1');
+};
+
+async function registerOktaAuth(server, secureCookie) {
+    if (USE_OKTA_AUTH) {
+        let redirectUrl = await getServiceRedirectUrl();
+
+        server.decorate('toolkit', 'validateOktaConfig', () => serviceOriginUnchanged(redirectUrl));
 
         server.auth.strategy('okta', 'bell', {
             provider: 'okta',
@@ -1348,15 +974,29 @@ Include your token in requests using one of these methods:
         server.route({
             method: ['GET', 'POST'],
             path: '/admin/login/okta',
-            handler(request, h) {
+            async handler(request, h) {
                 if (!request.auth.isAuthenticated) {
-                    let error = Boom.unauthorized('Failed to authorize user');
-                    error.output.payload.details = [request.auth.error.message];
-                    throw error;
+                    return ssoFailureRedirect(request, h, 'okta');
                 }
-                request.cookieAuth.set(request.auth.credentials);
-                let oktaUser = request.auth.credentials && request.auth.credentials.profile && request.auth.credentials.profile.username;
-                request.logger.info({ msg: 'Admin login successful', user: oktaUser || 'unknown', method: 'okta', remoteAddress: request.app.ip });
+
+                let profile = (request.auth.credentials && request.auth.credentials.profile) || {};
+
+                // The same minimal shape the OIDC branch below stores, for the same reasons: the
+                // full bell credentials carry the access and refresh tokens, the callback query
+                // and the raw userinfo document, none of which the session validator reads, and
+                // all of which would sit in the browser's cookie for the life of the session.
+                setAdminSession(request, {
+                    provider: 'okta',
+                    profile: {
+                        id: profile.id,
+                        username: profile.username,
+                        displayName: profile.displayName,
+                        email: profile.email
+                    },
+                    passwordVersion: await sessionPasswordVersion()
+                });
+
+                request.logger.info({ msg: 'Admin login successful', user: profile.username || 'unknown', method: 'okta', remoteAddress: request.app.ip });
                 return h.redirect('/admin');
             },
             options: {
@@ -1367,29 +1007,185 @@ Include your token in requests using one of these methods:
             }
         });
     }
+}
 
-    const authData = await settings.get('authData');
-    if (authData) {
+async function registerOidcAuth(server, secureCookie) {
+    if (USE_OIDC_AUTH) {
+        let redirectUrl = await getServiceRedirectUrl();
+
+        // bell needs static auth/token URLs at strategy-registration time, so the
+        // discovery document has to be in hand before the strategy and the callback
+        // route that depends on it can be registered. A failure to fetch it (IdP outage
+        // or misconfig) must NOT take EmailEngine down - password and passkey login plus
+        // the REST API have to keep working - so SSO simply stays switched off until a
+        // later attempt succeeds.
+        //
+        // Assigned from enableOidc()'s return value, so it can only be set once that
+        // strategy and route exist and validateOidcConfig() can never advertise a login
+        // button - or trigger OIDC_FORCED - for a route that is not registered.
+        let oidcDiscovery = null;
+
+        // Registered unconditionally so the login/security views can call it; returns
+        // false when discovery failed or the serviceUrl origin drifted from startup.
+        server.decorate('toolkit', 'validateOidcConfig', async () => !!oidcDiscovery && (await serviceOriginUnchanged(redirectUrl)));
+
+        // RP-initiated logout URL for the /admin/logout handler. Returns null unless
+        // OIDC_LOGOUT is enabled and the IdP advertised an end_session_endpoint.
+        // post_logout_redirect_uri is only sent when OIDC_POST_LOGOUT_REDIRECT_URI is
+        // configured (and registered at the IdP); otherwise the IdP shows its own
+        // logged-out page, so logout needs no IdP-side configuration.
+        server.decorate('toolkit', 'oidcLogoutUrl', idToken => {
+            if (!sso.OIDC_LOGOUT || !oidcDiscovery || !oidcDiscovery.end_session_endpoint) {
+                return null;
+            }
+            return sso.buildLogoutUrl(oidcDiscovery.end_session_endpoint, {
+                idToken,
+                clientId: sso.OIDC_CLIENT_ID,
+                postLogoutRedirectUri: sso.OIDC_POST_LOGOUT_REDIRECT_URI || undefined
+            });
+        });
+
+        const enableOidc = async discoveryDoc => {
+            server.auth.strategy('oidc', 'bell', {
+                provider: sso.buildOidcBellProvider(discoveryDoc),
+                password: await settings.get('cookiePassword'),
+                isSecure: secureCookie,
+                location: redirectUrl.origin,
+
+                clientId: sso.OIDC_CLIENT_ID,
+                clientSecret: sso.OIDC_CLIENT_SECRET
+            });
+
+            server.route({
+                method: ['GET', 'POST'],
+                path: '/admin/login/oidc',
+                async handler(request, h) {
+                    if (!request.auth.isAuthenticated) {
+                        return ssoFailureRedirect(request, h, 'oidc');
+                    }
+
+                    let profile = (request.auth.credentials && request.auth.credentials.profile) || {};
+
+                    // Enforce the optional email/group allow-lists before establishing the session.
+                    if (!sso.isAuthorized(profile, oidcAllowList, oidcAllowGroups)) {
+                        request.logger.warn({
+                            msg: 'OIDC login denied by allow-list',
+                            user: profile.username || profile.email || 'unknown',
+                            groups: profile.groups,
+                            method: 'oidc',
+                            remoteAddress: request.app.ip
+                        });
+                        await request.flash({ type: 'danger', message: 'Your account is not authorized to access this admin panel' });
+                        // ?sso_denied=1 stops a forced instance from auto-redirecting back into the
+                        // OIDC flow before the user can see the error.
+                        return h.redirect('/admin/login?sso_denied=1');
+                    }
+
+                    // Store only the minimal profile - not the full bell credentials. OIDC
+                    // access/refresh tokens (e.g. Keycloak JWTs) can push the iron-sealed
+                    // `ee` cookie past the ~4KB browser limit and cause a silent login loop.
+                    // Group names are kept so the per-request authorization re-check works;
+                    // the id_token is kept only as the logout id_token_hint (RP-initiated logout).
+                    const passwordVersion = await sessionPasswordVersion();
+                    setAdminSession(request, {
+                        provider: 'oidc',
+                        profile: {
+                            id: profile.id,
+                            username: profile.username,
+                            displayName: profile.displayName,
+                            email: profile.email,
+                            // Carried so the per-request isAuthorized() re-check enforces email
+                            // verification the same way the login gate above does.
+                            emailVerified: profile.emailVerified,
+                            groups: profile.groups
+                        },
+                        passwordVersion,
+                        idToken: (request.auth.artifacts && request.auth.artifacts.id_token) || null
+                    });
+
+                    request.logger.info({ msg: 'Admin login successful', user: profile.username || 'unknown', method: 'oidc', remoteAddress: request.app.ip });
+                    return h.redirect('/admin');
+                },
+                options: {
+                    auth: {
+                        mode: 'try',
+                        strategy: 'oidc'
+                    }
+                }
+            });
+
+            return discoveryDoc;
+        };
+
+        let startupDoc = await sso.fetchOidcDiscovery().catch(err => {
+            logger.error({ msg: 'OIDC SSO disabled for now: discovery failed, retrying in the background', issuer: sso.OIDC_ISSUER, err });
+            return null;
+        });
+
+        if (startupDoc) {
+            // A registration failure here is deliberately fatal: a misconfiguration should
+            // stop the worker at boot rather than come up quietly without SSO. The retry
+            // path below is the opposite on purpose - it must not kill a serving process.
+            oidcDiscovery = await enableOidc(startupDoc);
+        } else {
+            // Deliberately not awaited - this runs for as long as the IdP is unreachable.
+            // hapi accepts both a new auth strategy and a new route after the server has
+            // started, so a later success brings SSO up in place, with no restart.
+            sso.retryDiscovery({
+                onError: (err, attempt) => logger.debug({ msg: 'OIDC discovery retry failed', issuer: sso.OIDC_ISSUER, attempt, err })
+            })
+                .then(async retriedDoc => {
+                    oidcDiscovery = await enableOidc(retriedDoc);
+                    logger.info({ msg: 'OIDC SSO enabled after retrying discovery', issuer: sso.OIDC_ISSUER });
+                })
+                .catch(err => logger.error({ msg: 'OIDC SSO disabled: discovery retry failed', issuer: sso.OIDC_ISSUER, err }));
+        }
+    }
+}
+
+async function registerServerPlugins(server) {
+    if (await settings.isInstanceSecured()) {
         server.auth.default('session');
     }
 
+    // From here on a first password set on another API worker switches the session strategy on
+    // through the settings dispatcher (see the authData branch there), and a password written with no
+    // broadcast (the CLI) is noticed by the first request that would use the default
+    sessionAuthServer = server;
+    requireSessionOnceSecured({ server, isInstanceSecured: () => settings.isInstanceSecured(), logger });
+
     await server.register({
-        plugin: hapiPino,
+        plugin: requestLogger,
         options: {
-            instance: logger.child({ component: 'api' }, { redact: REDACTED_KEYS }),
             // Redact Authorization headers, see https://getpino.io/#/docs/redaction
-            redact: REDACTED_KEYS
+            logger: logger.child({ component: 'api' }, { redact: consts.REDACTED_LOG_KEYS })
         }
     });
 
-    await server.register([
-        Inert,
-        Vision,
-        {
-            plugin: HapiSwagger,
-            options: swaggerOptions
+    await server.register([Inert, Vision]);
+}
+
+function registerRequestEvents(server) {
+    // An exception thrown by a handler, an extension or a response schema with failAction
+    // 'error' is answered with a bare 500 and reported on the request's error channel. hapi's
+    // own record of it was an unstructured line on stderr (switched off above), and the API
+    // error path only logs what handlers pass to handleError(), not what escapes them
+    server.events.on({ name: 'request', channels: 'error' }, (request, event, tags) => {
+        if (tags.internal && !tags.implementation) {
+            // a 5xx the code raised on purpose: the API error path (handleError) and the web
+            // error page log those themselves, with the request context they have
+            return;
         }
-    ]);
+        logger.error({
+            msg: 'Request failed with an internal error',
+            component: 'api',
+            method: request.method,
+            path: request.path,
+            route: request.route && request.route.path,
+            tags: Object.keys(tags || {}),
+            err: event.error
+        });
+    });
 
     server.events.on('response', request => {
         const tags = request.route && request.route.settings && request.route.settings.tags;
@@ -1397,13 +1193,23 @@ Include your token in requests using one of these methods:
             // only log API calls
             return;
         }
-        metrics(logger, 'apiCall', 'inc', {
-            method: request.method,
-            route: request.route.path,
-            statusCode: request.response && request.response.statusCode
-        });
+        // One message per request: the latency rides on the call counter's message and the main
+        // thread observes it there, rather than costing a second postMessage on every request
+        try {
+            parentPort.postMessage({
+                cmd: 'metrics',
+                key: 'apiCall',
+                method: 'inc',
+                args: [{ method: request.method, route: request.route.path, statusCode: request.response && request.response.statusCode }],
+                duration: apiCallDuration(request.info)
+            });
+        } catch (err) {
+            logger.error({ msg: 'Failed to post metrics to parent', err });
+        }
     });
+}
 
+function registerStaticPageRoutes(server) {
     server.route({
         method: 'GET',
         path: '/',
@@ -1469,6 +1275,16 @@ Include your token in requests using one of these methods:
         }
     });
 
+    // The dependency inventory. Unlike the licence texts and the favicon next to it this is not
+    // public content: it names every package and version the instance runs, which is the first
+    // thing worth having when looking for a way in. An operator or an auditor asking for it holds a
+    // token; nobody else has business reading it.
+    //
+    // `scope:api` rather than a scope of its own, and no `api` tag: the tag is what selects a route
+    // into /swagger.json, and this is a file download rather than an API operation. The route names
+    // no account, so an account-bound token is refused by the binding check, and it is in no
+    // permission group, so a narrowed token is refused as unclassified - both correct for a
+    // instance-wide inventory.
     server.route({
         method: 'GET',
         path: '/sbom.json',
@@ -1476,8 +1292,11 @@ Include your token in requests using one of these methods:
             file: { path: pathlib.join(__dirname, '..', 'sbom.json'), confine: false }
         },
         options: {
-            auth: false,
-            tags: ['static']
+            tags: ['static', 'scope:api'],
+            auth: {
+                strategy: 'api-token',
+                mode: 'required'
+            }
         }
     });
 
@@ -1511,7 +1330,9 @@ Include your token in requests using one of these methods:
             tags: ['static']
         }
     });
+}
 
+function registerStaticFilesRoute(server) {
     const staticRoot = pathlib.resolve(__dirname, '..', 'static');
     const staticRootPrefix = staticRoot + pathlib.sep;
 
@@ -1563,47 +1384,78 @@ Include your token in requests using one of these methods:
                 : undefined
         }
     });
+}
 
+// Set by the close command: readiness answers 503 from then on while Hapi drains the requests in flight
+let apiDraining = false;
+
+const healthChecks = createHealthChecks({
+    call,
+    redis,
+    prefix: REDIS_PREFIX,
+    expectedImapWorkers: IMAP_WORKER_COUNT,
+    isDraining: () => apiDraining
+});
+
+/**
+ * Runs a readiness check and turns its failure into a 503 carrying a `code`
+ * @param {Object} request - Hapi request
+ * @returns {Promise<Object>} The check result
+ */
+async function answerReadiness(request) {
+    // Same rule as the license lookup: a header value the timer would mangle is ignored
+    const { error: timeoutError, value: timeout } = headerTimeoutSchema.validate(request.headers['x-ee-timeout']);
+    try {
+        return await healthChecks.ready(timeoutError ? undefined : timeout);
+    } catch (err) {
+        if (err.statusCode !== 503) {
+            throw err;
+        }
+        const error = Boom.boomify(err, { statusCode: err.statusCode });
+        error.output.payload.code = err.code;
+        throw error;
+    }
+}
+
+function registerHealthRoute(server) {
+    const options = {
+        auth: false,
+        tags: ['static', 'health']
+    };
+
+    // Kept with its historical meaning (everything needed to serve traffic), for the probes and
+    // smoke tests already pointed at it
     server.route({
         method: 'GET',
         path: '/health',
-        async handler(request) {
-            const imapWorkerCount = await call({ cmd: 'imapWorkerCount', timeout: request.headers['x-ee-timeout'] });
-            if (imapWorkerCount < IMAP_WORKER_COUNT) {
-                let error = Boom.boomify(new Error('Not all IMAP workers available'), { statusCode: 500 });
-                throw error;
-            }
-
-            let checkKey = `${REDIS_PREFIX}test:${Date.now()}`;
-            let expected = crypto.randomBytes(8).toString('hex');
-            let res = await redis.multi().set(checkKey, expected).get(checkKey).del(checkKey).exec();
-            if (!(res[1] && res[1][1] === expected && res[2] && res[2][1] === 1)) {
-                let error = Boom.boomify(new Error('Database check failed'), { statusCode: 500 });
-                throw error;
-            }
-
-            return { success: true };
-        },
-        options: {
-            description: 'Health check',
-            auth: false,
-            tags: ['static', 'health']
-        }
+        handler: answerReadiness,
+        options: Object.assign({ description: 'Health check' }, options)
     });
 
+    server.route({
+        method: 'GET',
+        path: '/health/ready',
+        handler: answerReadiness,
+        options: Object.assign({ description: 'Readiness check' }, options)
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/health/live',
+        handler: () => healthChecks.live(),
+        options: Object.assign({ description: 'Liveness check' }, options)
+    });
+}
+
+function registerRedirectRoute(server) {
     server.route({
         method: 'GET',
         path: '/redirect',
         async handler(request, h) {
             let data = Buffer.from(request.query.data, 'base64url').toString();
-            let serviceSecret = await settings.get('serviceSecret');
-            if (serviceSecret) {
-                let hmac = crypto.createHmac('sha256', serviceSecret);
-                hmac.update(data);
-                if (hmac.digest('base64url') !== request.query.sig) {
-                    let error = Boom.boomify(new Error('Signature validation failed'), { statusCode: 403 });
-                    throw error;
-                }
+            if (!(await verifyServiceSignature(data, request.query.sig, SIGNING_PURPOSE.TRACKING))) {
+                let error = Boom.boomify(new Error('Signature validation failed'), { statusCode: 403 });
+                throw error;
             }
 
             data = JSON.parse(data);
@@ -1625,7 +1477,7 @@ Include your token in requests using one of these methods:
                     userAgent: request.headers['user-agent']
                 });
             } else {
-                request.logger.info({
+                request.logger.debug({
                     msg: 'Detected automated request',
                     account: data.acc,
                     event: TRACK_CLICK_NOTIFY,
@@ -1651,6 +1503,12 @@ Include your token in requests using one of these methods:
                 failAction,
 
                 query: Joi.object({
+                    // `sig` is intentionally OPTIONAL on the tracking endpoints (/redirect, /open.gif,
+                    // /unsubscribe), unlike the hosted form's signedFormBlobFields which requires it. The
+                    // handler calls verifyServiceSignature and fails closed on a missing/bad signature, so a
+                    // required-sig schema would only turn that 403 into a Joi 400 - and /unsubscribe must not
+                    // 400 a missing-sig one-click request (RFC 8058 wants a benign non-throwing response).
+                    // Kept optional deliberately; do not "align" these with the hosted-form fragment.
                     data: Joi.string().base64({ paddingRequired: false, urlSafe: true }).required(),
                     sig: Joi.string().base64({ paddingRequired: false, urlSafe: true })
                 })
@@ -1659,20 +1517,17 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
+function registerOpenTrackingRoute(server) {
     server.route({
         method: 'GET',
         path: '/open.gif',
         async handler(request, h) {
             let data = Buffer.from(request.query.data, 'base64url').toString();
-            let serviceSecret = await settings.get('serviceSecret');
-            if (serviceSecret) {
-                let hmac = crypto.createHmac('sha256', serviceSecret);
-                hmac.update(data);
-                if (hmac.digest('base64url') !== request.query.sig) {
-                    let error = Boom.boomify(new Error('Signature validation failed'), { statusCode: 403 });
-                    throw error;
-                }
+            if (!(await verifyServiceSignature(data, request.query.sig, SIGNING_PURPOSE.TRACKING))) {
+                let error = Boom.boomify(new Error('Signature validation failed'), { statusCode: 403 });
+                throw error;
             }
 
             data = JSON.parse(data);
@@ -1688,7 +1543,7 @@ Include your token in requests using one of these methods:
                     userAgent: request.headers['user-agent']
                 });
             } else {
-                request.logger.info({
+                request.logger.debug({
                     msg: 'Detected automated request',
                     account: data.acc,
                     event: TRACK_OPEN_NOTIFY,
@@ -1720,6 +1575,7 @@ Include your token in requests using one of these methods:
                 failAction,
 
                 query: Joi.object({
+                    // sig intentionally optional - see the note on the /redirect schema above.
                     data: Joi.string().base64({ paddingRequired: false, urlSafe: true }).required(),
                     sig: Joi.string().base64({ paddingRequired: false, urlSafe: true })
                 })
@@ -1728,26 +1584,40 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
+function registerUnsubscribeRoute(server) {
     server.route({
         method: 'POST',
         path: '/unsubscribe',
         async handler(request) {
-            // NB! Avoid throwing errors
+            // This unauthenticated RFC 8058 one-click endpoint separates two failure classes:
+            //   - Permanent (forged/malformed/incomplete blob, unknown account): retrying cannot help,
+            //     so return a benign 2xx string and do not invite a retry.
+            //   - Transient (a Redis/getSecret hiccup while recording the suppression): must surface as
+            //     a retryable 5xx. An RFC 8058 client treats any 2xx as "unsubscribed" and never retries,
+            //     so swallowing a transient failure to 2xx would silently drop the unsubscribe and the
+            //     recipient would keep receiving mail. eeListAdd is idempotent (isNew), so a retry is safe.
 
-            let data = Buffer.from(request.query.data, 'base64url').toString();
-            let serviceSecret = await settings.get('serviceSecret');
-            if (serviceSecret) {
-                let hmac = crypto.createHmac('sha256', serviceSecret);
-                hmac.update(data);
-                if (hmac.digest('base64url') !== request.query.sig) {
-                    return 'data validation failed';
-                }
+            // Joi already enforces base64url on request.query.data, and Buffer.from(<string>, 'base64url')
+            // never throws, so decode inline like the sibling /redirect and /open.gif handlers.
+            let raw = Buffer.from(request.query.data, 'base64url').toString();
+
+            // A false result is a forged/bad signature (permanent -> benign); a THROWN error is a
+            // transient failure reading the service secret and is intentionally left to surface as 5xx.
+            if (!(await verifyServiceSignature(raw, request.query.sig, SIGNING_PURPOSE.UNSUBSCRIBE))) {
+                return 'data validation failed';
             }
 
-            data = JSON.parse(data);
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch (err) {
+                // Malformed JSON inside a validly-signed blob - permanent.
+                return 'not ok';
+            }
 
-            if (!data || typeof data !== 'object' || data.act !== 'unsub') {
+            if (!data || typeof data !== 'object' || data.act !== 'unsub' || !data.acc || !data.list || !data.rcpt) {
                 return 'not ok';
             }
 
@@ -1763,34 +1633,41 @@ Include your token in requests using one of these methods:
                 // throws if account does not exist
                 await accountObject.loadAccountData();
             } catch (err) {
-                return 'unknown account';
+                // A genuine "account does not exist" is a permanent 404 -> benign 2xx (retrying cannot
+                // help). Any other error (e.g. a transient Redis/decrypt failure) must NOT be swallowed
+                // to a 2xx: an RFC 8058 client treats any 2xx as "unsubscribed" and never retries, so
+                // dropping the unsubscribe would leave the recipient subscribed. Let it surface as 5xx.
+                if (err.output && err.output.statusCode === 404) {
+                    return 'unknown account';
+                }
+                throw err;
             }
 
-            let isNew = await redis.eeListAdd(
-                `${REDIS_PREFIX}lists:unsub:lists`,
-                `${REDIS_PREFIX}lists:unsub:entries:${data.list}`,
-                data.list,
-                data.rcpt.toLowerCase().trim(),
-                JSON.stringify({
-                    recipient: data.rcpt,
-                    account: data.acc,
-                    source: 'one-click',
-                    reason: 'unsubscribe',
-                    messageId: data.msg,
-                    remoteAddress: request.app.ip,
-                    userAgent: request.headers['user-agent'],
-                    created: new Date().toISOString()
-                })
-            );
+            // Record the suppression. A transient backend failure here is intentionally NOT swallowed to
+            // a 2xx: it propagates as a 5xx so the client retries rather than dropping the unsubscribe.
+            let isNew = await lists.add(data.list, data.rcpt, {
+                account: data.acc,
+                source: 'one-click',
+                reason: 'unsubscribe',
+                messageId: data.msg,
+                remoteAddress: request.app.ip,
+                userAgent: request.headers['user-agent']
+            });
 
             if (isNew) {
-                await sendWebhook(data.acc, LIST_UNSUBSCRIBE_NOTIFY, {
-                    recipient: data.rcpt,
-                    messageId: data.msg,
-                    listId: data.list,
-                    remoteAddress: request.app.ip,
-                    userAgent: request.headers['user-agent']
-                });
+                // The suppression is already stored; a webhook delivery hiccup must not fail (and thus
+                // trigger a client retry of) an unsubscribe that already succeeded. Log and move on.
+                try {
+                    await sendWebhook(data.acc, LIST_UNSUBSCRIBE_NOTIFY, {
+                        recipient: data.rcpt,
+                        messageId: data.msg,
+                        listId: data.list,
+                        remoteAddress: request.app.ip,
+                        userAgent: request.headers['user-agent']
+                    });
+                } catch (err) {
+                    request.logger.error({ msg: 'Failed to send one-click unsubscribe webhook', account: data.acc, listId: data.list, err });
+                }
             }
 
             return 'ok';
@@ -1808,6 +1685,9 @@ Include your token in requests using one of these methods:
                 failAction,
 
                 query: Joi.object({
+                    // sig intentionally optional - see the note on the /redirect schema above. Especially
+                    // here: making sig required would 400 a missing-sig one-click POST, but RFC 8058 wants a
+                    // benign non-throwing response (the handler returns 'data validation failed' instead).
                     data: Joi.string().base64({ paddingRequired: false, urlSafe: true }).required(),
                     sig: Joi.string().base64({ paddingRequired: false, urlSafe: true })
                 }).label('OneClickUnsubQuery'),
@@ -1824,7 +1704,9 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
+function registerOutlookNotificationRoute(server) {
     server.route({
         method: 'POST',
         path: '/oauth/msg/notification',
@@ -1858,36 +1740,32 @@ Include your token in requests using one of these methods:
                 throw err;
             }
 
+            const notificationEntries = graphNotificationEntries(request.payload);
+
             if (!accountData.outlookSubscription) {
-                request.logger.error({ msg: 'Subscription not found for account', account: request.query.account, payload: request.payload });
+                logUnknownGraphSubscription(request, notificationEntries);
                 return h.response(Buffer.alloc(0)).code(202);
             }
 
             const outlookSubscription = accountData.outlookSubscription;
 
-            for (let entry of (request.payload && request.payload.value) || []) {
-                // enumerate and queue all entries
-                if (entry.subscriptionId !== outlookSubscription.id || entry.clientState !== outlookSubscription.clientState) {
-                    // Security: Log webhook validation failures - could indicate spoofed notifications
-                    request.logger.warn({
-                        msg: 'Webhook validation failed - potential security issue',
-                        securityEvent: 'webhook_validation_failure',
-                        account: request.query.account,
-                        subscriptionIdMatch: entry.subscriptionId === outlookSubscription.id,
-                        clientStateMatch: entry.clientState === outlookSubscription.clientState,
-                        receivedSubscriptionId: entry.subscriptionId,
-                        changeType: entry.changeType,
-                        resource: entry.resource
-                    });
-                    continue;
-                }
+            const { valid, rejected } = partitionGraphEntries(notificationEntries, outlookSubscription, entry => ({
+                changeType: entry.changeType,
+                resource: entry.resource
+            }));
+            const events = valid.map(entry => ({
+                type: entry.changeType,
+                message: entry.resourceData && entry.resourceData.id
+            }));
 
-                let event = {
-                    type: entry.changeType,
-                    message: entry.resourceData && entry.resourceData.id
-                };
+            // Security: log webhook validation failures - could indicate spoofed notifications
+            logRejectedGraphEntries(request, rejected, {
+                msg: 'Webhook validation failed - potential security issue',
+                securityEvent: 'webhook_validation_failure'
+            });
 
-                await accountObject.pushQueueEvent(event);
+            if (events.length) {
+                await accountObject.pushQueueEvents(events);
             }
 
             return h.response(Buffer.alloc(0)).code(202);
@@ -1916,7 +1794,9 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
+function registerOutlookLifecycleRoute(server) {
     server.route({
         method: 'POST',
         path: '/oauth/msg/lifecycle',
@@ -1950,8 +1830,10 @@ Include your token in requests using one of these methods:
                 throw err;
             }
 
+            const lifecycleEntries = graphNotificationEntries(request.payload);
+
             if (!accountData.outlookSubscription) {
-                request.logger.error({ msg: 'Subscription not found for account', account: request.query.account, payload: request.payload });
+                logUnknownGraphSubscription(request, lifecycleEntries);
                 return h.response(Buffer.alloc(0)).code(202);
             }
 
@@ -1961,7 +1843,8 @@ Include your token in requests using one of these methods:
             // concurrent handlers racing (e.g., two subscriptionRemoved entries)
             const seenLifecycleEvents = new Set();
 
-            for (let entry of (request.payload && request.payload.value) || []) {
+            const { valid, rejected } = partitionGraphEntries(lifecycleEntries, outlookSubscription, entry => ({ lifecycleEvent: entry.lifecycleEvent }));
+            for (let entry of valid) {
                 request.logger.debug({
                     msg: 'MS Graph subscription event',
                     type: 'lifecycle',
@@ -1969,21 +1852,6 @@ Include your token in requests using one of these methods:
                     lifecycleEvent: entry.lifecycleEvent,
                     subscriptionId: entry.subscriptionId
                 });
-
-                // enumerate and queue all entries
-                if (entry.subscriptionId !== outlookSubscription.id || entry.clientState !== outlookSubscription.clientState) {
-                    // Security: Log lifecycle webhook validation failures - could indicate spoofed notifications
-                    request.logger.warn({
-                        msg: 'Lifecycle webhook validation failed - potential security issue',
-                        securityEvent: 'lifecycle_webhook_validation_failure',
-                        account: request.query.account,
-                        subscriptionIdMatch: entry.subscriptionId === outlookSubscription.id,
-                        clientStateMatch: entry.clientState === outlookSubscription.clientState,
-                        receivedSubscriptionId: entry.subscriptionId,
-                        lifecycleEvent: entry.lifecycleEvent
-                    });
-                    continue;
-                }
 
                 // Route recognized lifecycle events to the IMAP worker
                 // so the live client with its OAuth state handles them
@@ -2007,6 +1875,13 @@ Include your token in requests using one of these methods:
                         account: request.query.account
                     });
 
+                    if (entry.lifecycleEvent === 'missed') {
+                        // Stored before answering, one quick write: the worker call below may find
+                        // no worker for the account, and the lost changes are not reported again.
+                        // A failed write is answered with an error, so Graph delivers it again
+                        await accountObject.queueMissedRecovery();
+                    }
+
                     // Fire-and-forget: return HTTP 202 immediately so Microsoft
                     // does not time out the lifecycle webhook delivery
                     call({
@@ -2024,6 +1899,12 @@ Include your token in requests using one of these methods:
                     });
                 }
             }
+
+            // Security: log lifecycle webhook validation failures - could indicate spoofed notifications
+            logRejectedGraphEntries(request, rejected, {
+                msg: 'Lifecycle webhook validation failed - potential security issue',
+                securityEvent: 'lifecycle_webhook_validation_failure'
+            });
 
             return h.response(Buffer.alloc(0)).code(202);
         },
@@ -2046,451 +1927,617 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
+// The OAuth2 callback (GET /oauth). The handler below runs these steps in order; every one that
+// can end the request either throws or returns the response to send.
+
+// Refuses a callback that reports a provider error, carries no code or names a malformed state,
+// before the pending setup is touched
+function assertOAuthCallbackQuery(request) {
+    // The mailbox owner sees these on the public error page, in the same locale as the
+    // rest of the setup flow. The pending setup is still unspent at this point (its state
+    // entry is claimed only below), so opening the setup link again is a valid retry.
+    if (request.query.error === 'access_denied') {
+        let error = Boom.badRequest(
+            request.app.gt.gettext('The sign-in was cancelled or the requested access was not granted. Open the account setup link again to retry.')
+        );
+        if (request.query.error_description) {
+            error.output.payload.details = [String(request.query.error_description)];
+        }
+        throw error;
+    }
+
+    if (request.query.error) {
+        throw Boom.badRequest(util.format(request.app.gt.gettext('Sign-in with the email provider failed: %s'), request.query.error));
+    }
+
+    if (!request.query.code) {
+        throw Boom.badRequest(request.app.gt.gettext('Sign-in with the email provider failed: no authorization code was received'));
+    }
+
+    if (!isValidOAuthState(request.query.state)) {
+        throw Boom.badRequest(request.app.gt.gettext('Sign-in with the email provider failed: the request state is not valid'));
+    }
+}
+
+// Claims the pending setup the state names: the entry is deleted in the same transaction that reads
+// it, so a setup can be completed only once
+async function claimOAuthSetup(request) {
+    let [[, accountData]] = await redis.multi().get(`${REDIS_PREFIX}${request.query.state}`).del(`${REDIS_PREFIX}${request.query.state}`).exec();
+    if (!accountData) {
+        throw Boom.badRequest(request.app.gt.gettext('The account setup session has expired or was already used. Open the account setup link again to retry.'));
+    }
+
+    try {
+        accountData = JSON.parse(accountData);
+    } catch (E) {
+        throw Boom.badRequest(request.app.gt.gettext('Sign-in with the email provider failed: the stored setup session is not valid'));
+    }
+
+    if (!accountData.account) {
+        accountData.account = null;
+    }
+
+    return accountData;
+}
+
+// Hands the user back to the provider after a failure they can correct themselves, as a fresh
+// single-use setup. The token-bearing oauth2 object is dropped so the retry starts clean, and
+// _meta rides along so the redirect URL, the expected identity and the form nonce all survive
+// it - that nonce is claimed only on success, so it is still unspent here.
+async function startOAuthRetry(flow, loginHint, prompt) {
+    const { accountData, requestedSetup, provider, accountMeta, oAuth2Client } = flow;
+
+    const reAuthState = `account:add:${crypto.randomBytes(NONCE_BYTES).toString('base64url')}`;
+    const reAuthAccountData = buildRetrySetup(accountData, requestedSetup, provider, accountMeta);
+
+    await redis.set(`${REDIS_PREFIX}${reAuthState}`, JSON.stringify(reAuthAccountData), 'EX', Math.floor(MAX_FORM_TTL / 1000));
+
+    // The address to steer the user towards rides on the authorize URL only - persisting it
+    // would overwrite a shared mailbox with the principal that is signing in to reach it.
+    return oAuth2Client.generateAuthUrl({ state: reAuthState, email: loginHint, prompt });
+}
+
+async function gmailMissingScopesView(flow, r, grantedScopes) {
+    const { request, h, oAuth2Client, accountData } = flow;
+
+    // Check if user deselected required scopes in Google's granular consent
+    const requiredFunctionalScopes = oAuth2Client.scopes.filter(s => !OPENID_SCOPES.includes(s));
+    const missingScopes = requiredFunctionalScopes.filter(s => !grantedScopes.includes(s));
+
+    if (missingScopes.length > 0) {
+        request.logger.warn({
+            msg: 'OAuth2 grant missing required scopes',
+            requested: requiredFunctionalScopes,
+            granted: grantedScopes,
+            missing: missingScopes
+        });
+
+        // Best-effort revocation of the partial token. revokeToken() never throws, it reports
+        oAuth2Client.revokeToken(r.refresh_token || r.access_token).then(revocation => {
+            if (!revocation.revoked) {
+                request.logger.warn({ msg: 'Failed to revoke partial OAuth2 token', revocation });
+            }
+        });
+
+        const retryUrl = await startOAuthRetry(flow, accountData.email);
+
+        const missingScopesList = missingScopes.map(formatScopeDescription);
+
+        return h.view(
+            'oauth-scope-error',
+            {
+                pageTitleFull: request.app.gt.gettext('Email Account Setup'),
+                templateLocale: request.app.locale,
+                retryUrl,
+                missingScopesList
+            },
+            {
+                layout: 'public'
+            }
+        );
+    }
+}
+
+async function resolveGmailUserEmail(flow, r, grantedScopes) {
+    const { request, oAuth2Client } = flow;
+
+    let profileRes;
+    let userEmail;
+    let userName;
+
+    // With OpenID Connect scopes (openid, email, profile), the ID token contains user info
+    // This works for all account types including send-only accounts
+    const idTokenPayload = decodeJwtPayload(r.id_token);
+    if (r.id_token && !idTokenPayload) {
+        request.logger.warn({ msg: 'Failed to decode Gmail ID token' });
+    }
+    const idTokenEmail = verifiedEmailOf(idTokenPayload);
+    if (idTokenEmail) {
+        userEmail = idTokenEmail;
+        userName = idTokenPayload.name || null;
+        request.logger.info({ msg: 'Extracted user info from ID token', userEmail, userName });
+    }
+
+    // Back channel, so this is the claim the restriction can actually be enforced on;
+    // the hd argument on the authorization URL only filters the chooser Google shows
+    const workspaceDomain = workspaceDomainOf(idTokenPayload);
+
+    // If ID token didn't provide email, fall back to Gmail API profile endpoint
+    // This should rarely happen since we now request openid/email/profile scopes
+    if (!userEmail) {
+        // Check if we have scopes that allow accessing the profile endpoint
+        const hasProfileScope =
+            grantedScopes.includes('https://mail.google.com/') ||
+            grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly') ||
+            grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify') ||
+            grantedScopes.includes('https://www.googleapis.com/auth/gmail.metadata');
+
+        if (hasProfileScope) {
+            try {
+                request.logger.debug({ msg: 'Attempting Gmail profile endpoint as fallback' });
+                profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
+                if (profileRes && profileRes.emailAddress) {
+                    userEmail = profileRes.emailAddress;
+                }
+            } catch (err) {
+                request.logger.error({ msg: 'Failed to fetch user info from Gmail API', err });
+                let response = err.oauthRequest && err.oauthRequest.response;
+                if (response && response.error) {
+                    let message;
+                    if (/Gmail API has not been used in project/.test(response.error.message)) {
+                        message =
+                            'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
+                    } else {
+                        message = response.error.message;
+                    }
+
+                    let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
+                    throw error;
+                }
+                throw err;
+            }
+        }
+    }
+
+    return { profileRes, userEmail, workspaceDomain };
+}
+
+async function completeGmailCallback(flow) {
+    const { request, oAuth2Client, oauth2App, provider, accountData, providerIdentities } = flow;
+
+    const r = await oAuth2Client.getToken(request.query.code);
+    if (!r || !r.access_token) {
+        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
+        throw error;
+    }
+
+    const grantedScopes = r.scope ? r.scope.split(/\s+/) : [];
+
+    request.logger.info({ msg: 'OAuth token received', grantedScopes, hasIdToken: !!r.id_token });
+
+    const scopeErrorView = await gmailMissingScopesView(flow, r, grantedScopes);
+    if (scopeErrorView) {
+        return { view: scopeErrorView };
+    }
+
+    const { profileRes, userEmail, workspaceDomain } = await resolveGmailUserEmail(flow, r, grantedScopes);
+
+    if (!userEmail) {
+        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
+        throw error;
+    }
+
+    // Back-channel only: either the id_token from the token endpoint or the Gmail profile
+    // API response, never a value that travelled through the browser.
+    providerIdentities.push(userEmail);
+
+    accountData.email = isEmail(userEmail) ? userEmail : accountData.email;
+
+    const defaultScopes = (oauth2App.baseScopes && GMAIL_SCOPES[oauth2App.baseScopes]) || GMAIL_SCOPES.imap;
+
+    accountData.oauth2 = Object.assign(
+        accountData.oauth2 || {},
+        {
+            provider,
+            accessToken: r.access_token,
+            refreshToken: r.refresh_token,
+            expires: new Date(Date.now() + r.expires_in * 1000),
+            scope: grantedScopes.length ? grantedScopes : defaultScopes,
+            tokenType: r.token_type
+        },
+        {
+            auth: {
+                user: userEmail
+            }
+        }
+    );
+
+    accountData.googleHistoryId = profileRes ? Number(profileRes.historyId) || null : null;
+
+    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userEmail, provider: oauth2App.provider });
+
+    return { grantToken: r.refresh_token || r.access_token, workspaceDomain };
+}
+
+async function resolveOutlookCallbackUser(flow, r) {
+    const { request, oAuth2Client, oauth2App } = flow;
+
+    let userInfo;
+
+    if (!oauth2App.baseScopes || oauth2App.baseScopes === 'imap') {
+        // Read account info from the id_token, falling back to the client_info GET argument.
+        // The fallback is needed because previously EmailEngine did not request for the
+        // User.Read scope - but client_info arrives through the browser, so it is a display
+        // fallback only and never counts as identity evidence. See lib/oauth/outlook-identity.js.
+
+        let clientInfo = false;
+        if (request.query.client_info) {
+            try {
+                clientInfo = JSON.parse(Buffer.from(request.query.client_info, 'base64url').toString());
+            } catch (err) {
+                // Base64-shaped but not JSON. It is an optional display hint, so log and continue
+                // rather than failing the whole setup on a value we do not trust anyway.
+                request.logger.warn({ msg: 'Failed to decode Outlook client_info argument', err });
+            }
+        }
+
+        const idTokenPayload = decodeJwtPayload(r.id_token);
+        if (r.id_token && !idTokenPayload) {
+            request.logger.warn({ msg: 'Failed to decode Outlook ID token' });
+        }
+
+        userInfo = resolveOutlookUserInfo({ clientInfo, idTokenPayload });
+    } else {
+        // Request profile info from API
+
+        let profileRes;
+        try {
+            profileRes = await oAuth2Client.request(r.access_token, `${oAuth2Client.apiBase}/v1.0/me`);
+        } catch (err) {
+            let response = err.oauthRequest && err.oauthRequest.response;
+            if (response && response.error) {
+                let message = response.error.message;
+                let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
+                throw error;
+            }
+            throw err;
+        }
+
+        userInfo = resolveOutlookUserInfo({ profile: profileRes });
+        if (profileRes && profileRes.mail && !userInfo.verifiedIdentities.includes(profileRes.mail)) {
+            // A mailbox address outside the login's domain counts only in a domain the tenant verified
+            const verifiedDomains = await readTenantVerifiedDomains(oAuth2Client, r.access_token, request.logger);
+            userInfo = resolveOutlookUserInfo({ profile: profileRes, verifiedDomains });
+        }
+
+        request.logger.info({
+            msg: 'User profile returned by MS Graph API',
+            user: userInfo.email,
+            provider: oauth2App.provider
+        });
+    }
+
+    return userInfo;
+}
+
+async function completeOutlookCallback(flow) {
+    const { request, oAuth2Client, oauth2App, provider, accountData, providerIdentities } = flow;
+
+    const r = await oAuth2Client.getToken(request.query.code);
+    if (!r || !r.access_token) {
+        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
+        throw error;
+    }
+
+    const userInfo = await resolveOutlookCallbackUser(flow, r);
+
+    // The login is the user principal name and nothing else: it used to fall back to the account
+    // address, which could only come from client_info, a value the browser chooses
+    const authData = {
+        user: userInfo.username
+    };
+
+    if (!authData.user) {
+        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
+        throw error;
+    }
+
+    // Only the back-channel addresses, so a forged client_info cannot satisfy an expectation.
+    providerIdentities.push(...userInfo.verifiedIdentities);
+
+    // A shared mailbox, named either way, or the signed-in user's own
+    const mailbox = resolveOutlookMailbox(accountData, userInfo);
+    accountData.email = mailbox.email;
+    if (mailbox.delegatedUser) {
+        authData.delegatedUser = mailbox.delegatedUser;
+    }
+
+    accountData.name = accountData.name || userInfo.name || '';
+
+    accountData.oauth2 = Object.assign(
+        accountData.oauth2 || {},
+        {
+            provider,
+            accessToken: r.access_token,
+            refreshToken: r.refresh_token,
+            expires: new Date(Date.now() + r.expires_in * 1000),
+            scope: r.scope ? r.scope.split(/\s+/) : oAuth2Client.scopes,
+            tokenType: r.token_type
+        },
+        {
+            auth: authData
+        }
+    );
+
+    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userInfo.email, provider: oauth2App.provider });
+
+    return { grantToken: r.refresh_token || r.access_token };
+}
+
+async function completeMailRuCallback(flow) {
+    const { request, oAuth2Client, oauth2App, provider, accountData, providerIdentities } = flow;
+
+    const r = await oAuth2Client.getToken(request.query.code);
+    if (!r || !r.access_token) {
+        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
+        throw error;
+    }
+
+    let profileRes;
+    try {
+        profileRes = await oAuth2Client.request(r.access_token, 'https://oauth.mail.ru/userinfo');
+    } catch (err) {
+        let response = err.oauthRequest && err.oauthRequest.response;
+        if (response && response.error) {
+            let message = response.error.message;
+            let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
+            throw error;
+        }
+        throw err;
+    }
+
+    if (!profileRes || !profileRes || !profileRes.email) {
+        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
+        throw error;
+    }
+
+    // Back-channel only: the Mail.ru userinfo endpoint response.
+    providerIdentities.push(profileRes.email);
+
+    accountData.name = accountData.name || profileRes.name || '';
+    accountData.email = isEmail(profileRes.email) ? profileRes.email : accountData.email;
+
+    accountData.oauth2 = Object.assign(
+        accountData.oauth2 || {},
+        {
+            provider,
+            accessToken: r.access_token,
+            refreshToken: r.refresh_token,
+            expires: new Date(Date.now() + r.expires_in * 1000),
+            scope: r.scope ? r.scope.split(/\s+/) : MAIL_RU_SCOPES,
+            tokenType: r.token_type
+        },
+        {
+            auth: {
+                user: profileRes.email
+            }
+        }
+    );
+
+    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: profileRes.email, provider: oauth2App.provider });
+
+    return { grantToken: r.refresh_token || r.access_token };
+}
+
+// Exchanges the authorization code with the app's provider type (flow.oauth2App.provider, for example
+// "gmail") and fills in accountData and providerIdentities from what the provider returned. Resolves
+// to `{ view }` when the setup has to stop on a page of its own, otherwise to:
+//   grantToken      - the token to revoke if the setup is rejected after the exchange. The refresh
+//                     token is preferred: revoking either invalidates the grant, but the access token
+//                     may already be expired.
+//   workspaceDomain - the Workspace or Cloud organization domain, for an application restricted to
+//                     Google Workspace accounts. Only the Gmail provider reports one; the restriction
+//                     is a Google setting and no other provider has the notion.
+async function exchangeOAuthCode(flow) {
+    switch (flow.oauth2App.provider) {
+        case 'gmail':
+            return await completeGmailCallback(flow);
+
+        case 'outlook':
+            return await completeOutlookCallback(flow);
+
+        case 'mailRu':
+            return await completeMailRuCallback(flow);
+
+        default: {
+            throw new Error('Unknown OAuth2 provider');
+        }
+    }
+}
+
+// The Workspace restriction and the expected identity, both checked after the code exchange.
+// Answers the error page with a way back when the setup has to be refused
+async function rejectOAuthIdentity(flow, { grantToken, workspaceDomain }, expectedEmail) {
+    const { request, h, accountData, oauth2App, oAuth2Client, providerIdentities } = flow;
+
+    // The code was already exchanged, so a refused setup leaves us holding a grant we will never
+    // use. Best effort, and the same duck-typing guard Account.findRevocableGrant() uses: only
+    // GmailOauth implements revokeToken, which reports a failure rather than throwing it.
+    const revokeUnusedGrant = async failureMessage => {
+        if (grantToken && typeof oAuth2Client.revokeToken === 'function') {
+            const revocation = await oAuth2Client.revokeToken(grantToken);
+            if (!revocation.revoked) {
+                request.logger.warn({ msg: failureMessage, revocation });
+            }
+        }
+    };
+
+    // "Accept only Google Workspace accounts" used to be advisory: generateAuthUrl() sets hd=*,
+    // which filters the account chooser Google shows and nothing else, so a link assembled
+    // without that argument - or a user who switches account inside the chooser - completed the
+    // setup with a consumer account. The hosted-domain claim of the ID token is checked here
+    // instead, and a token that names no domain is refused rather than trusted: for the Gmail
+    // provider the OpenID scopes are always requested (GmailOauth's constructor adds them), so
+    // a missing claim means the account has no Workspace domain, not that the claim was never
+    // asked for.
+    if (oauth2App.googleWorkspaceAccounts && oauth2App.provider === 'gmail' && !workspaceDomain) {
+        request.logger.warn({
+            msg: 'OAuth2 sign-in used a personal account for a Workspace-only application',
+            account: accountData.account,
+            provider: oauth2App.provider
+        });
+
+        await revokeUnusedGrant('Failed to revoke the OAuth2 grant after a Workspace check');
+
+        // select_account for the same reason as the identity mismatch: they are signed in to the
+        // account that just failed, and without it Google would hand back the same one
+        const retryUrl = await startOAuthRetry(flow, accountData.email, 'select_account consent');
+
+        return workspaceErrorView(request, h, { actualEmail: providerIdentities[0], retryUrl });
+    }
+
+    if (expectedEmail && !matchesExpectedIdentity(expectedEmail, providerIdentities)) {
+        // Neither address is logged: the expectation and the authenticated identity both belong to
+        // the end user, and this line is the one record of a failed attempt. Note the provider
+        // identity was already logged by the provider's "Provisioned OAuth2 tokens" line in exchangeOAuthCode().
+        request.logger.warn({
+            msg: 'OAuth2 identity did not match the expected email address',
+            account: accountData.account,
+            provider: oauth2App.provider
+        });
+
+        await revokeUnusedGrant('Failed to revoke the OAuth2 grant after an identity mismatch');
+
+        // Stop here with a way back rather than redirecting to the calling application: signing in
+        // as the wrong account is a correctable mistake, and the hosted flow only ever redirects on
+        // success. Hint the address they were supposed to use, and force the account picker:
+        // they are already signed in to the one that just failed, so without select_account Google
+        // would hand back the same account and the retry would loop. Microsoft always shows the
+        // picker and Mail.ru ignores the hint, so this only changes Google's behavior.
+        const retryUrl = await startOAuthRetry(flow, expectedEmail, 'select_account consent');
+
+        return identityErrorView(request, h, {
+            expectedEmail,
+            // The primary address the provider reported. Microsoft can return both a mailbox
+            // address and a user principal name, and either would have satisfied the pin, so
+            // naming the first is enough to show which account actually signed in.
+            actualEmail: providerIdentities[0],
+            retryUrl
+        });
+    }
+}
+
+async function handleOAuthCallback(request, h) {
+    assertOAuthCallbackQuery(request);
+
+    const accountData = await claimOAuthSetup(request);
+
+    const accountMeta = accountData._meta || {};
+    delete accountData._meta;
+
+    const redirectUrl = accountMeta.redirectUrl;
+
+    const provider = accountData.oauth2.provider;
+
+    // What the caller originally asked for, captured before the provider branches below rewrite
+    // accountData from whoever signed in. A retry has to start from this rather than from the
+    // rejected attempt: `email` may name a shared mailbox to bind (and is otherwise overwritten
+    // with the authenticated address), `name` gets filled in from the rejected user's profile when
+    // the caller supplied none, and `oauth2.auth.delegatedUser` names the mailbox rather than a
+    // credential, so it must survive while the tokens do not.
+    const requestedSetup = {
+        email: accountData.email,
+        name: accountData.name,
+        delegatedUser: accountData.oauth2.auth && accountData.oauth2.auth.delegatedUser
+    };
+
+    const oauth2App = await oauth2Apps.get(provider);
+    if (!oauth2App) {
+        let error = Boom.boomify(new Error('Missing or disabled OAuth2 app'), { statusCode: 404 });
+        throw error;
+    }
+
+    // The code exchange, the profile lookups and any revoke already speak for the account being
+    // set up, so they leave through its route (its own proxy, if the setup named one)
+    const oAuth2Client = await oauth2Apps.getClient(oauth2App.id, { route: await getAccountHttpRoute(redis, accountData) });
+
+    // What the provider steps below read, and the values they fill in
+    const flow = {
+        request,
+        h,
+        accountData,
+        accountMeta,
+        requestedSetup,
+        provider,
+        oauth2App,
+        oAuth2Client,
+
+        // Addresses the provider itself returned over a back channel, the only values allowed to
+        // satisfy an expected identity (see lib/account/expected-identity.js). Every provider case
+        // fills this in; one that does not leaves it empty, and an empty list fails the check closed.
+        providerIdentities: []
+    };
+
+    const exchange = await exchangeOAuthCode(flow);
+    if (exchange.view) {
+        return exchange.view;
+    }
+
+    // Expected identity check. Runs before the nonce claim and before create(), so a rejected
+    // setup neither consumes the signed link nor overwrites the credentials already on the
+    // account. The expectation can come from the signed form blob or from the account itself -
+    // persisting it is what makes the constraint outlive the link that introduced it, and it is
+    // why a later link issued without expectedEmail cannot quietly drop the pin.
+    const expectedEmail = await resolveExpectedIdentity(redis, {
+        account: accountData.account,
+        blobExpectation: pendingSetupExpectation(accountData, accountMeta)
+    });
+
+    const identityView = await rejectOAuthIdentity(flow, exchange, expectedEmail);
+    if (identityView) {
+        return identityView;
+    }
+
+    if (expectedEmail) {
+        // Pin the account so every later setup is checked, including one driven by a link that
+        // carries no expectation of its own.
+        accountData.expectedEmail = expectedEmail;
+    }
+
+    if ('delegated' in accountData) {
+        // remove artefacts
+        delete accountData.delegated;
+    }
+
+    const accountObject = new Account({
+        redis,
+        call,
+        secret: await getSecret(),
+        timeout: request.headers['x-ee-timeout']
+    });
+
+    // The nonce claim spans both arms, so one signed link cannot be spent on each (start OAuth2,
+    // submit the same blob to /accounts/new/imap/server, then complete this callback) and a
+    // replayed callback cannot create a second account. Only a link that carries a nonce is
+    // claimed: re-auth links issued before nonces existed carry none, and the OAuth2 entry
+    // (accountFormHandler) deliberately does not require one so that they keep working.
+    const httpRedirectUrl = await completeAccountSetup(request, {
+        accountObject,
+        accountData,
+        nonce: accountMeta.n ? { n: accountMeta.n, t: accountMeta.t } : null,
+        redirectUrl
+    });
+
+    return renderRedirect(request, h, httpRedirectUrl);
+}
+
+function registerOAuthCallbackRoute(server) {
     server.route({
         method: 'GET',
         path: '/oauth',
-        async handler(request, h) {
-            if (request.query.error) {
-                let error = Boom.boomify(new Error(`Oauth failed: ${request.query.error}`), { statusCode: 400 });
-                throw error;
-            }
-
-            if (!request.query.code) {
-                // throw
-                let error = Boom.boomify(new Error(`Oauth failed: no code received`), { statusCode: 400 });
-                throw error;
-            }
-
-            if (!/^account:add:/.test(request.query.state)) {
-                let error = Boom.boomify(new Error(`Oauth failed: invalid state received`), { statusCode: 400 });
-                throw error;
-            }
-
-            // Validate nonce format: 16 bytes base64url encoded = 21-22 characters
-            // Also accept base64 encoding (+, /, =) for backward compatibility with old cached nonces
-            const stateNonce = request.query.state.slice('account:add:'.length);
-            if (!/^[A-Za-z0-9_\-+/]{21,22}={0,2}$/.test(stateNonce)) {
-                throw Boom.badRequest('Oauth failed: invalid state format');
-            }
-
-            let [[, accountData]] = await redis.multi().get(`${REDIS_PREFIX}${request.query.state}`).del(`${REDIS_PREFIX}${request.query.state}`).exec();
-            if (!accountData) {
-                let error = Boom.boomify(new Error(`Oauth failed: session expired`), { statusCode: 400 });
-                throw error;
-            }
-
-            try {
-                accountData = JSON.parse(accountData);
-            } catch (E) {
-                let error = Boom.boomify(new Error(`Oauth failed: invalid session`), { statusCode: 400 });
-                throw error;
-            }
-
-            if (!accountData.account) {
-                accountData.account = null;
-            }
-
-            const accountMeta = accountData._meta || {};
-            delete accountData._meta;
-
-            const redirectUrl = accountMeta.redirectUrl;
-
-            const provider = accountData.oauth2.provider;
-
-            const oauth2App = await oauth2Apps.get(provider);
-            if (!oauth2App) {
-                let error = Boom.boomify(new Error('Missing or disabled OAuth2 app'), { statusCode: 404 });
-                throw error;
-            }
-
-            const oAuth2Client = await oauth2Apps.getClient(oauth2App.id);
-
-            // `app.provider` is for example "gmail", `provider` is oauth2 app id
-            switch (oauth2App.provider) {
-                case 'gmail': {
-                    const r = await oAuth2Client.getToken(request.query.code);
-                    if (!r || !r.access_token) {
-                        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    const grantedScopes = r.scope ? r.scope.split(/\s+/) : [];
-
-                    request.logger.info({ msg: 'OAuth token received', grantedScopes, hasIdToken: !!r.id_token });
-
-                    // Check if user deselected required scopes in Google's granular consent
-                    const requiredFunctionalScopes = oAuth2Client.scopes.filter(s => !OPENID_SCOPES.includes(s));
-                    const missingScopes = requiredFunctionalScopes.filter(s => !grantedScopes.includes(s));
-
-                    if (missingScopes.length > 0) {
-                        request.logger.warn({
-                            msg: 'OAuth2 grant missing required scopes',
-                            requested: requiredFunctionalScopes,
-                            granted: grantedScopes,
-                            missing: missingScopes
-                        });
-
-                        // Best-effort revocation of the partial token
-                        oAuth2Client.revokeToken(r.refresh_token || r.access_token).catch(err => {
-                            request.logger.error({ msg: 'Failed to revoke partial OAuth2 token', err });
-                        });
-
-                        const reAuthNonce = crypto.randomBytes(NONCE_BYTES).toString('base64url');
-                        const reAuthState = `account:add:${reAuthNonce}`;
-                        const reAuthAccountData = Object.assign({}, accountData, {
-                            oauth2: { provider },
-                            _meta: accountMeta
-                        });
-
-                        await redis.set(`${REDIS_PREFIX}${reAuthState}`, JSON.stringify(reAuthAccountData), 'EX', Math.floor(MAX_FORM_TTL / 1000));
-
-                        const reAuthUrl = oAuth2Client.generateAuthUrl({
-                            state: reAuthState,
-                            email: accountData.email
-                        });
-
-                        const missingScopesList = missingScopes.map(formatScopeDescription);
-
-                        return h.view(
-                            'oauth-scope-error',
-                            {
-                                pageTitleFull: request.app.gt.gettext('Email Account Setup'),
-                                templateLocale: request.app.locale,
-                                reAuthUrl,
-                                missingScopesList
-                            },
-                            {
-                                layout: 'public'
-                            }
-                        );
-                    }
-
-                    let profileRes;
-                    let userEmail;
-                    let userName;
-
-                    // With OpenID Connect scopes (openid, email, profile), the ID token contains user info
-                    // This works for all account types including send-only accounts
-                    if (r.id_token && typeof r.id_token === 'string') {
-                        let [, encodedValue] = r.id_token.split('.');
-                        if (encodedValue) {
-                            try {
-                                let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
-                                if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
-                                    userEmail = decodedValue.email;
-                                    userName = decodedValue.name || null;
-                                    request.logger.info({ msg: 'Extracted user info from ID token', userEmail, userName });
-                                }
-                            } catch (err) {
-                                request.logger.error({ msg: 'Failed to decode Gmail ID token', err });
-                            }
-                        }
-                    }
-
-                    // If ID token didn't provide email, fall back to Gmail API profile endpoint
-                    // This should rarely happen since we now request openid/email/profile scopes
-                    if (!userEmail) {
-                        // Check if we have scopes that allow accessing the profile endpoint
-                        const hasProfileScope =
-                            grantedScopes.includes('https://mail.google.com/') ||
-                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly') ||
-                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify') ||
-                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.metadata');
-
-                        if (hasProfileScope) {
-                            try {
-                                request.logger.info({ msg: 'Attempting Gmail profile endpoint as fallback' });
-                                profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
-                                if (profileRes && profileRes.emailAddress) {
-                                    userEmail = profileRes.emailAddress;
-                                }
-                            } catch (err) {
-                                request.logger.error({ msg: 'Failed to fetch user info from Gmail API', err: err.message });
-                                let response = err.oauthRequest && err.oauthRequest.response;
-                                if (response && response.error) {
-                                    let message;
-                                    if (/Gmail API has not been used in project/.test(response.error.message)) {
-                                        message =
-                                            'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
-                                    } else {
-                                        message = response.error.message;
-                                    }
-
-                                    let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
-                                    throw error;
-                                }
-                                throw err;
-                            }
-                        }
-                    }
-
-                    if (!userEmail) {
-                        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    accountData.email = isEmail(userEmail) ? userEmail : accountData.email;
-
-                    const defaultScopes = (oauth2App.baseScopes && GMAIL_SCOPES[oauth2App.baseScopes]) || GMAIL_SCOPES.imap;
-
-                    accountData.oauth2 = Object.assign(
-                        accountData.oauth2 || {},
-                        {
-                            provider,
-                            accessToken: r.access_token,
-                            refreshToken: r.refresh_token,
-                            expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: grantedScopes.length ? grantedScopes : defaultScopes,
-                            tokenType: r.token_type
-                        },
-                        {
-                            auth: {
-                                user: userEmail
-                            }
-                        }
-                    );
-
-                    accountData.googleHistoryId = profileRes ? Number(profileRes.historyId) || null : null;
-
-                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userEmail, provider: oauth2App.provider });
-                    break;
-                }
-
-                case 'outlook': {
-                    const r = await oAuth2Client.getToken(request.query.code);
-                    if (!r || !r.access_token) {
-                        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    let userInfo = {};
-
-                    if (!oauth2App.baseScopes || oauth2App.baseScopes === 'imap') {
-                        // Read account info from GET arguments
-                        // This is needed because previously EmailEngine did not request for the User.Read scope
-
-                        let clientInfo = request.query.client_info ? JSON.parse(Buffer.from(request.query.client_info, 'base64url').toString()) : false;
-
-                        if (clientInfo && typeof clientInfo.name === 'string') {
-                            userInfo.name = clientInfo.name;
-                        }
-
-                        if (clientInfo && clientInfo.preferred_username && isEmail(clientInfo.preferred_username)) {
-                            userInfo.email = clientInfo.preferred_username;
-                        }
-
-                        if (r.id_token && typeof r.id_token === 'string') {
-                            let [, encodedValue] = r.id_token.split('.');
-                            if (encodedValue) {
-                                try {
-                                    let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
-                                    if (decodedValue && typeof decodedValue.name === 'string') {
-                                        userInfo.name = decodedValue.name;
-                                    }
-
-                                    if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
-                                        userInfo.email = decodedValue.email;
-                                    }
-
-                                    if (decodedValue && typeof decodedValue.preferred_username === 'string' && isEmail(decodedValue.preferred_username)) {
-                                        userInfo.username = decodedValue.preferred_username;
-                                    }
-                                } catch (err) {
-                                    request.logger.error({ msg: 'Failed to decode JWT payload', err, encodedValue });
-                                }
-                            }
-                        }
-                    } else {
-                        // Request profile info from API
-
-                        let profileRes;
-                        try {
-                            profileRes = await oAuth2Client.request(r.access_token, `${oAuth2Client.apiBase}/v1.0/me`);
-                        } catch (err) {
-                            let response = err.oauthRequest && err.oauthRequest.response;
-                            if (response && response.error) {
-                                let message = response.error.message;
-                                let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
-                                throw error;
-                            }
-                            throw err;
-                        }
-
-                        request.logger.info({
-                            msg: 'User profile returned by MS Graph API',
-                            user: userInfo.email,
-                            provider: oauth2App.provider,
-                            profile: profileRes
-                        });
-
-                        if (profileRes.displayName) {
-                            userInfo.name = profileRes.displayName;
-                        }
-
-                        if (profileRes.mail) {
-                            userInfo.email = profileRes.mail;
-                        }
-
-                        if (profileRes.userPrincipalName) {
-                            userInfo.username = profileRes.userPrincipalName;
-                        }
-                    }
-
-                    if (!userInfo.email && userInfo.username && isEmail(userInfo.username)) {
-                        userInfo.email = userInfo.username;
-                    }
-
-                    const authData = {
-                        user: userInfo.username || userInfo.email
-                    };
-
-                    if (!authData.user) {
-                        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    if (accountData.oauth2 && accountData.oauth2.auth && accountData.oauth2.auth.delegatedUser) {
-                        // Delegated user (shared mailbox) specified in oauth2.auth.delegatedUser
-                        authData.delegatedUser = accountData.oauth2.auth.delegatedUser;
-                        // Ensure email is set to the delegated user if not already provided
-                        if (!accountData.email) {
-                            accountData.email = accountData.oauth2.auth.delegatedUser;
-                        }
-                    } else if (accountData.delegated && accountData.email && accountData.email !== userInfo.email) {
-                        // Legacy: Shared mailbox specified via delegated flag
-                        authData.delegatedUser = accountData.email;
-                    } else {
-                        // Not a delegated account, use the authenticated user's email
-                        accountData.email = userInfo.email;
-                    }
-
-                    accountData.name = accountData.name || userInfo.name || '';
-
-                    accountData.oauth2 = Object.assign(
-                        accountData.oauth2 || {},
-                        {
-                            provider,
-                            accessToken: r.access_token,
-                            refreshToken: r.refresh_token,
-                            expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : oAuth2Client.scopes,
-                            tokenType: r.token_type
-                        },
-                        {
-                            auth: authData
-                        }
-                    );
-
-                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userInfo.email, provider: oauth2App.provider });
-                    break;
-                }
-
-                case 'mailRu': {
-                    const r = await oAuth2Client.getToken(request.query.code);
-                    if (!r || !r.access_token) {
-                        let error = Boom.boomify(new Error(`Oauth failed: did not get token`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    let profileRes;
-                    try {
-                        profileRes = await oAuth2Client.request(r.access_token, 'https://oauth.mail.ru/userinfo');
-                    } catch (err) {
-                        let response = err.oauthRequest && err.oauthRequest.response;
-                        if (response && response.error) {
-                            let message = response.error.message;
-                            let error = Boom.boomify(new Error(message), { statusCode: resolveOAuthErrorStatus(response.error, err) });
-                            throw error;
-                        }
-                        throw err;
-                    }
-
-                    if (!profileRes || !profileRes || !profileRes.email) {
-                        let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
-                        throw error;
-                    }
-
-                    accountData.name = accountData.name || profileRes.name || '';
-                    accountData.email = isEmail(profileRes.email) ? profileRes.email : accountData.email;
-
-                    accountData.oauth2 = Object.assign(
-                        accountData.oauth2 || {},
-                        {
-                            provider,
-                            accessToken: r.access_token,
-                            refreshToken: r.refresh_token,
-                            expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : MAIL_RU_SCOPES,
-                            tokenType: r.token_type
-                        },
-                        {
-                            auth: {
-                                user: profileRes.email
-                            }
-                        }
-                    );
-
-                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: profileRes.email, provider: oauth2App.provider });
-                    break;
-                }
-
-                default: {
-                    throw new Error('Unknown OAuth2 provider');
-                }
-            }
-
-            if ('delegated' in accountData) {
-                // remove artefacts
-                delete accountData.delegated;
-            }
-
-            let accountObject = new Account({
-                redis,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            let result = await accountObject.create(accountData);
-
-            if (accountMeta.n) {
-                // store nonce to prevent this URL to be reused
-                const keyName = `${REDIS_PREFIX}account:form:${accountMeta.n}`;
-                try {
-                    await redis
-                        .multi()
-                        .set(keyName, (accountMeta.t || '0').toString())
-                        .expire(keyName, Math.floor(MAX_FORM_TTL / 1000))
-                        .exec();
-                } catch (err) {
-                    request.logger.error({ msg: 'Failed to set nonce for an account form request', err });
-                }
-            }
-
-            let httpRedirectUrl;
-            if (redirectUrl) {
-                let serviceUrl = await settings.get('serviceUrl');
-                let url = new URL(redirectUrl, serviceUrl);
-                url.searchParams.set('account', result.account);
-                url.searchParams.set('state', result.state);
-                httpRedirectUrl = url.href;
-            } else {
-                httpRedirectUrl = `/admin/accounts/${result.account}`;
-            }
-
-            // have to use HTML redirect, otherwise samesite=strict cookies are not passed on
-            return h.view(
-                'redirect',
-                {
-                    pageTitleFull: request.app.gt.gettext('Email Account Setup'),
-                    httpRedirectUrl
-                },
-                {
-                    layout: 'public'
-                }
-            );
-        },
+        handler: handleOAuthCallback,
         options: {
             description: 'OAuth2 response endpoint',
 
@@ -2520,7 +2567,9 @@ Include your token in requests using one of these methods:
                         .description('OAuth2 scopes'),
                     client_info: Joi.string()
                         .empty('')
-                        .max(1024 * 1024)
+                        // A few hundred bytes of JSON in practice. Bounded tightly because this is an
+                        // unauthenticated route and the value is JSON.parse-d.
+                        .max(4 * 1024)
                         .base64({ urlSafe: true, paddingRequired: false })
                         .description('Outlook client info'),
                     error: Joi.string()
@@ -2534,127 +2583,9 @@ Include your token in requests using one of these methods:
             auth: false
         }
     });
+}
 
-    // setup template routes
-    await templateRoutes({ server, call, CORS_CONFIG });
-
-    // setup "chat with email" routes (deprecated Document Store feature; only when enabled)
-    if (documentStoreFeatureEnabled) {
-        await chatRoutes({ server, call, CORS_CONFIG });
-    }
-
-    // setup account CRUD routes
-    await accountRoutes({
-        server,
-        call,
-        documentsQueue,
-        oauth2Schema,
-        imapSchema,
-        smtpSchema,
-        CORS_CONFIG,
-        AccountTypeSchema,
-        OAuth2ProviderSchema,
-        metrics
-    });
-
-    // setup message routes
-    await messageRoutes({
-        server,
-        call,
-        CORS_CONFIG,
-        MAX_ATTACHMENT_SIZE,
-        MAX_BODY_SIZE,
-        MAX_PAYLOAD_TIMEOUT,
-        documentStoreFeatureEnabled
-    });
-
-    // setup export routes
-    await exportRoutes({
-        server,
-        CORS_CONFIG
-    });
-
-    // setup Pub/Sub status route
-    await pubsubRoutes({ server, CORS_CONFIG });
-
-    // setup access token routes
-    await tokenRoutes({ server, call, CORS_CONFIG });
-
-    // setup mailbox routes
-    await mailboxRoutes({ server, call, CORS_CONFIG, FLAG_SORT_ORDER });
-
-    // setup settings routes
-    await settingsRoutes({ server, notify, CORS_CONFIG });
-
-    // setup stats route
-    await statsRoutes({ server, call, CORS_CONFIG });
-
-    // setup license routes
-    await licenseRoutes({ server, call, CORS_CONFIG });
-
-    // setup outbox routes
-    await outboxRoutes({ server, CORS_CONFIG });
-
-    // setup webhook route management routes
-    await webhookRouteRoutes({ server, CORS_CONFIG });
-
-    // setup OAuth2 application routes
-    await oauth2AppRoutes({ server, call, CORS_CONFIG, OAuth2ProviderSchema });
-
-    // setup SMTP gateway routes
-    await gatewayRoutes({ server, call, CORS_CONFIG });
-
-    // setup delivery test routes
-    await deliveryTestRoutes({ server, call, CORS_CONFIG, SMTP_TEST_HOST });
-
-    // setup blocklist routes
-    await blocklistRoutes({ server, call, CORS_CONFIG });
-
-    // setup message submit route
-    await submitRoutes({ server, call, CORS_CONFIG, MAX_ATTACHMENT_SIZE, MAX_BODY_SIZE, MAX_PAYLOAD_TIMEOUT });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/changes',
-
-        async handler(request, h) {
-            request.app.stream = new ResponseStream();
-            finished(request.app.stream, err => request.app.stream.finalize(err));
-            setImmediate(() => {
-                try {
-                    request.app.stream.write(`: EmailEngine v${packageData.version}\n\n`);
-                } catch (err) {
-                    // ignore
-                }
-            });
-            return h
-                .response(request.app.stream)
-                .header('X-Accel-Buffering', 'no')
-                .header('Connection', 'keep-alive')
-                .header('Cache-Control', 'no-cache')
-                .type('text/event-stream');
-        },
-
-        options: {
-            description: 'Stream state changes',
-            notes: 'Stream account state changes as an EventSource',
-            tags: ['api', 'Account'],
-
-            plugins: {
-                'hapi-swagger': {
-                    produces: ['text/event-stream'],
-                    responses: errorResponses(401, 403, 429, 500)
-                }
-            },
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG
-        }
-    });
-
+async function registerCsrfProtection(server, secureCookie) {
     // Web UI routes
 
     await server.register({
@@ -2668,7 +2599,9 @@ Include your token in requests using one of these methods:
             skip: (request /*, h*/) => {
                 let tags = (request.route && request.route.settings && request.route.settings.tags) || [];
 
-                if (tags.includes('api') || tags.includes('scope:metrics') || tags.includes('static') || tags.includes('external')) {
+                // A machine client holds no crumb, but a route that also takes the session cookie is
+                // reachable from a browser and keeps the check whatever its tags say
+                if (isMachineRoute(tags) && !acceptsSession(request.route.settings.auth)) {
                     return true;
                 }
 
@@ -2676,7 +2609,9 @@ Include your token in requests using one of these methods:
             }
         }
     });
+}
 
+function registerViews(server) {
     server.views({
         engines: {
             hbs: handlebars
@@ -2691,56 +2626,64 @@ Include your token in requests using one of these methods:
         layoutPath: './views/layout',
         partialsPath: './views/partials',
 
-        isCached: false,
+        // Uncached, vision re-reads and re-registers every partial with synchronous fs calls on
+        // each render, blocking the worker that also serves /v1. Only development wants live
+        // template edits.
+        isCached: process.env.NODE_ENV !== 'development',
 
         async context(request) {
-            const pendingMessages = await flash(redis, request);
+            // The three reads are independent, and this runs on every admin page render. The
+            // OAuth2 auth flags are best-effort - a failure to read them must not take the page
+            // down with it.
+            const [pendingMessages, settingsValues, oauthAuthFlags] = await Promise.all([
+                flash(redis, request),
+                settings.getMulti(
+                    'upgrade',
+                    'subexp',
+                    'webhookErrorFlag',
+                    'webhooksEnabled',
+                    'disableTokens',
+                    'tract',
+                    'templateHeader',
+                    'templateHtmlHead',
+                    'documentStoreEnabled',
+                    'serviceUrl',
+                    'language',
+                    'locale',
+                    'timezone',
+                    'pageBrandName',
+                    'notificationBaseUrl'
+                ),
+                oauth2Apps.listAuthFlags().catch(err => {
+                    logger.error({ msg: 'Failed to list OAuth2 app auth flags', err });
+                    return [];
+                })
+            ]);
+
             const {
                 upgrade: upgradeInfo,
                 subexp,
-                outlookAuthFlag,
-                gmailAuthFlag,
-                gmailServiceAuthFlag,
                 webhookErrorFlag,
                 webhooksEnabled,
                 disableTokens,
                 tract,
                 templateHeader: embeddedTemplateHeader,
                 templateHtmlHead: embeddedTemplateHtmlHead,
-                documentStoreEnabled: showDocumentStore,
+                // The Document Store was removed in 2.82.0. The setting that switched it on is
+                // read raw off the settings hash (it is no longer in the settings schema), so an
+                // instance upgraded with the feature still on is told where it went instead of
+                // losing it quietly
+                documentStoreEnabled: documentStoreRemoved,
                 serviceUrl,
                 language,
                 locale,
                 timezone,
                 pageBrandName,
                 notificationBaseUrl
-            } = await settings.getMulti(
-                'upgrade',
-                'subexp',
-                'outlookAuthFlag',
-                'gmailAuthFlag',
-                'gmailServiceAuthFlag',
-                'webhookErrorFlag',
-                'webhooksEnabled',
-                'disableTokens',
-                'tract',
-                'templateHeader',
-                'templateHtmlHead',
-                'documentStoreEnabled',
-                'serviceUrl',
-                'language',
-                'locale',
-                'timezone',
-                'pageBrandName',
-                'notificationBaseUrl'
-            );
+            } = settingsValues;
 
             let systemAlerts = [];
             let authData;
-
-            // Deprecated Document Store: enabled in settings but unavailable because EmailEngine
-            // was not started with the document store gate (--documentStore.enabled / EENGINE_DOCUMENT_STORE_ENABLED).
-            let documentStoreUnavailable = !documentStoreFeatureEnabled && !!showDocumentStore;
 
             switch (request.auth.artifacts && request.auth.artifacts.provider) {
                 case 'okta': {
@@ -2752,6 +2695,17 @@ Include your token in requests using one of these methods:
                                 .concat(profile.firstName || [])
                                 .concat(profile.lastName || [])
                                 .join(' ') || profile.username,
+                        enabled: !!profile.username,
+                        isAdmin: false
+                    };
+                    break;
+                }
+
+                case 'oidc': {
+                    let profile = request.auth.artifacts.profile || {};
+                    authData = {
+                        user: profile.username,
+                        name: profile.displayName || profile.username,
                         enabled: !!profile.username,
                         isAdmin: false
                     };
@@ -2779,7 +2733,7 @@ Include your token in requests using one of these methods:
                 systemAlerts.push({
                     url: '/admin/upgrade',
                     level: 'info',
-                    icon: 'exclamation-triangle',
+                    icon: 'icon-[tabler--alert-triangle]',
                     message: `An update is available: Emailengine v${upgradeInfo.available}`
                 });
             }
@@ -2791,35 +2745,20 @@ Include your token in requests using one of these methods:
                 systemAlerts.push({
                     url: '/admin/config/license',
                     level: 'danger',
-                    icon: 'exclamation-triangle',
+                    icon: 'icon-[tabler--alert-triangle]',
                     message: `The license key needs to be renewed or replaced in ${expiresDays} day${expiresDays !== 1 ? 's' : ''}`
                 });
             }
 
-            if (outlookAuthFlag && outlookAuthFlag.message) {
+            // OAuth2 apps whose token requests are being refused (setFlag() writes the failure
+            // into app meta). Shown on every admin page: the accounts on such an app sit
+            // disconnected until the operator acts, so the OAuth config page alone is not enough.
+            for (let { app, authFlag } of oauthAuthFlags) {
                 systemAlerts.push({
-                    url: outlookAuthFlag.url || '/admin/config/oauth/app/outlook',
+                    url: authFlag.url || `/admin/config/oauth/app/${encodeURIComponent(app)}`,
                     level: 'danger',
-                    icon: 'unlock-alt',
-                    message: outlookAuthFlag.message
-                });
-            }
-
-            if (gmailAuthFlag && gmailAuthFlag.message) {
-                systemAlerts.push({
-                    url: gmailAuthFlag.url || '/admin/config/oauth/app/gmail',
-                    level: 'danger',
-                    icon: 'unlock-alt',
-                    message: gmailAuthFlag.message
-                });
-            }
-
-            if (gmailServiceAuthFlag && gmailServiceAuthFlag.message) {
-                systemAlerts.push({
-                    url: gmailServiceAuthFlag.url || '/admin/config/oauth/app/gmailService',
-                    level: 'danger',
-                    icon: 'unlock-alt',
-                    message: gmailServiceAuthFlag.message
+                    icon: 'icon-[tabler--lock-open]',
+                    message: authFlag.message
                 });
             }
 
@@ -2827,7 +2766,7 @@ Include your token in requests using one of these methods:
                 systemAlerts.push({
                     url: '/admin/config/webhooks',
                     level: 'danger',
-                    icon: 'link',
+                    icon: 'icon-[tabler--link]',
                     message: 'Webhook delivery is failing'
                 });
             }
@@ -2836,7 +2775,7 @@ Include your token in requests using one of these methods:
                 systemAlerts.push({
                     url: '/admin/config/license',
                     level: 'warning',
-                    icon: 'key',
+                    icon: 'icon-[tabler--key]',
                     message: 'No license key registered'
                 });
             }
@@ -2852,7 +2791,7 @@ Include your token in requests using one of these methods:
                 systemAlerts.push({
                     url: '/admin/config/license',
                     level: 'warning',
-                    icon: 'key',
+                    icon: 'icon-[tabler--key]',
                     message: `Your ${licenseDetails.trial ? `trial ` : ''}license key will expire in ${licenseDetails.expiresDays} day${
                         licenseDetails.expiresDays !== 1 ? 's' : ''
                     }`
@@ -2861,30 +2800,19 @@ Include your token in requests using one of these methods:
 
             if (disableTokens) {
                 systemAlerts.push({
-                    url: '/admin/config/service#security',
+                    url: '/admin/config/security',
                     level: 'warning',
-                    icon: 'key',
+                    icon: 'icon-[tabler--key]',
                     message: `Access tokens are disabled for API requests`
                 });
             }
 
-            if (documentStoreUnavailable) {
+            if (documentStoreRemoved) {
                 systemAlerts.push({
                     url: '/admin',
                     level: 'danger',
-                    icon: 'database',
-                    message: `The Document Store is enabled in settings but unavailable. Start EmailEngine with the document store gate to use it, or disable the setting.`
-                });
-            }
-
-            if (consts.EE_DOCKER_LEGACY) {
-                systemAlerts.push({
-                    url: 'https://emailengine.app/docker',
-                    level: 'info',
-                    icon: 'docker',
-                    brand: true,
-                    message: `The Docker image you are currently using is deprecated. To ensure ongoing support, please transition to <code>postalsys/emailengine</code>.`,
-                    verbatim: true
+                    icon: 'icon-[tabler--database]',
+                    message: `The Document Store has been removed from EmailEngine. Downgrade to v${LAST_DOCUMENT_STORE_VERSION} if you still need it.`
                 });
             }
 
@@ -2896,7 +2824,14 @@ Include your token in requests using one of these methods:
                 systemAlerts = systemAlerts.filter(alert => alert.level === 'danger');
             }
 
+            // Whether the requester holds a session at all, so a public page (the hosted form's
+            // error page, for one) can tell a mailbox owner from an admin without reading
+            // authData, which describes the instance rather than the requester
+            const isAuthenticated = !!(request.auth && request.auth.isAuthenticated);
+
             return {
+                // the per-request CSP nonce every inline <script> carries (lib/security-headers.js)
+                cspNonce: request.app.cspNonce,
                 pageBrandName: pageBrandName || 'EmailEngine',
                 values: request.payload || {},
                 errors: (request.error && request.error.details) || {},
@@ -2905,13 +2840,17 @@ Include your token in requests using one of these methods:
                 licenseDetails,
                 trialPossible: !tract,
                 authData,
+                isAuthenticated,
+                // The dashboard is an admin destination: a link to it belongs on a page only for
+                // a requester who holds an admin session, or on an instance with no admin login
+                showDashboardLink: isAuthenticated || !(authData && authData.enabled),
                 packageData,
                 systemAlerts,
                 embeddedTemplateHeader,
                 embeddedTemplateHtmlHead,
                 currentYear: new Date().getFullYear(),
-                showDocumentStore: documentStoreFeatureEnabled && showDocumentStore,
-                documentStoreUnavailable,
+                documentStoreRemoved,
+                lastDocumentStoreVersion: LAST_DOCUMENT_STORE_VERSION,
                 updateBrowserInfo: !serviceUrl || !language || !timezone,
 
                 // Suppress large banner warnings when EENGINE_DISABLE_SETUP_WARNINGS is set
@@ -2928,7 +2867,9 @@ Include your token in requests using one of these methods:
             };
         }
     });
+}
 
+function registerResponseExtensions(server) {
     const preResponse = async (request, h) => {
         let response = request.response;
 
@@ -2936,14 +2877,16 @@ Include your token in requests using one of these methods:
             response = assertPreconditionResult;
         }
 
-        if (!response.isBoom) {
-            if (request.app.rateLimitHeaders) {
-                const headers = request.response.output ? request.response.output.headers : request.response.headers;
-                for (let key of Object.keys(request.app.rateLimitHeaders)) {
-                    headers[key] = request.app.rateLimitHeaders[key].toString();
-                }
+        // On error responses too: a client pacing itself by these headers needs them most on
+        // the request that failed, and the JSON error path below copies output.headers over
+        if (request.app.rateLimitHeaders) {
+            const headers = response.isBoom ? response.output.headers : response.headers;
+            for (let key of Object.keys(request.app.rateLimitHeaders)) {
+                headers[key] = request.app.rateLimitHeaders[key].toString();
             }
+        }
 
+        if (!response.isBoom) {
             return h.continue;
         }
 
@@ -2964,16 +2907,26 @@ Include your token in requests using one of these methods:
         }
 
         if (error.output && error.output.statusCode === 401 && error.output.headers && /^Bearer/.test(error.output.headers['WWW-Authenticate'])) {
-            // bearer auth failed
-            return h
-                .response({ statusCode: 401, error: 'Unauthorized', message: error.message })
-                .header('WWW-Authenticate', error.output.headers['WWW-Authenticate'])
-                .code(error.output.statusCode);
+            // bearer auth failed. The api-token strategy attaches the refusal reason as a code,
+            // and it is the one field worth carrying into this rebuilt payload
+            let payload = { statusCode: 401, error: 'Unauthorized', message: error.message };
+            if (error.output.payload.code) {
+                payload.code = error.output.payload.code;
+            }
+            return h.response(payload).header('WWW-Authenticate', error.output.headers['WWW-Authenticate']).code(error.output.statusCode);
         }
 
-        if (request.errorInfo && request.route && request.route.settings && request.route.settings.tags && request.route.settings.tags.includes('api')) {
-            // JSON response for API requests
+        const routeTags = (request.route && request.route.settings && request.route.settings.tags) || [];
 
+        // `external` covers the MCP endpoint and its OAuth routes: machine-facing surfaces whose
+        // clients expect JSON errors, never the admin HTML error page. Narrower than
+        // isMachineRoute() on purpose: that one also covers `static`, and a browser following a
+        // link to a missing asset is better served the themed error page than a JSON body
+        const wantsJsonError = routeTags.includes('api') || routeTags.includes('external');
+
+        if (request.errorInfo && wantsJsonError) {
+            // JSON response for API requests. A 404 thrown without a code already got NotFound
+            // from errorCodeExt(), registered ahead of this handler
             let res = h.response(request.errorInfo);
             if (error.output.headers) {
                 for (let key of Object.keys(error.output.headers)) {
@@ -2984,15 +2937,12 @@ Include your token in requests using one of these methods:
             return res.code(request.errorInfo.statusCode || 500);
         }
 
-        const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
-        const isApiRoute = tags.includes('api') || tags.includes('test');
-
-        if (isApiRoute) {
+        if (wantsJsonError || routeTags.includes('test')) {
             // API path
             return h.response(request.errorInfo).code(request.errorInfo.statusCode || 500);
         }
 
-        logger.error({ path: request.path, method: request.method, err: error });
+        logger[isClientError(error) ? 'debug' : 'error']({ msg: 'Web request failed', path: request.path, method: request.method, err: error });
 
         return h
             .view('error', ctx, {
@@ -3001,12 +2951,26 @@ Include your token in requests using one of these methods:
             .code(error.output.statusCode);
     };
 
+    // First: fills in the default code of an error body before preResponse copies it
+    server.ext('onPreResponse', errorCodeExt);
     server.ext('onPreResponse', preResponse);
 
+    // After preResponse on purpose: it replaces an error response with the rendered error page
+    // or a JSON body, and the headers have to land on whatever is actually sent
+    server.ext('onPreResponse', securityHeadersExt({ cspMode: CSP_MODE }));
+
+    // Deprecation, Sunset and Link on the routes that declare plugins.deprecation, also after
+    // preResponse for the same reason
+    server.ext('onPreResponse', deprecationExt({ logger }));
+}
+
+function registerTotpExtension(server) {
     server.ext('onPostAuth', async (request, h) => {
         if (request.requireTotp) {
-            // Redirect authenticated pages to login page if TOTP is required
-            let url = new URL(`admin/login`, 'http://localhost');
+            // The password step is done and only the second factor is missing, so the session
+            // goes to the TOTP prompt rather than back to the login form, which would ask for
+            // the password again
+            let url = new URL(`admin/totp`, 'http://localhost');
 
             let nextUrl = (request.query && request.query.next) || (request.payload && request.payload.next) || false;
             if (nextUrl) {
@@ -3017,36 +2981,20 @@ Include your token in requests using one of these methods:
         }
         return h.continue;
     });
+}
 
+function registerChangesRoute(server) {
     server.route({
         method: 'GET',
         path: '/admin/changes',
 
-        async handler(request, h) {
-            request.app.stream = new ResponseStream();
-            finished(request.app.stream, err => request.app.stream.finalize(err));
-            setImmediate(() => {
-                try {
-                    request.app.stream.write(`: EmailEngine v${packageData.version}\n\n`);
-                } catch (err) {
-                    // ignore
-                }
-            });
-            return h
-                .response(request.app.stream)
-                .header('X-Accel-Buffering', 'no')
-                .header('Connection', 'keep-alive')
-                .header('Cache-Control', 'no-cache')
-                .type('text/event-stream');
-        }
+        // Same feed as /v1/changes (lib/api-routes/changes-routes.js), opened through the shared
+        // helper so the two can not drift apart on framing or on stream cleanup.
+        handler: openChangeStream
     });
+}
 
-    // setup web UI
-    routesUi(server, call);
-
-    // setup "Bull board" routes
-    await bullBoardRoutes({ server });
-
+function registerMetricsRoute(server) {
     server.route({
         method: 'GET',
         path: '/metrics',
@@ -3056,14 +3004,17 @@ Include your token in requests using one of these methods:
             return h.response(renderedMetrics).type('text/plain');
         },
         options: {
-            tags: ['scope:metrics'],
+            // external: a Prometheus scraper wants JSON errors and no CSRF or page policy
+            tags: ['scope:metrics', 'external'],
             auth: {
                 strategy: 'api-token',
                 mode: 'required'
             }
         }
     });
+}
 
+function registerNotFoundRoute(server) {
     server.route({
         method: '*',
         path: '/{any*}',
@@ -3071,7 +3022,9 @@ Include your token in requests using one of these methods:
             throw Boom.notFound(request.app.gt.gettext('Requested page not found')); // 404
         }
     });
+}
 
+async function startApiListener(server, reusePortListener) {
     await server.start();
 
     if (USE_REUSE_PORT) {
@@ -3102,28 +3055,65 @@ Include your token in requests using one of these methods:
             }
         });
     }
+}
 
-    // trigger a request to cache swagger.json
+async function warnUntrustedForwardedFor() {
+    // An IP allowlist is only as trustworthy as the address it matches against. If the deployment
+    // takes the client address from X-Forwarded-For but does not say which peers may set it, any
+    // client that can reach this port can present whatever address the allowlist expects.
+    //
+    // Fired on the configuration rather than on the admin allowlist alone: per-token
+    // `restrictions.addresses` reads the same resolved address and is just as spoofable, and those
+    // live on individual token records rather than in a startup value, so there is nothing to test
+    // for here - an instance in this state cannot rely on either control.
+    //
+    // Length-checked, not just null-checked: readEnvList returns [] for a variable that is present
+    // but empty (an unset shell interpolation, an empty secret), which is truthy. resolveClientIp
+    // treats that as no proxies configured, so the warning has to agree or it goes quiet in
+    // exactly the deployment it exists to warn.
+    if (!API_PROXY_ADDRESSES?.length && (await settings.get('enableApiProxy'))) {
+        logger.warn({
+            msg:
+                'X-Forwarded-For is trusted from any peer, so the resolved client address is caller-controlled. ' +
+                'The admin IP allowlist and per-token restrictions.addresses cannot be relied on in this configuration. ' +
+                'Set EENGINE_API_PROXY_ADDRESSES to the addresses of your proxies, or disable the API proxy setting.',
+            component: 'api',
+            allowedAddresses: ADMIN_ACCESS_ADDRESSES && ADMIN_ACCESS_ADDRESSES.length ? ADMIN_ACCESS_ADDRESSES : null
+        });
+    }
+}
+
+function warmApiReference(server) {
+    // Warm the swagger.json cache, and with it the /admin/reference render model - which
+    // reads the same document back and costs ~12ms to build. Doing both here keeps that
+    // work off the first visitor's request.
     setImmediate(() => {
-        server
-            .inject({
-                method: 'get',
-                url: '/swagger.json'
-            })
-            .then(res => {
-                logger.debug({ msg: 'Triggered swagger caching request', statusCode: res.statusCode });
+        getApiReferenceModel(server)
+            .then(model => {
+                logger.debug({ msg: 'Built the API reference model', operations: model.operationCount });
             })
             .catch(err => {
-                logger.debug({ msg: 'Failed to trigger swagger caching request', err });
+                logger.debug({ msg: 'Failed to build the API reference model', err });
             });
     });
+}
 
-    // renew TLS certificates if needed
+function scheduleCertificateReconciler(certHandler) {
+    // Keep the configured hostnames supplied with certificates.
+    //
+    // This used to be a renewal timer and nothing else: it read the certificate for the service
+    // domain and, if one existed, asked whether it was due for replacement. A hostname with no
+    // certificate at all was therefore never provisioned by it - not on a fresh install, not after
+    // a flushed Redis, not after a restored backup - and the only way to get a first certificate
+    // was a checkbox in the admin UI that ordered one in the foreground. An instance whose record
+    // was lost stayed down until somebody noticed and clicked it twice.
+    //
+    // The reconciler in lib/tls/provision.js owns the whole decision now, including the renewal
+    // one, and it is the only thing that orders certificates. The admin UI's button asks it to run
+    // immediately rather than doing the work itself. A first order still needs a listener with TLS
+    // switched on, which is what the checkbox used to be; see listenersServeTls() there.
     setInterval(() => {
         async function handler() {
-            let serviceDomain = await getServiceDomain();
-            let currentCert = await certHandler.getCertificate(serviceDomain, true);
-
             try {
                 await runPrechecks(redis);
                 assertPreconditionResult = false;
@@ -3131,35 +3121,118 @@ Include your token in requests using one of these methods:
                 assertPreconditionResult = Boom.boomify(err);
             }
 
-            if (
-                IS_PRIMARY_API_WORKER &&
-                currentCert &&
-                currentCert.validTo < new Date(Date.now() - RENEW_TLS_AFTER) &&
-                (!currentCert.lastCheck || currentCert.lastCheck < new Date(Date.now() - BLOCK_TLS_RENEW))
-            ) {
-                try {
-                    await certHandler.acquireCert(serviceDomain);
-                    await call({ cmd: 'smtpReload' });
-                } catch (err) {
-                    logger.error({ err });
-                } finally {
-                    try {
-                        await certHandler.setCertificateData(serviceDomain, { lastCheck: new Date() });
-                    } catch (err) {
-                        logger.error({ msg: 'Failed to set certificate data', serviceDomain, err });
-                    }
-                }
+            if (!IS_PRIMARY_API_WORKER) {
+                return;
             }
+
+            await reconcileCertificates({ certs: certHandler, logger, call });
         }
 
         handler().catch(err => logger.error({ msg: 'Failed to run certificate handler', err }));
     }, TLS_RENEW_CHECK_INTERVAL).unref();
+}
+
+const init = async () => {
+    await loadTranslations();
+
+    gt.setLocale((await settings.get('locale')) || 'en');
+
+    registerHandlebarsHelpers(handlebars, { gt });
+
+    const { server, certHandler, apiTlsContext, reusePortListener } = await createApiServer();
+
+    decorateApiToolkit(server, certHandler, apiTlsContext);
+
+    registerLocaleExtension(server);
+    registerRequestContextExtension(server);
+
+    const openApiOptions = buildOpenApiOptions();
+
+    registerApiTokenAuth(server);
+
+    const secureCookie = await registerSessionAuth(server);
+
+    await registerOktaAuth(server, secureCookie);
+    await registerOidcAuth(server, secureCookie);
+
+    await registerServerPlugins(server);
+
+    // Position is not load-bearing: the document is generated from the finished route table on the
+    // first request, not at registration time
+    registerOpenApiRoute(server, openApiOptions);
+
+    registerRequestEvents(server);
+
+    // A revoked token, a deleted account or a changed session ends the change streams and MCP
+    // listen streams it opened now rather than at their next periodic re-check
+    onRevocation(() => {
+        recheckChangeStreams().catch(err => logger.error({ msg: 'Change stream re-check failed', err }));
+        mcpListen.recheckListenStreams().catch(err => logger.error({ msg: 'MCP listen stream re-check failed', err }));
+    });
+
+    registerStaticPageRoutes(server);
+    registerStaticFilesRoute(server);
+    registerHealthRoute(server);
+    registerRedirectRoute(server);
+    registerOpenTrackingRoute(server);
+    registerUnsubscribeRoute(server);
+    registerOutlookNotificationRoute(server);
+    registerOutlookLifecycleRoute(server);
+    registerOAuthCallbackRoute(server);
+
+    // setup every /v1 route module (wiring lives in lib/api-routes/index.js so the route table
+    // can be captured without booting this worker - see test/api-routes-table-test.js)
+    await registerApiRoutes({
+        server,
+        call,
+        notify,
+        metrics,
+        CORS_CONFIG,
+        FLAG_SORT_ORDER,
+        SMTP_TEST_HOST,
+        MAX_ATTACHMENT_SIZE,
+        MAX_BODY_SIZE,
+        MAX_PAYLOAD_TIMEOUT,
+        mcpFeatureEnabled,
+        oauth2Schema,
+        imapSchema,
+        smtpSchema,
+        AccountTypeSchema,
+        OAuth2ProviderSchema
+    });
+
+    await registerCsrfProtection(server, secureCookie);
+
+    registerViews(server);
+
+    registerResponseExtensions(server);
+
+    registerTotpExtension(server);
+
+    // After the TOTP step and the error pages, see registerDbscExtensions()
+    registerDbscExtensions(server);
+
+    registerChangesRoute(server);
+
+    // setup web UI
+    routesUi(server, call);
+
+    registerMetricsRoute(server);
+    registerNotFoundRoute(server);
+
+    await startApiListener(server, reusePortListener);
+
+    await warnUntrustedForwardedFor();
+
+    warmApiReference(server);
+
+    scheduleCertificateReconciler(certHandler);
 };
 
 // dynamic imports first, use a wrapper function or eslint parser will crash
 init()
     .then(() => {
-        logger.debug({
+        logger.info({
             msg: 'Started API server thread',
             port: API_PORT,
             host: API_HOST,
@@ -3180,6 +3253,6 @@ init()
         }, 10 * 1000).unref();
     })
     .catch(err => {
-        logger.error({ msg: 'Failed to initialize API', err });
+        logger.fatal({ msg: 'Failed to initialize API', err });
         logger.flush(() => process.exit(3));
     });

@@ -1,85 +1,16 @@
 {{> templates_header}}
 
-<nav aria-label="breadcrumb" class="mt-4 mb-4">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="/admin/templates">Templates</a></li>
-
-        {{#if account}}
-        <li class="breadcrumb-item"><a href="{{accountTemplatesLink}}">{{account.name}}</a></li>
-        {{/if}}
-
-        <li class="breadcrumb-item active" aria-current="page">New</li>
-
-    </ol>
-</nav>
+{{!-- the account level renders only for account-scoped templates (ui/breadcrumb skips empty levels) --}}
+{{> ui/breadcrumb parentHref="/admin/templates" parentLabel="Templates" midHref=(when account accountTemplatesLink) midLabel=account.name current="New" class="mt-6 mb-6"}}
 
 
 <form method="post" action="/admin/templates/new" id="edit-form">
-    <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
+    <input type="hidden" name="crumb" value="{{crumb}}" />
     <input type="hidden" name="account" value="{{values.account}}">
 
     {{>template_form}}
 
-    <div class="mb-4">
-        <button type="submit" class="btn btn-primary btn-icon-split">
-            <span class="icon text-white-50">
-                <i class="fas fa-plus"></i>
-            </span>
-            <span class="text">Create template</span>
-        </button>
+    <div class="mb-6">
+        {{> ui/btn label="Create template" type="submit" icon="icon-[tabler--plus]"}}
     </div>
 </form>
-
-<script src="/static/js/ace/ace.js"></script>
-
-<script>
-    document.addEventListener('DOMContentLoaded', () => {
-
-        const editors = new Map();
-
-        const editorHtml = ace.edit("editor-html");
-        editorHtml.setTheme("ace/theme/xcode");
-        editorHtml.session.setMode("ace/mode/handlebars");
-        editorHtml.session.setValue(JSON.parse(document.getElementById('contentHtmlJson').value || '""'));
-
-        editors.set("editor-html", editorHtml);
-
-        const editorText = ace.edit("editor-text");
-        editorText.setTheme("ace/theme/xcode");
-        editorText.session.setMode("ace/mode/handlebars");
-        editorText.session.setValue(JSON.parse(document.getElementById('contentTextJson').value || '""'));
-
-        editors.set("editor-text", editorText);
-
-        document.getElementById('edit-form').addEventListener('submit', () => {
-            document.getElementById('contentHtml').value = editorHtml.getValue();
-            document.getElementById('contentText').value = editorText.getValue();
-        });
-
-        for (let toggleElm of document.querySelectorAll('.toggle-fullscreen')) {
-            let target = toggleElm.dataset.target;
-            if (!editors.has(target)) {
-                continue
-            }
-            let targetElm = document.getElementById(target);
-            let editor = editors.get(target)
-
-            toggleElm.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                targetElm.classList.toggle('full-screen-div');
-                editor.resize();
-                editor.focus();
-            });
-
-            targetElm.addEventListener('keydown', e => {
-                if (e.key === 'Escape' && targetElm.classList.contains('full-screen-div')) {
-                    targetElm.classList.remove('full-screen-div')
-                    editor.resize();
-                    editor.focus();
-                }
-            });
-        }
-    });
-
-</script>

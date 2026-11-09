@@ -6,11 +6,15 @@ KEYS:
   [1] listKey - Set key containing account IDs
 
 ARGV:
-  [1] filterState - Account state to filter by ('*' for all states)
+  [1] filterState - Account state to filter by: '*' for all states, a single state,
+      or a comma-separated list of states (entry matches any listed state)
   [2] skip - Number of matching entries to skip (pagination offset)
   [3] count - Maximum number of entries to return
   [4] prefix - Key prefix for account data hashes (e.g., "ee:")
-  [5] strsearch - Case-insensitive substring to search in account, name, or email fields
+  [5] strsearch - Case-insensitive substring to search in account, name, or email fields.
+      Folded here as well as by the caller, so a caller that passes it as typed still gets a
+      case-insensitive search. string.lower() folds ASCII only; a caller that has to match
+      non-ASCII has to fold the needle itself before passing it in.
 
 Returns:
   Array with:
@@ -18,7 +22,8 @@ Returns:
     [2] Skip value used
     [3] Array of account data (HGETALL results for each matching account)
 
-NOTE: This script is not compatible with Redis clustering if using account id as the hash slot key
+NOTE: Single-node only. The per-account hashes are built from the prefix inside the script
+instead of being declared in KEYS, so a Redis Cluster cannot route or slot-check them.
 --]]
 
 local listKey = KEYS[1];
@@ -27,14 +32,25 @@ local filterState = ARGV[1];
 local skip = tonumber(ARGV[2]) or 0;
 local count = tonumber(ARGV[3]) or 0;
 local prefix = ARGV[4];
-local strsearch = ARGV[5];
+local strsearch = string.lower(ARGV[5] or '');
+
+-- filterState may be a comma-separated list; build a lookup set once
+local stateSet = nil;
+if filterState ~= '*' then
+    stateSet = {};
+    for stateEntry in string.gmatch(filterState, "([^,]+)") do
+        stateSet[stateEntry] = true;
+    end
+end
 
 local total = redis.call("SCARD", listKey);  -- Get total account count
 
 local list = redis.call("SMEMBERS", listKey);  -- Load all account IDs
 
--- Early return if offset exceeds total
-if skip >= total then
+-- Early return if offset exceeds total. Only for an unfiltered listing: with a state filter or a
+-- search the first value is the number of MATCHING accounts, which SCARD is not, so a page past the
+-- end used to report every account as matching.
+if skip >= total and filterState == '*' and strsearch == '' then
 	return {total,skip, {}}
 end
 
@@ -75,7 +91,7 @@ for index, account in ipairs(list) do
     end
 
     -- Check if account matches filter criteria
-    if (filterState == '*' or filterState == state) and strmatch then      
+    if (filterState == '*' or (state and stateSet[state])) and strmatch then      
 
         if shouldSkip == 0 then
             -- Pagination offset reached, can include this entry

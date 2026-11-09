@@ -9,7 +9,7 @@
     <meta name="description" content="EmailEngine Application page; The Ultimate Email API for Developers" />
     <meta name="author" content="Postal Systems OÜ">
 
-    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} &ndash;
+    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} -
         {{pageTitle}}{{/if}}{{/if}}</title>
 
     <link rel="apple-touch-icon" href="/static/favicon/apple-touch-icon.png" sizes="180x180" />
@@ -18,12 +18,14 @@
     <link rel="manifest" href="/static/favicon/manifest.json" />
     <link rel="icon" href="/favicon.ico" />
 
-    <link href="/static/vendor/fontawesome-free/css/all.min.css" rel="stylesheet" type="text/css">
+    {{> public_theme_init}}
 
-    <link href="/static/fonts/nunito-font.css" rel="stylesheet">
+    <link href="/static/fonts/pt-sans-font.css" rel="stylesheet">
 
-    <link href="/static/css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="/static/css/app.css" rel="stylesheet">
+    {{!-- Public pages use a standalone, framework-free stylesheet so operators
+    can restyle them through the head/header injection blocks below - see the
+    override notes at the top of static/css/public.css --}}
+    <link href="/static/css/public.css" rel="stylesheet">
 
     {{#if httpRedirectUrl}}
     <meta http-equiv="refresh" content="0;URL='{{httpRedirectUrl}}'" />
@@ -35,55 +37,26 @@
 
 </head>
 
-<body class="bg-gradient-primary">
+<body class="ee-page">
 
-    <div class="container">
+    <main class="ee-card">
 
-        <!-- Outer Row -->
-        <div class="row justify-content-center">
+        {{> public_alerts}}
 
-            <div class="col-xl-10 col-lg-12 col-md-9">
+        <div class="ee-card-body">
 
-                <div class="card o-hidden border-0 shadow-lg my-5">
-                    <div class="card-body p-0">
-                        <!-- Nested Row within Card Body -->
-
-                        {{> alerts}}
-
-                        <div class="p-5">
-
-                            {{#if embeddedTemplateHeader}}
-                            <div>
-                                {{{embeddedTemplateHeader}}}
-                            </div>
-                            {{/if}}
-
-
-                            {{{content}}}
-                        </div>
-
-                    </div>
-                </div>
-
+            {{#if embeddedTemplateHeader}}
+            <div class="ee-custom-header">
+                {{{embeddedTemplateHeader}}}
             </div>
+            {{/if}}
 
+            {{{content}}}
         </div>
 
-    </div>
+    </main>
 
-    <!-- Bootstrap core JavaScript-->
-    <script src="/static/js/jquery-3.6.0.min.js" crossorigin="anonymous"></script>
-    <script src="/static/bootstrap-4.6.2-dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
-
-    <!-- Core plugin JavaScript-->
-    <script src="/static/vendor/jquery-easing/jquery.easing.min.js"></script>
-
-    <!-- Custom scripts for all pages-->
-    <script src="/static/js/sb-admin-2.min.js"></script>
-
-    <script src="/static/js/clipboard.min.js"></script>
-
-    <script src="/static/js/app.js"></script>
+    <script data-cfasync="false" src="/static/js/public.js"></script>
 
 </body>
 

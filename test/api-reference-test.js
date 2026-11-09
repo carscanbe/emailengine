@@ -1,0 +1,854 @@
+'use strict';
+
+// Unit tests for the API reference model (lib/api-reference/).
+//
+// The spec is generated in-process from the REAL route table (test/helpers/build-openapi-spec.js)
+// rather than read from swagger.json, which is gitignored - `npm run swagger` writes it by
+// booting a server, so it is absent on a fresh checkout and in CI. Generating it here also
+// means these assertions run against what the current routes actually produce, so a route
+// whose spec entry regresses (a missing 2xx, an unresolvable $ref) fails here.
+//
+// Only the pure modules of lib/api-reference are exercised here; the request-scoped half
+// (lib/api-reference/index.js) is covered by test/e2e/reference.spec.js against a live server.
+
+const { test, before } = require('node:test');
+const assert = require('node:assert').strict;
+
+const { redis } = require('../lib/db');
+const registerRedisTeardown = require('./helpers/redis-teardown');
+const { buildOpenApiSpec } = require('./helpers/build-openapi-spec');
+
+const { buildModel } = require('../lib/api-reference/model');
+const { buildSchemaTree, buildExample, typeLabel, rowExample, enumInfo } = require('../lib/api-reference/schema-tree');
+const { buildCodeSamples, readCodeSamples } = require('../lib/api-reference/code-samples');
+const { formatDescription, slugify, constraintList } = require('../lib/api-reference/format');
+const { DECLARABLE_IMPACTS } = require('../lib/api-routes/operation-impact');
+
+let spec;
+let model;
+let allOperations;
+
+before(async () => {
+    spec = await buildOpenApiSpec();
+    model = buildModel(spec);
+    allOperations = model.tags.flatMap(tag => tag.operations);
+});
+
+// Requiring lib/api-routes opens Redis and BullMQ handles that outlive the tests.
+registerRedisTeardown(redis);
+
+function walkTree(node, visit) {
+    if (!node) {
+        return;
+    }
+    visit(node);
+    for (const child of node.children || []) {
+        walkTree(child, visit);
+    }
+    for (const variant of node.variants || []) {
+        walkTree(variant, visit);
+    }
+}
+
+function everyTree(visit) {
+    for (const operation of allOperations) {
+        if (operation.body) {
+            walkTree(operation.body.tree, visit);
+        }
+        for (const response of operation.responses) {
+            walkTree(response.tree, visit);
+        }
+    }
+}
+
+test('API reference model', async t => {
+    await t.test('covers every operation in the spec', () => {
+        const specOperations = Object.values(spec.paths).flatMap(pathItem =>
+            Object.keys(pathItem).filter(key => ['get', 'post', 'put', 'patch', 'delete'].includes(key))
+        );
+
+        assert.equal(allOperations.length, specOperations.length);
+        assert.ok(model.tags.length > 10);
+    });
+
+    await t.test('operation ids and tab ids are unique across the document', () => {
+        const ids = allOperations.map(operation => operation.id);
+        assert.equal(new Set(ids).size, ids.length, 'operationIds collide');
+
+        const tabIds = allOperations.flatMap(operation => operation.responses.map(response => response.tabId));
+        assert.equal(new Set(tabIds).size, tabIds.length, 'response tab ids collide');
+    });
+
+    await t.test('the sidebar filter can match on what an operation accepts', () => {
+        // The filter runs over data-search, not over the row it renders, so a parameter or
+        // request-body field name has to be in the index for "mailbox" to find the endpoints
+        // that take one rather than only the paths spelling it out
+        const messages = model.searchIndex.find(entry => entry.id === 'getV1AccountAccountMessages');
+        assert.ok(messages);
+        assert.ok(messages.search.includes('path'), 'query parameter name missing from the index');
+        assert.ok(messages.search.includes('getV1AccountAccountMessages'), 'operation id missing from the index');
+
+        const submit = model.searchIndex.find(entry => entry.id === 'postV1AccountAccountSubmit');
+        assert.ok(submit.search.includes('mailMerge'), 'request body property missing from the index');
+        // nested (reference.forwardAttachments), to prove the whole tree is walked and not
+        // just the top level
+        assert.ok(submit.search.includes('forwardAttachments'), 'nested request body property missing from the index');
+
+        // ...and what the row itself shows still matches, since the corpus replaced the
+        // template's own interpolation of those fields
+        assert.ok(messages.search.includes(messages.path));
+        assert.ok(messages.search.includes(messages.summary));
+        assert.ok(messages.search.includes(messages.tag));
+
+        // Path parameters are not added as separate terms because the path already spells
+        // them out - which only holds if every one of them is genuinely in there
+        for (const operation of allOperations) {
+            const entry = model.searchIndex.find(candidate => candidate.id === operation.id);
+            for (const parameter of operation.pathParams) {
+                assert.ok(entry.search.includes(parameter.name), `${operation.id}: path parameter "${parameter.name}" is not searchable`);
+            }
+        }
+    });
+
+    await t.test('every property is linkable and no two share an anchor on a page', () => {
+        // A tag page renders all of its operations at once, so the anchors only have to be
+        // unique within a tag - but a collision there means a deep link silently scrolls to
+        // the wrong field
+        for (const tag of model.tags) {
+            const anchors = [];
+
+            for (const operation of tag.operations) {
+                anchors.push(operation.id);
+                for (const parameter of [...operation.pathParams, ...operation.queryParams, ...operation.headerParams]) {
+                    anchors.push(parameter.anchor);
+                }
+                if (operation.body) {
+                    walkTree(operation.body.tree, node => node.anchor && anchors.push(node.anchor));
+                }
+                for (const response of operation.responses) {
+                    walkTree(response.tree, node => node.anchor && anchors.push(node.anchor));
+                }
+            }
+
+            assert.ok(anchors.length, `${tag.name} produced no anchors`);
+            assert.equal(new Set(anchors).size, anchors.length, `${tag.name} has colliding anchors`);
+
+            for (const anchor of anchors) {
+                // has to survive a URL fragment and getElementById without escaping
+                assert.match(anchor, /^[A-Za-z0-9_.-]+$/, `anchor "${anchor}" is not fragment safe`);
+            }
+        }
+
+        const account = allOperations.find(operation => operation.id === 'postV1Account');
+        assert.equal(account.body.tree.children[0].anchor, 'postV1Account.body.account');
+    });
+
+    await t.test('required properties and parameters are listed first', () => {
+        const account = allOperations.find(operation => operation.id === 'postV1Account');
+        const names = account.body.tree.children.map(child => child.name);
+
+        assert.deepEqual(names.slice(0, 2), ['account', 'name']);
+        assert.ok(account.body.tree.children[0].required);
+
+        // declared order is preserved within each group, so grouping never reshuffles the
+        // optional tail
+        const optional = account.body.tree.children.filter(child => !child.required).map(child => child.name);
+        assert.deepEqual(optional.slice(0, 3), ['email', 'expectedEmail', 'path']);
+
+        for (const operation of allOperations) {
+            for (const group of [operation.queryParams, operation.headerParams]) {
+                const firstOptional = group.findIndex(parameter => !parameter.required);
+                if (firstOptional >= 0) {
+                    assert.ok(
+                        group.slice(firstOptional).every(parameter => !parameter.required),
+                        `${operation.id} has a required parameter after an optional one`
+                    );
+                }
+            }
+        }
+    });
+
+    await t.test('the document introduction is rendered rather than restated', () => {
+        // views/reference/index.hbs shows this instead of prose of its own, so an
+        // info.description written with headings or raw HTML would surface as literal text
+        assert.ok(model.descriptionHtml, 'no introduction reached the model');
+        assert.ok(!/&lt;h[1-6]&gt;|&lt;strong&gt;/.test(model.descriptionHtml), 'introduction contains escaped raw HTML');
+    });
+
+    await t.test('every operation declares a success response in the spec', () => {
+        // The streaming and binary downloads have no response.schema for the generator to
+        // derive a 200 from, so they need an explicit entry (apiResponses() in
+        // lib/schemas.js). Without it the generated spec documents only their error cases
+        // and EVERY consumer - this page, Postman, code generators - sees an operation
+        // with no success response.
+        const missing = [];
+        for (const path of Object.keys(spec.paths)) {
+            for (const method of Object.keys(spec.paths[path])) {
+                const codes = Object.keys(spec.paths[path][method].responses || {});
+                if (!codes.some(code => /^2/.test(code))) {
+                    missing.push(`${method.toUpperCase()} ${path}`);
+                }
+            }
+        }
+        assert.deepEqual(missing, []);
+    });
+
+    await t.test('the model carries a success response through for every operation', () => {
+        for (const operation of allOperations) {
+            const success = operation.responses.filter(response => response.variant === 'success');
+            assert.ok(success.length, `${operation.methodLabel} ${operation.path} has no 2xx response`);
+        }
+
+        // the binary download is the case that used to be missing entirely
+        const download = allOperations.find(operation => operation.id === 'getV1AccountAccountAttachmentAttachment');
+        assert.ok(download);
+        assert.ok(download.responses.some(response => response.code === '200'));
+    });
+
+    await t.test('every operation documents what its success response returns', () => {
+        // "Successful" is the generator's placeholder; apiResponses() in lib/schemas.js
+        // replaces it with prose per operation, which is what a caller actually needs
+        const placeholder = [];
+        for (const path of Object.keys(spec.paths)) {
+            for (const method of Object.keys(spec.paths[path])) {
+                const ok = (spec.paths[path][method].responses || {})['200'];
+                if (!ok || !ok.description || ok.description === 'Successful') {
+                    placeholder.push(`${method.toUpperCase()} ${path}`);
+                }
+            }
+        }
+        assert.deepEqual(placeholder, []);
+    });
+
+    await t.test('documented enum values reach the model with their descriptions', () => {
+        const documented = [];
+        everyTree(node => {
+            if (node.enumDocumented) {
+                documented.push(node);
+            }
+        });
+
+        assert.ok(documented.length, 'no enum carried per-value descriptions');
+
+        // every value of a documented enum must be described - a half-filled map is worse
+        // than none, because the gaps read as "this value means nothing"
+        for (const node of documented) {
+            for (const entry of node.enumValues) {
+                assert.ok(entry.description, `${node.name}: value "${entry.value}" has no description`);
+            }
+        }
+
+        // the account state is the one operators hit most, so assert it specifically
+        const state = documented.find(node => node.enumValues.some(entry => entry.value === 'authenticationError'));
+        assert.ok(state, 'account state enum is not documented');
+        assert.match(state.enumValues.find(entry => entry.value === 'connected').description, /steady state/);
+    });
+
+    await t.test('the Try it warning tracks what an operation actually does', () => {
+        // The panel used to carry one warning on all 82 operations, 42 of which only read,
+        // which is how a reader learns to skim past the ones that matter. Weight now follows
+        // lib/api-routes/operation-impact.js: nothing on a read, a muted line on a write, a
+        // warning where the effect cannot be taken back.
+        // The vocabulary comes from the module that owns it. A hand-written copy here drifted the
+        // moment IMPACT gained a member.
+        const known = DECLARABLE_IMPACTS;
+        const declared = [];
+        for (const path of Object.keys(spec.paths)) {
+            for (const method of Object.keys(spec.paths[path])) {
+                const impact = spec.paths[path][method]['x-ee-impact'];
+                if (typeof impact === 'undefined') {
+                    continue;
+                }
+                assert.ok(known.has(impact), `${method.toUpperCase()} ${path} declares an unknown impact "${impact}"`);
+                declared.push(`${method.toUpperCase()} ${path}`);
+            }
+        }
+        assert.ok(declared.length >= 20, `only ${declared.length} operations declare an impact`);
+
+        // Tripwire: the method-derived default calls a DELETE a plain write, so a new one that
+        // forgets the declaration would quietly drop from a warning to a muted line.
+        const undeclared = [];
+        for (const path of Object.keys(spec.paths)) {
+            if (spec.paths[path].delete && spec.paths[path].delete['x-ee-impact'] !== 'destructive') {
+                undeclared.push(`DELETE ${path}`);
+            }
+        }
+        assert.deepEqual(undeclared, [], 'every DELETE has to declare IMPACT.DESTRUCTIVE');
+
+        // ...and the model turns that into what the panel renders
+        const remove = allOperations.find(operation => operation.id === 'deleteV1AccountAccount');
+        assert.ok(remove.tryImpact.warn, 'removing an account renders no warning');
+        assert.match(remove.tryImpact.text, /cannot be undone/);
+
+        const submit = allOperations.find(operation => operation.id === 'postV1AccountAccountSubmit');
+        assert.ok(submit.tryImpact.warn);
+        assert.match(submit.tryImpact.text, /sends real email/);
+
+        // A read says nothing at all, whether it is a GET or a POST that only searches
+        assert.equal(allOperations.find(operation => operation.id === 'getV1Stats').tryImpact, null);
+        assert.equal(allOperations.find(operation => operation.id === 'postV1AccountAccountSearch').tryImpact, null);
+
+        // An ordinary write gets the muted line, not a warning box
+        const update = allOperations.find(operation => operation.id === 'putV1AccountAccount');
+        assert.equal(update.tryImpact.warn, false);
+
+        // No GET may end up with a warning through the default
+        for (const operation of allOperations.filter(candidate => candidate.method === 'get')) {
+            assert.equal(operation.tryImpact, null, `${operation.id} warns on a GET`);
+        }
+    });
+
+    await t.test('behavior notes reach the operations that need them', () => {
+        const withBehavior = allOperations.filter(operation => operation.behavior.length);
+        assert.ok(withBehavior.length >= 15, `only ${withBehavior.length} operations carry behavior notes`);
+
+        // submitting is the case the notes exist for: a 2xx means queued, not sent
+        const submit = allOperations.find(operation => operation.id === 'postV1AccountAccountSubmit');
+        assert.ok(submit.behavior.length);
+        assert.ok(
+            submit.behavior.some(note => /queued, not that it was sent/.test(note)),
+            'the submit operation does not warn that a 2xx only means queued'
+        );
+
+        // notes are pre-escaped for the template's triple stash
+        for (const operation of allOperations) {
+            for (const note of operation.behavior) {
+                assert.ok(!/<(?!code|a|br|\/)/.test(note), `unexpected markup in a behavior note on ${operation.id}`);
+            }
+        }
+    });
+
+    await t.test('behavior notes also reach the standard description field', () => {
+        // Routes declare each note twice: in the `notes` array, which the generator joins
+        // into `description` for every consumer of the spec, and under x-ee-behavior so
+        // this renderer can pull it into a callout. A note present in only the extension
+        // would be invisible to Postman, Redoc and code generators - which is the audience
+        // most likely to ship "a 2xx means sent".
+        const missing = [];
+        for (const path of Object.keys(spec.paths)) {
+            for (const method of Object.keys(spec.paths[path])) {
+                const operation = spec.paths[path][method];
+                for (const note of operation['x-ee-behavior'] || []) {
+                    if (!(operation.description || '').includes(note)) {
+                        missing.push(`${method.toUpperCase()} ${path}: ${note.slice(0, 50)}...`);
+                    }
+                }
+            }
+        }
+        assert.deepEqual(missing, []);
+    });
+
+    await t.test('the operation prose does not repeat its behavior notes', () => {
+        // The notes arrive inside `description`, so the model has to strip them back out or
+        // the page shows each one twice - once in the prose, once in the callout.
+        for (const operation of allOperations) {
+            for (const note of operation.behavior) {
+                assert.ok(!operation.descriptionHtml.includes(note), `${operation.id} renders a behavior note in its prose as well as the callout`);
+            }
+        }
+    });
+
+    await t.test('every schema node resolves to a concrete type', () => {
+        // "any" means a $ref the tree builder failed to follow - the bug that made
+        // 46 array properties render as "array of any"
+        const unresolved = [];
+        everyTree(node => {
+            if (!node.typeLabel || node.typeLabel.includes('any')) {
+                unresolved.push(`${node.name || '(root)'}: ${node.typeLabel}`);
+            }
+        });
+        assert.deepEqual(unresolved, []);
+    });
+
+    await t.test('no schema node is left circular or truncated', () => {
+        const flagged = [];
+        everyTree(node => {
+            if (node.circular || node.truncated || node.unresolved) {
+                flagged.push(node.name);
+            }
+        });
+        assert.deepEqual(flagged, []);
+    });
+
+    await t.test('anyOf branches are rendered as variants', () => {
+        const variants = [];
+        everyTree(node => {
+            if (node.variants.length) {
+                variants.push(node.typeLabel);
+            }
+        });
+
+        assert.ok(variants.length, 'no anyOf nodes found');
+        // The branch refs must be resolved for the summary line to be useful
+        for (const label of variants) {
+            assert.ok(label.includes(' or '), `variant label not composed: ${label}`);
+        }
+    });
+
+    await t.test('joi extensions become constraint chips', () => {
+        const chips = constraintList({
+            type: 'string',
+            maxLength: 256,
+            'x-convert': { trim: true, case: 'lower' },
+            'x-format': { uri: { scheme: ['http', 'https'] } },
+            'x-constraint': { single: true }
+        });
+
+        // no `trimmed`: joi trims 162 strings in the document, so it was the most common chip
+        // on the page and it never changed what a caller sends - see constraintList()
+        assert.deepEqual(chips, ['max 256 chars', 'URI (http, https)', 'lowercased', 'single value allowed']);
+    });
+
+    await t.test('a large character limit is stated as a size', () => {
+        assert.deepEqual(constraintList({ type: 'string', maxLength: 5 * 1024 * 1024 }), ['max 5 MB']);
+        assert.deepEqual(constraintList({ type: 'string', maxLength: 100 * 1024 }), ['max 100 KB']);
+        // below the threshold, and not a round size: the exact count is the honest answer
+        assert.deepEqual(constraintList({ type: 'string', maxLength: 1024 }), ['max 1024 chars']);
+        assert.deepEqual(constraintList({ type: 'string', maxLength: 2560 }), ['max 2560 chars']);
+        // a minimum alongside it would mix a character count with a byte size in one phrase
+        assert.deepEqual(constraintList({ type: 'string', minLength: 1, maxLength: 5 * 1024 * 1024 }), ['1 to 5242880 chars']);
+    });
+
+    await t.test('a sentinel anyOf branch renders as the schema plus an also-accepts line', () => {
+        // The generator publishes `.allow(false)` on an object as anyOf [schema, false] so a
+        // strict validator accepts real payloads; the reader still sees the object's own rows
+        const local = {
+            components: {
+                schemas: {
+                    Conf: { type: 'object', description: 'Settings', properties: { host: { type: 'string' } } }
+                }
+            }
+        };
+        const tree = buildSchemaTree(
+            local,
+            {
+                type: 'object',
+                properties: {
+                    conf: { anyOf: [{ $ref: '#/components/schemas/Conf' }, { type: 'boolean', enum: [false] }] },
+                    count: { anyOf: [{ type: 'integer' }, { type: 'boolean', enum: [false] }], description: 'Total' },
+                    either: { anyOf: [{ type: 'string' }, { type: 'object', properties: { a: { type: 'string' } } }] }
+                }
+            },
+            'x'
+        );
+
+        const [conf, count, either] = tree.children;
+        assert.equal(conf.typeLabel, 'object');
+        assert.deepEqual(conf.alsoAccepts, ['false']);
+        assert.deepEqual(
+            conf.children.map(child => child.name),
+            ['host']
+        );
+        assert.equal(count.typeLabel, 'integer');
+        assert.deepEqual(count.alsoAccepts, ['false']);
+        assert.match(count.descriptionHtml, /Total/);
+        // A real alternatives list is still a list of variants
+        assert.equal(either.variants.length, 2);
+    });
+
+    await t.test('array item types are resolved through $ref', () => {
+        const tree = buildSchemaTree(spec, { $ref: '#/components/schemas/AccountsFilterResponse' });
+        assert.ok(tree);
+
+        const arrays = [];
+        walkTree(tree, node => {
+            if ((node.typeLabel || '').startsWith('array of')) {
+                arrays.push(node.typeLabel);
+            }
+        });
+
+        assert.ok(arrays.length);
+        assert.ok(!arrays.some(label => label.endsWith('any')));
+    });
+});
+
+test('API reference examples', async t => {
+    await t.test('every JSON response carries an example', () => {
+        const missing = [];
+        for (const operation of allOperations) {
+            for (const response of operation.responses) {
+                if (response.tree && !response.exampleJson) {
+                    missing.push(`${operation.id} ${response.code}`);
+                }
+            }
+        }
+        assert.deepEqual(missing, []);
+    });
+
+    await t.test('examples are valid JSON', () => {
+        for (const operation of allOperations) {
+            if (operation.body && operation.body.exampleJson) {
+                assert.doesNotThrow(() => JSON.parse(operation.body.exampleJson), `${operation.id} request example`);
+            }
+            for (const response of operation.responses) {
+                if (response.exampleJson) {
+                    assert.doesNotThrow(() => JSON.parse(response.exampleJson), `${operation.id} ${response.code} example`);
+                }
+            }
+        }
+    });
+
+    await t.test('a schema example wins over synthesis', () => {
+        const value = buildExample(spec, { type: 'string', example: 'chosen', default: 'ignored' });
+        assert.equal(value, 'chosen');
+    });
+
+    await t.test('scalars without an example fall back to default, enum, then format', () => {
+        assert.equal(buildExample(spec, { type: 'string', default: 'fallback' }), 'fallback');
+        assert.equal(buildExample(spec, { type: 'string', enum: ['first', 'second'] }), 'first');
+        assert.equal(buildExample(spec, { type: 'string', format: 'date-time' }), '2026-01-15T09:30:00.000Z');
+        assert.equal(buildExample(spec, { type: 'boolean' }), false);
+    });
+
+    await t.test('the complete view expands past an object-level example', () => {
+        const schema = {
+            type: 'object',
+            example: { shown: 'curated' },
+            properties: {
+                shown: { type: 'string', example: 'own' },
+                hidden: { type: 'string', example: 'also documented' }
+            }
+        };
+
+        // The typical view is the curated payload, exactly as its author wrote it
+        assert.deepEqual(buildExample(spec, schema), { shown: 'curated' });
+        // The complete view names every key. A property's own example wins, which is what
+        // keeps it in step with the value rendered on that property's row.
+        assert.deepEqual(buildExample(spec, schema, { complete: true }), { shown: 'own', hidden: 'also documented' });
+    });
+
+    await t.test('a property inherits the matching slice of an ancestor example', () => {
+        const tree = buildSchemaTree(
+            spec,
+            {
+                type: 'object',
+                example: { nested: { leaf: 'from the parent' } },
+                properties: {
+                    nested: { type: 'object', properties: { leaf: { type: 'string' } } }
+                }
+            },
+            'x'
+        );
+
+        const leaf = tree.children[0].children[0];
+        assert.equal(leaf.example.text, '"from the parent"');
+    });
+
+    await t.test('rows that would say nothing show no example', () => {
+        // Each of these has an example in the schema and still renders without one - see
+        // rowExample() in lib/api-reference/schema-tree.js
+        const cases = [
+            ['boolean', { type: 'boolean', example: true }],
+            ['enum', { type: 'string', enum: ['a', 'b'], example: 'a' }],
+            ['object', { type: 'object', example: { a: 1 }, properties: { a: { type: 'integer' } } }],
+            ['array of objects', { type: 'array', example: [{ a: 1 }] }],
+            ['empty array', { type: 'array', example: [] }],
+            ['same as the default', { type: 'string', example: 'x', default: 'x' }],
+            ['null', { type: 'string', nullable: true, example: null }]
+        ];
+
+        for (const [label, schema] of cases) {
+            assert.equal(rowExample(schema, { enums: enumInfo(schema) }), null, label);
+        }
+    });
+
+    await t.test('a long example is cut and left as valid JSON', () => {
+        const long = 'x'.repeat(200);
+        const shown = rowExample({ type: 'string', example: long });
+
+        assert.ok(shown.text.length < 60);
+        assert.doesNotThrow(() => JSON.parse(shown.text));
+
+        // The tooltip gets the raw value, the completer gets the JSON form. Handing the
+        // completer the tooltip's value put an unquoted string into the try-it body.
+        assert.equal(shown.title, long);
+        assert.equal(JSON.parse(shown.full), long);
+    });
+
+    await t.test('every cut example carries a JSON-parseable full value', () => {
+        const cut = [];
+        everyTree(node => {
+            if (node.example && node.example.title) {
+                cut.push(node.example);
+            }
+        });
+
+        assert.ok(cut.length, 'no example was long enough to be cut');
+        for (const example of cut) {
+            assert.doesNotThrow(() => JSON.parse(example.full), `full value is not JSON: ${example.text}`);
+        }
+    });
+});
+
+// Coverage guard for what a reader can actually see. Before the property rows rendered an
+// example, a field with nothing authored was invisible: the only place a value appeared was
+// the curated payload, which shows only the keys its author chose. Now such a field is a
+// visibly empty row, and this is what fails when a new one ships.
+//
+// The rule is stated in terms of the RENDERED row rather than the schema behind it: a row a
+// reader expects a value on has to show one, either as an example or as a default. Which
+// rows those are is read off the view model's own display fields - a row that offers a list
+// of allowed values, or expands into child rows, answers the question by itself.
+test('API reference example coverage', async t => {
+    // A row a reader would expect a concrete value on: it holds a value of its own rather
+    // than a group of child rows, and nothing else on it already answers the question.
+    //
+    // The excluded labels are the rows that legitimately show nothing. `boolean` is its own
+    // value domain; an object, a list of objects or a list of tuples states its values on the
+    // child rows below it, or has no declared shape at all - which is the case for the eleven
+    // free-form `Joi.object().unknown()` response fields, where the payload's `{}` is the
+    // honest answer. A denylist rather than an allowlist of scalar labels, because typeLabel()
+    // is a display function: an allowlist keyed on its exact prose would quietly match fewer
+    // rows the day a label is reworded.
+    const VALUELESS = new Set(['boolean', 'object', 'any']);
+
+    const wantsValue = node =>
+        // parameters render through the same partial but carry no children of their own
+        !(node.children || []).length &&
+        !(node.variants || []).length &&
+        // "Allowed" already lists the entire value domain
+        !node.enumValues &&
+        // the Default chip is a concrete value
+        typeof node.defaultValue === 'undefined' &&
+        !VALUELESS.has(node.typeLabel) &&
+        !/^array of (object|any|array)/.test(node.typeLabel);
+
+    // How many rows the assertions below actually checked. A predicate written against
+    // display strings can go quietly vacuous - match nothing, assert nothing, pass - so the
+    // count is asserted too. The floor sits well under the rows it covers today; it is there
+    // to catch the predicate collapsing, not to pin the number.
+    let checked = 0;
+
+    const collect = (node, prefix, into) => {
+        for (const child of [...node.children, ...node.variants]) {
+            const path = prefix && child.name ? `${prefix}.${child.name}` : child.name || prefix;
+
+            if (wantsValue(child)) {
+                checked++;
+                if (!child.example) {
+                    into.push(path);
+                }
+            }
+
+            collect(child, path, into);
+        }
+    };
+
+    await t.test('every request body field and parameter shows a value', () => {
+        const missing = [];
+
+        for (const operation of allOperations) {
+            for (const parameter of [...operation.pathParams, ...operation.queryParams, ...operation.headerParams]) {
+                if (wantsValue(parameter)) {
+                    checked++;
+                    if (!parameter.example) {
+                        missing.push(`${operation.id} ?${parameter.name}`);
+                    }
+                }
+            }
+
+            if (operation.body && operation.body.tree) {
+                const gaps = [];
+                collect(operation.body.tree, '', gaps);
+                missing.push(...gaps.map(path => `${operation.id} ${path}`));
+            }
+        }
+
+        assert.deepEqual(missing, []);
+    });
+
+    await t.test('every response field shows a value', () => {
+        const missing = [];
+
+        for (const operation of allOperations) {
+            for (const response of operation.responses) {
+                if (!response.tree) {
+                    continue;
+                }
+                const gaps = [];
+                collect(response.tree, '', gaps);
+                missing.push(...gaps.map(path => `${operation.id} ${response.code} ${path}`));
+            }
+        }
+
+        assert.deepEqual(missing, []);
+    });
+
+    await t.test('the guard is not vacuous', () => {
+        assert.ok(checked > 1000, `only ${checked} rows were checked - the predicate has stopped matching`);
+    });
+});
+
+test('API reference code samples', async t => {
+    const operation = allOperations.find(entry => entry.id === 'postV1AccountAccountSubmit');
+
+    await t.test('fills path parameters and keeps the three languages runnable', () => {
+        const samples = buildCodeSamples(operation, 'https://ee.example.com', operation.body.exampleValue, operation.body.exampleJson);
+
+        assert.deepEqual(
+            samples.map(sample => sample.id),
+            ['curl', 'node', 'python']
+        );
+        assert.ok(samples[0].active);
+
+        for (const sample of samples) {
+            // no unsubstituted path placeholders, and the token comes from the env var
+            assert.ok(!sample.code.includes('{account}'), `${sample.id} left a path placeholder`);
+            assert.ok(sample.code.includes('EMAILENGINE_TOKEN'), `${sample.id} does not read the token`);
+            assert.ok(sample.code.includes('https://ee.example.com/v1/account/'), `${sample.id} lost the base URL`);
+        }
+    });
+
+    await t.test('python samples emit python literals, not JSON', () => {
+        const withBooleans = allOperations.find(entry => entry.body && /: (true|false)/.test(entry.body.exampleJson || ''));
+
+        assert.ok(withBooleans, 'no operation with a boolean in its example');
+
+        const samples = buildCodeSamples(withBooleans, 'https://ee.example.com', withBooleans.body.exampleValue, withBooleans.body.exampleJson);
+        const python = samples.find(sample => sample.id === 'python').code;
+
+        assert.ok(/\b(True|False)\b/.test(python));
+        assert.ok(!/: true|: false/.test(python.split('json=')[1] || ''));
+    });
+
+    await t.test('a route that declares x-codeSamples gets it ahead of the generated tabs', () => {
+        // The draft submit endpoint: every property of its payload is an optional override,
+        // so the snippet synthesized from the schema misrepresents the call
+        const draft = allOperations.find(entry => entry.id === 'postV1AccountAccountMessageMessageSubmit');
+
+        assert.equal(draft.codeSamples.length, 1);
+        assert.equal(draft.codeSamples[0].label, 'Minimal');
+        assert.match(draft.codeSamples[0].code, /-d '\{\}'/);
+
+        const samples = buildCodeSamples(draft, 'https://ee.example.com', draft.body.exampleValue, draft.body.exampleJson);
+        assert.equal(samples[0].id, 'custom-0');
+        assert.ok(samples[0].active);
+    });
+
+    await t.test('hand-written x-codeSamples are read and lead the tab set', () => {
+        const samples = readCodeSamples({
+            'x-codeSamples': [
+                { lang: 'Shell', label: 'Minimal send', source: 'curl -X POST ...' },
+                { lang: 'Go', source: 'package main' }
+            ]
+        });
+
+        assert.deepEqual(
+            samples.map(sample => [sample.label, sample.language]),
+            [
+                ['Minimal send', 'shell'],
+                ['Go', 'go']
+            ]
+        );
+
+        const tabs = buildCodeSamples({ method: 'post', path: '/v1/x', pathParams: [], queryParams: [], id: 'x', codeSamples: samples }, 'https://e.test');
+
+        assert.deepEqual(
+            tabs.map(tab => tab.id),
+            ['custom-0', 'custom-1', 'curl', 'node', 'python']
+        );
+        // the hand-written one is what opens - the only reason to add one
+        assert.ok(tabs[0].active);
+        assert.equal(tabs[0].tabId, 'x-sample-custom-0');
+        assert.equal(new Set(tabs.map(tab => tab.tabId)).size, tabs.length, 'sample tab ids collide');
+    });
+
+    await t.test('x-codeSamples the page cannot render are dropped, not blanked', () => {
+        const samples = readCodeSamples({
+            'x-codeSamples': [null, { lang: 'Go' }, { source: 'no lang' }, { lang: 'js', source: 'ok' }]
+        });
+
+        assert.equal(samples.length, 1);
+        assert.equal(samples[0].code, 'ok');
+
+        assert.deepEqual(readCodeSamples({}), []);
+        assert.deepEqual(readCodeSamples({ 'x-codeSamples': 'nope' }), []);
+        // Redoc's older spelling is not accepted: this document is generated from our own
+        // route table, so it can only contain what our routes declare
+        assert.deepEqual(readCodeSamples({ 'x-code-samples': [{ lang: 'js', source: 'ok' }] }), []);
+    });
+
+    await t.test('a sample language never escapes the highlight class', () => {
+        const [sample] = readCodeSamples({ 'x-codeSamples': [{ lang: 'js" onload="alert(1)', source: 'x' }] });
+
+        assert.equal(sample.language, 'jsonloadalert1');
+        assert.match(sample.language, /^[a-z0-9+#._-]*$/);
+    });
+
+    await t.test('single quotes in a body are escaped for the shell', () => {
+        const samples = buildCodeSamples(
+            { method: 'post', path: '/v1/x', pathParams: [], queryParams: [], id: 'x' },
+            'https://e.test',
+            { a: "it's" },
+            `{"a":"it's"}`
+        );
+
+        const curl = samples[0].code;
+        assert.ok(curl.includes(`'\\''`), 'single quote not escaped');
+    });
+});
+
+test('API reference formatting', async t => {
+    await t.test('escapes markup before adding its own tags back', () => {
+        // The templateHtmlHead description documents injecting into the <head> section
+        const html = formatDescription('Custom HTML to inject into the <head> section');
+        assert.ok(html.includes('&lt;head&gt;'));
+        assert.ok(!html.includes('<head>'));
+    });
+
+    await t.test('renders code spans and safe links only', () => {
+        assert.equal(formatDescription('use `null` here'), 'use <code class="ee-code">null</code> here');
+
+        const link = formatDescription('see [docs](https://example.com/x)');
+        assert.ok(link.includes('href="https://example.com/x"'));
+
+        // a javascript: target is left as literal text
+        const unsafe = formatDescription('see [x](javascript:alert(1))');
+        assert.ok(!unsafe.includes('href'));
+        assert.ok(!unsafe.includes('javascript:alert(1)</a>'));
+    });
+
+    await t.test('slugs match the route parameter pattern', () => {
+        for (const tag of model.tags) {
+            assert.match(tag.slug, /^[a-z0-9-]+$/, `${tag.name} -> ${tag.slug}`);
+        }
+
+        assert.equal(slugify('Export (Beta)'), 'export-beta');
+        assert.equal(slugify('SMTP Gateway'), 'smtp-gateway');
+    });
+
+    await t.test('slugs are unique', () => {
+        const slugs = model.tags.map(tag => tag.slug);
+        assert.equal(new Set(slugs).size, slugs.length);
+    });
+
+    await t.test('no slug collides with a literal route under /admin/reference', () => {
+        // hapi routes a literal path segment ahead of /{tag}, so a tag slugging to one of
+        // these would render the literal page instead of the group - silently unreachable
+        const RESERVED_SLUGS = ['token'];
+
+        for (const tag of model.tags) {
+            assert.ok(!RESERVED_SLUGS.includes(tag.slug), `tag "${tag.name}" slugs to the reserved "${tag.slug}"`);
+        }
+    });
+
+    await t.test('labels arrays by their item type, following $refs', () => {
+        assert.equal(typeLabel(spec, { type: 'array', items: { type: 'string' } }), 'array of string');
+        assert.equal(typeLabel(spec, { type: 'object' }), 'object');
+        assert.equal(typeLabel(spec, {}), 'any');
+
+        // the case a spec-free implementation cannot answer: items behind a $ref
+        const refName = Object.keys(spec.components.schemas).find(name => spec.components.schemas[name].type === 'object');
+        assert.equal(typeLabel(spec, { type: 'array', items: { $ref: `#/components/schemas/${refName}` } }), 'array of object');
+    });
+});
+
+test('GET /v1/settings lists its include flags as chips', () => {
+    // The flags carry a description that only restates the chip sentence ("Include the `x` setting
+    // in the response"); it must not turn the 90-odd flags back into a row each
+    const operation = allOperations.find(op => op.method === 'get' && op.path === '/v1/settings');
+    assert.ok(operation, 'GET /v1/settings is in the reference');
+    assert.ok(Array.isArray(operation.queryFlags), 'the query parameters render as a flag list');
+    assert.ok(operation.queryFlags.includes('webhooksEnabled'));
+    assert.ok(operation.queryFlags.includes('eventTypes'));
+});

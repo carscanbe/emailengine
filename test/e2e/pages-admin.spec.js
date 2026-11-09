@@ -1,0 +1,2356 @@
+/* global document, window, getComputedStyle */
+'use strict';
+
+// Per-page smoke tests for the admin UI (Tailwind v4 + FlyonUI theme). Each admin page gets at
+// least one test here as it is converted: the page renders for an authenticated admin, its
+// primary interaction works, and the browser logs no console errors.
+//
+// Phase 1 covers the global shell: sidebar menu + accordion, topbar dropdowns, theme toggle,
+// toast helper, and the login redirect for anonymous visitors.
+//
+// Shares the Playwright webServer and Redis db 14 with the other specs (files run alphabetically
+// with one worker; this file sorts after happy-path/hosted-form, which may already have
+// bootstrapped the instance - the helpers are idempotent, and these tests do not depend on the
+// license state).
+//
+// Run once:  npm run test:e2e:install
+// Run suite: npm run test:e2e
+
+const { test, expect, request } = require('./helpers/test');
+const {
+    ensureAdminSession,
+    useAdminSession,
+    createApiToken,
+    dismissTokenReveal,
+    trackConsoleErrors,
+    seedPasskeys,
+    removePasskeys,
+    ADMIN_PASSWORD,
+    BASE_URL,
+    openRowMenu,
+    expectModalOpen: expectModalSettled
+} = require('./helpers/bootstrap');
+
+// Resolves --color-primary for the active theme into the rgb() form that
+// getComputedStyle returns, so the tab assertions below stay theme-agnostic.
+function resolvePrimaryColor(page) {
+    return page.evaluate(() => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--color-primary)';
+        document.body.appendChild(probe);
+        const color = window.getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+    });
+}
+
+// A modal is not really gone until its backdrop is. HSOverlay drops the `open` class and
+// dispatches close.overlay before a later transition removes the backdrop, and until then the
+// backdrop swallows every click on the page - which reads as a link or a button that refuses
+// to be clicked, or as a reopened dialog losing the next answer.
+const overlaySettled = page => expect(page.locator('.overlay-backdrop')).toHaveCount(0);
+
+// Asserts that a FlyonUI tab strip actually *shows* which tab is selected.
+// The panes and the toggled class are checked separately; this guards the
+// styling hook specifically, which is a separate class (`tab-active`, applied
+// via the `active-tab:` variant) from the one the FlyonUI JS toggles
+// (`active`). Hovering a tab also paints it primary, so the pointer is parked
+// away from the strip before the colors are read.
+async function expectSelectedTab(page, selectedId, otherIds) {
+    const primary = await resolvePrimaryColor(page);
+    await page.mouse.move(0, 0);
+    await expect(page.locator(`#${selectedId}`)).toHaveCSS('color', primary);
+    for (const id of otherIds) {
+        await expect(page.locator(`#${id}`)).not.toHaveCSS('color', primary);
+    }
+}
+
+// Asserts the HSTogglePassword round-trip on a secret field: revealing flips
+// the input type and swaps the eye icon to eye-off, toggling again hides it.
+async function expectPasswordToggle(page, btnId, inputId) {
+    const input = page.locator(`#${inputId}`);
+    const eye = page.locator(`#${btnId} .icon-\\[tabler--eye\\]`);
+    const eyeOff = page.locator(`#${btnId} .icon-\\[tabler--eye-off\\]`);
+
+    await expect(input).toHaveAttribute('type', 'password');
+    await expect(eye).toBeVisible();
+    await expect(eyeOff).toBeHidden();
+
+    await page.locator(`#${btnId}`).click();
+    await expect(input).toHaveAttribute('type', 'text');
+    await expect(eye).toBeHidden();
+    await expect(eyeOff).toBeVisible();
+
+    await page.locator(`#${btnId}`).click();
+    await expect(input).toHaveAttribute('type', 'password');
+    await expect(eye).toBeVisible();
+    await expect(eyeOff).toBeHidden();
+}
+
+// Hovers a trigger and asserts a FlyonUI tooltip bubble shows, then parks the
+// pointer away again so the tooltip (and any hover paint) clears.
+async function expectTooltipOnHover(page, trigger) {
+    await trigger.hover();
+    await expect(page.locator('.tooltip.show')).toHaveCount(1, { timeout: 5000 });
+    await page.mouse.move(0, 0);
+}
+
+// The modals here are addressed by id
+const expectModalOpen = (page, id) => expectModalSettled(page.locator(`#${id}`));
+
+// Drives the standard delete-confirmation flow on a detail page: open the modal
+// with #delete-btn, submit it, and wait for the redirect back to the list page.
+// Submit a search through the topbar form and wait for the filtered list page
+async function searchTopbar(page, target, query) {
+    await page.fill(`header form[action="${target}"] input[name="query"]`, query);
+    await page.locator(`header form[action="${target}"] button[type="submit"]`).click();
+    await page.waitForURL(url => url.pathname === target && url.searchParams.get('query') === query);
+}
+
+// On detail views the destructive Delete now lives inside a ui/overflow-menu kebab
+// (id="delete-btn" on the dropdown item), so it is hidden until the kebab is opened.
+// Open the containing dropdown if collapsed, then click the item. Retry the whole
+// open-then-click since the dropdown can close on its own between the two (animations).
+async function openDeleteAction(page) {
+    const del = page.locator('#delete-btn');
+    await expect(async () => {
+        if (!(await del.isVisible())) {
+            await page.locator('.dropdown:has(#delete-btn) .dropdown-toggle').click();
+            await expect(del).toBeVisible({ timeout: 2000 });
+        }
+        await del.click({ timeout: 2000 });
+    }).toPass({ timeout: 15000 });
+}
+
+async function deleteViaModal(page, listUrlRe, opts) {
+    await openDeleteAction(page);
+    await expect(page.locator('#deleteModal.open')).toHaveCount(1);
+    if (opts && opts.checkCancel) {
+        // the footer Cancel closes without submitting; its data-overlay target
+        // is the closeOverlay value ui/modal hands to the block (it once
+        // rendered as a dead "#" because the id hash param is neutralized
+        // inside the block). The shared ui/confirm-modal partial renders
+        // identically on every page, so one call site opting in covers all
+        // confirm modals without slowing the other delete flows down.
+        await page.locator('#deleteModal button', { hasText: 'Cancel' }).click();
+        await expect(page.locator('#deleteModal.open')).toHaveCount(0);
+        await overlaySettled(page);
+        await openDeleteAction(page);
+        await expect(page.locator('#deleteModal.open')).toHaveCount(1);
+    }
+    await page.locator('#deleteModal button[type="submit"]').click();
+    await page.waitForURL(listUrlRe);
+}
+
+// Asserts the TLS certificate label's FlyonUI tooltip: the summary badge on the
+// SMTP/IMAP-proxy pages carries the certificate's status text on hover (the
+// badge's .tooltip ancestor > .tooltip-body).
+async function expectTlsLabelTooltip(page) {
+    const tlsTooltipText = await page.evaluate(() => {
+        const label = document.getElementById('tls-label');
+        const wrap = label && label.closest('.tooltip');
+        const body = wrap && wrap.querySelector('.tooltip-body');
+        return body ? body.textContent.trim() : null;
+    });
+    expect(tlsTooltipText).toBeTruthy();
+    await expectTooltipOnHover(page, page.locator('#tls-label'));
+}
+
+// Per-test console error collection lives in helpers/bootstrap.js
+// (trackConsoleErrors); every test asserts the page stayed clean.
+
+test.describe('admin shell', () => {
+    useAdminSession(test, 'admin');
+
+    test('dashboard shell: sidebar, topbar and footer render', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        // Sidebar: brand + primary menu entries
+        const sidebar = page.locator('#layout-sidebar');
+        await expect(sidebar.getByRole('link', { name: 'Dashboard' })).toBeVisible();
+        await expect(sidebar.getByRole('link', { name: 'Accounts' })).toBeVisible();
+        await expect(sidebar.getByRole('link', { name: 'Webhook Routes' })).toBeVisible();
+
+        // Topbar: theme toggle and user menu
+        await expect(page.locator('.theme-toggle-btn')).toBeVisible();
+        await expect(page.locator('#userDropdown')).toBeVisible();
+
+        // Footer
+        await expect(page.getByText(/Postal Systems/)).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('copy button falls back to execCommand without the Clipboard API', async ({ page }) => {
+        // Self-hosted installs on plain HTTP get no navigator.clipboard (not a
+        // secure context); the ui.js handler must stage the value in a
+        // throwaway textarea and run document.execCommand('copy') on it
+        // (selecting the target itself would not work for password inputs or
+        // ACE editors, which only render the visible lines). The API cannot be
+        // deleted from an already-secure context, so stub it out and spy on
+        // execCommand, capturing the staged value from the focused element.
+        await page.addInitScript(() => {
+            Object.defineProperty(window.navigator, 'clipboard', { value: undefined });
+            window.__copyCalls = [];
+            const orig = document.execCommand.bind(document);
+            document.execCommand = cmd => {
+                const active = document.activeElement;
+                window.__copyCalls.push({ cmd, value: active && 'value' in active ? active.value : null });
+                return orig(cmd);
+            };
+        });
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        // fixture exercising the real delegated .copy-btn handler from ui.js;
+        // fixed-positioned on top so the layout wrapper cannot cover the button
+        await page.evaluate(() => {
+            document.body.insertAdjacentHTML(
+                'beforeend',
+                '<div style="position:fixed;top:8px;left:8px;z-index:99999;background:#fff">' +
+                    '<input id="copy-fixture" value="fallback-copy-value">' +
+                    '<button type="button" class="copy-btn" data-copy-target="#copy-fixture">copy</button>' +
+                    '</div>'
+            );
+        });
+        await page.locator('button.copy-btn').click();
+        expect(await page.evaluate(() => window.__copyCalls)).toEqual([{ cmd: 'copy', value: 'fallback-copy-value' }]);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('sidebar accordion: Configuration expands and collapses', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        const generalSettings = page.getByRole('link', { name: 'General', exact: true });
+        await expect(generalSettings).toBeHidden();
+
+        await page.locator('#menu-config .accordion-toggle').click();
+        await expect(generalSettings).toBeVisible();
+
+        await page.locator('#menu-config .accordion-toggle').click();
+        await expect(generalSettings).toBeHidden();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('topbar user dropdown opens', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        const securityLink = page.getByRole('link', { name: 'Account security' });
+        await expect(securityLink).toBeHidden();
+
+        await page.locator('#userDropdown').click();
+        await expect(securityLink).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('theme toggle switches to dark, persists across reload', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        const htmlTheme = () => page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+
+        await page.locator('.theme-toggle-btn').click();
+        expect(await htmlTheme()).toBe('dark');
+
+        await page.reload();
+        expect(await htmlTheme()).toBe('dark');
+
+        // leave the instance in light mode for subsequent tests
+        await page.locator('.theme-toggle-btn').click();
+        expect(await htmlTheme()).toBe('light');
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('showToast helper renders and auto-dismisses a toast', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        await page.evaluate(() => window.showToast('e2e toast check', 'info'));
+        const toast = page.locator('#toastContainer .alert', { hasText: 'e2e toast check' });
+        await expect(toast).toBeVisible();
+
+        // auto-dismisses after ~5s
+        await expect(toast).toHaveCount(0, { timeout: 10000 });
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('dashboard: stat cards, tooltips and versions panel', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin');
+
+        // stat cards in the FlyonUI idiom: the variant color tints a rounded
+        // icon container; the Bootstrap-style edge stripes are gone
+        await expect(page.locator('.card .rounded-field[class*="bg-"]').first()).toBeVisible();
+        expect(await page.locator('[class*="border-s-4"]').count()).toBe(0);
+
+        // grouped sections: Accounts cards, Activity counters, System queues
+        await expect(page.locator('h1', { hasText: 'Dashboard' })).toBeVisible();
+        await expect(page.getByText('Total accounts')).toBeVisible();
+        await expect(page.getByText('Needs attention')).toBeVisible();
+        await expect(page.getByText('Webhooks queue')).toBeVisible();
+
+        // FlyonUI tooltip on a stat-card label
+        await expectTooltipOnHover(page, page.locator('.tooltip-toggle', { hasText: 'Total accounts' }));
+
+        // the Activity window switcher reloads with the ?seconds= argument
+        await page.getByRole('link', { name: '1h', exact: true }).click();
+        await page.waitForURL(/\/admin\?seconds=3600/);
+        await expect(page.getByText('New emails', { exact: true })).toBeVisible();
+        await page.getByRole('link', { name: '24h', exact: true }).click();
+        await page.waitForURL(url => url.pathname === '/admin' && !url.search);
+
+        // the header Add account button opens the add-account modal
+        await page.getByRole('button', { name: 'Add account', exact: true }).click();
+        await expectModalOpen(page, 'addAccount');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#addAccount.open')).toHaveCount(0);
+
+        // software versions panel toggles open
+        const imapflowRow = page.getByText('ImapFlow');
+        await expect(imapflowRow).toBeHidden();
+        await page.locator('summary', { hasText: 'Software versions' }).click();
+        await expect(imapflowRow).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('the retired swagger page redirects old deep links to the new reference', async ({ page }) => {
+        // /admin/swagger no longer serves swagger-ui. It stays only as a shim for bookmarks
+        // and for links written by older EmailEngine versions, which used the swagger-ui
+        // deep-link format. A fragment never reaches the server, so the mapping is done in
+        // the browser - see views/reference/redirect.hbs.
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // a deep link resolves to the operation's group page, keeping the operation anchor
+        await page.goto('/admin/swagger#/Account/postV1Account');
+        await page.waitForURL(/\/admin\/reference\/account#postV1Account$/, { timeout: 20000 });
+        await expect(page.locator('#postV1Account')).toBeVisible();
+
+        // ...even when the tag in the old link no longer exists: tags have been renamed since
+        // those links were written, so resolving by tag would strand this one. The operation
+        // id alone decides where it lands
+        await page.goto('/admin/swagger#/Service%20Settings/getV1Settings');
+        await page.waitForURL(/\/admin\/reference\/[a-z-]+#getV1Settings$/, { timeout: 20000 });
+        await expect(page.locator('#getV1Settings')).toBeVisible();
+
+        // a bare visit lands on the overview
+        await page.goto('/admin/swagger');
+        await page.waitForURL(/\/admin\/reference$/, { timeout: 20000 });
+
+        // an unknown operation falls back rather than 404ing
+        await page.goto('/admin/swagger#/Nope/getV1DoesNotExist');
+        await page.waitForURL(/\/admin\/reference$/, { timeout: 20000 });
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('accounts list: renders and opens the add-account modal', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await page.goto('/admin/accounts');
+
+        await expect(page.locator('h1', { hasText: 'Accounts' })).toBeVisible();
+
+        // regression: every account row must render its trailing actions kebab, and the
+        // header/body column counts must match. The cell once silently vanished because
+        // {{#if showActions}} inside {{#each}} resolved against the row, not the partial
+        // params, leaving a phantom empty trailing column that showed on row hover.
+        const rowCount = await page.locator('tbody tr').count();
+        if (rowCount) {
+            await expect(page.locator('tbody tr [aria-label="Account actions"]')).toHaveCount(rowCount);
+            const cols = await page.evaluate(() => ({
+                th: document.querySelectorAll('table thead th').length,
+                td: document.querySelectorAll('table tbody tr:first-child td').length
+            }));
+            expect(cols.td, 'header/body column count mismatch (phantom cell)').toBe(cols.th);
+        }
+
+        // FlyonUI overlay opens with focus on the name field, Escape closes and clears
+        await page.locator('[data-overlay="#addAccount"]').first().click();
+        await expect(page.locator('#addAccount.open')).toHaveCount(1);
+        await expect(page.locator('#account-name')).toBeFocused();
+        await page.fill('#account-name', 'wiped-on-close');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#addAccount.open')).toHaveCount(0);
+        await expect(page.locator('#account-name')).toHaveValue('');
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    // The detail/edit/browse page tests need an existing account. The happy-path spec
+    // registers one earlier in the full run, so a missing account there means that spec failed
+    // (an Ethereal or trial-endpoint outage) and these tests fail with it rather than reading as
+    // skipped. Running this file on its own, set EE_E2E_STANDALONE=1 to skip them instead.
+    async function firstAccountUrl(page) {
+        await page.goto('/admin/accounts');
+        const row = page.locator('tbody tr td a[href^="/admin/accounts/"]').first();
+        if (!(await row.count())) {
+            return null;
+        }
+        return row.getAttribute('href');
+    }
+
+    async function requireAccountUrl(page) {
+        const url = await firstAccountUrl(page);
+        if (!url) {
+            test.skip(!!process.env.EE_E2E_STANDALONE, 'no account registered (EE_E2E_STANDALONE run)');
+            throw new Error(
+                'No account is registered. happy-path.spec.js registers one earlier in the full run, so check why it failed. ' +
+                    'To run this file on its own, set EE_E2E_STANDALONE=1 to skip the account-dependent tests.'
+            );
+        }
+        return url;
+    }
+
+    test('account detail page: toolbar tooltips and modals', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+
+        await page.goto(url);
+
+        // toolbar tooltip on hover
+        await expectTooltipOnHover(page, page.locator('#request-reconnect'));
+
+        // delete now lives in the overflow (kebab) menu; open it, then the confirm
+        // modal opens and closes without submitting.
+        await openDeleteAction(page);
+        await expect(page.locator('#deleteModal.open')).toHaveCount(1);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#deleteModal.open')).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('account edit page: form renders', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+
+        await page.goto(`${url}/edit`);
+        await expect(page.locator('#name')).toBeVisible();
+        await expect(page.locator('#email')).toBeVisible();
+        await expect(page.locator('button[type="submit"]', { hasText: 'Save changes' })).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('the browse page session token is confined to what the browser needs', async ({ page }) => {
+        // The token is minted for the message browser's own fetches and sits in the page HTML,
+        // where any script on the page can read it - which is the difference from the HttpOnly
+        // session cookie it rides on. It used to face only the account binding, so it reached every
+        // api-tagged route naming that account, including the account edit that rewrites the
+        // account's webhook target and stored credentials.
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+
+        const accountId = url.split('/').pop();
+        await page.goto(`${url}/browse`);
+
+        // The page hands the token to the widget through a hidden input rather than a script
+        // literal (HTML escaping is not JS escaping), which any script on the page can still read
+        const sessionToken = await page.locator('#browse-session-token').inputValue();
+        expect(sessionToken, 'the browse page should embed a session token').toMatch(/^sess_[0-9a-f]{64}$/);
+
+        // Called from inside the page, which is the only place this credential works at all: its
+        // HMAC key is the session id sealed in the HttpOnly `ee` cookie, so a copy carried
+        // anywhere else authenticates nothing. That is also the shape of the risk being pinned
+        // here - a script on this page can read the token, and this is what it would reach.
+        const status = (method, path, body) =>
+            page.evaluate(
+                async args => {
+                    const res = await fetch(args.path, {
+                        method: args.method,
+                        headers: Object.assign({ Authorization: `Bearer ${args.tok}` }, args.body ? { 'content-type': 'application/json' } : {}),
+                        body: args.body ? JSON.stringify(args.body) : undefined
+                    });
+                    return res.status;
+                },
+                { method, path, body, tok: sessionToken }
+            );
+
+        // What the browser actually calls still works
+        expect(await status('GET', `/v1/account/${accountId}`)).toBe(200);
+        expect(await status('GET', `/v1/account/${accountId}/mailboxes`)).toBe(200);
+
+        // and the rest of the account's surface does not
+        expect(
+            await status('PUT', `/v1/account/${accountId}`, { webhooks: 'https://evil.example.com/collect' }),
+            'a page-readable token must not be able to rewrite the account'
+        ).toBe(403);
+        expect(await status('GET', `/v1/account/${accountId}/oauth-token`)).toBe(403);
+        expect(await status('POST', `/v1/account/${accountId}/export`, {})).toBe(403);
+
+        // Submitting IS allowed, so the payload field that decides where the SMTP session lands has
+        // to be refused separately - a proxy of the caller's choosing answers as the mail server
+        // and collects the account's credentials in plaintext, which is the same outcome as the
+        // oauth-token read refused above
+        expect(
+            await status('POST', `/v1/account/${accountId}/submit`, {
+                proxy: 'socks5://attacker.example.com:1080',
+                to: [{ address: 'nobody@ethereal.email' }],
+                subject: 'e2e proxy override',
+                text: 'x'
+            }),
+            'a page-readable token must not be able to redirect the SMTP session'
+        ).toBe(403);
+
+        // Last, because it destroys the credential: the binding is half the rule, and a route
+        // naming no account is out of scope by construction - so the instance-wide account listing
+        // is refused even though it resolves to the same read/account grant as the account read
+        // above. 401 rather than 403 because the binding is checked while validating the token: a
+        // request naming no account matches no stored one, so the credential does not resolve, and
+        // validateSessionToken() deletes a token presented against the wrong account.
+        expect(await status('GET', '/v1/accounts')).toBe(401);
+        expect(await status('GET', `/v1/account/${accountId}`), 'a mismatched account revokes the token').toBe(401);
+    });
+
+    test('account browse page: ee-client widget initializes', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+
+        await page.goto(`${url}/browse`);
+        await expect
+            .poll(
+                async () =>
+                    page.evaluate(() => {
+                        const elm = document.getElementById('email-client');
+                        return elm ? elm.children.length : -1;
+                    }),
+                { timeout: 20000 }
+            )
+            .toBeGreaterThan(0);
+
+        // the widget's own stylesheet applied: it arrives as a <style> element the page's
+        // Content-Security-Policy has to accept, and a refused sheet leaves the widget
+        // unstyled without any error the console tracker would see
+        expect(
+            await page
+                .locator('.ee-client')
+                .first()
+                .evaluate(elm => getComputedStyle(elm).getPropertyValue('--ee-font').trim())
+        ).not.toBe('');
+
+        // the embed follows the admin theme: its own toggle is hidden and the
+        // topbar theme switch flips the client's dark mode live
+        await expect(page.locator('.ee-dark-mode-toggle')).toHaveCount(0);
+        const isClientDark = () => page.evaluate(() => document.querySelector('.ee-client').classList.contains('ee-dark-mode'));
+        const startedDark = await isClientDark();
+        await page.locator('.theme-toggle-btn').first().click();
+        await expect.poll(isClientDark).toBe(!startedDark);
+        await page.locator('.theme-toggle-btn').first().click();
+        await expect.poll(isClientDark).toBe(startedDark);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('gateways: create, view and delete a gateway', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // list page renders
+        await page.goto('/admin/gateways');
+        await expect(page.locator('h1', { hasText: 'Gateways' })).toBeVisible();
+
+        // create via the new-gateway form
+        await page.goto('/admin/gateways/new');
+        await page.fill('#gateway', 'e2e-smoke-gw');
+
+        // long tooltip texts wrap inside the capped bubble instead of
+        // rendering as one viewport-wide line
+        const tlsTipToggle = page.locator('#secure').locator('..').locator('.tooltip .tooltip-toggle').first();
+        await tlsTipToggle.hover();
+        await expect(page.locator('.tooltip.show')).toHaveCount(1, { timeout: 5000 });
+        const tipWidth = await page.evaluate(() => document.querySelector('.tooltip.show .tooltip-content').getBoundingClientRect().width);
+        expect(tipWidth).toBeLessThanOrEqual(320);
+        await page.mouse.move(0, 0);
+
+        // typing a well-known service key into the name field autofills the
+        // connection settings (uiDatalist + the gateway_js input listener)
+        await expect(page.locator('#name')).toHaveAttribute('list', 'well-known-services-list');
+        expect(await page.locator('#well-known-services-list option').count()).toBeGreaterThan(0);
+        await page.fill('#name', 'gmail');
+        await page.locator('#name').dispatchEvent('input');
+        await expect(page.locator('#host')).toHaveValue('smtp.gmail.com');
+
+        await page.fill('#name', 'E2E Smoke Gateway');
+        await page.fill('#host', '127.0.0.1');
+        await page.fill('#port', '2525');
+        await page.locator('button[type="submit"]', { hasText: 'Create gateway' }).click();
+        // the create redirect lands on the gateway detail page
+        await page.waitForURL(/\/admin\/gateways\/gateway\//);
+
+        // detail page shows the gateway
+        await page.goto('/admin/gateways/gateway/e2e-smoke-gw');
+        await expect(page.locator('.ee-dl dt', { hasText: 'Gateway ID' })).toBeVisible();
+        await expect(page.getByRole('heading', { name: 'E2E Smoke Gateway' })).toBeVisible();
+
+        // topbar search filters the list; a miss renders an empty result set
+        await page.goto('/admin/gateways');
+        await searchTopbar(page, '/admin/gateways', 'e2e-smoke');
+        await expect(page.getByText('Results for "e2e-smoke"')).toBeVisible();
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Gateway' })).toBeVisible();
+        await page.goto('/admin/gateways?query=no-such-gateway-zzz');
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Gateway' })).toHaveCount(0);
+
+        // the clear button in the topbar search input drops the query and
+        // returns the unfiltered list
+        await page.locator('#topbar-search-clear').click();
+        await page.waitForURL(url => url.pathname === '/admin/gateways' && !url.searchParams.has('query'));
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Gateway' })).toBeVisible();
+
+        // delete from the list via the row-actions kebab. This exercises the
+        // path-param delete route wired through data-delete-action (the shared
+        // .list-delete-btn handler rewrites the confirm-modal form action), plus
+        // the Open item and the confirm-modal Cancel button on a list page.
+        const gwRow = page.locator('tbody tr', { hasText: 'E2E Smoke Gateway' }).first();
+        await gwRow.locator('.dropdown-toggle').click();
+        await expect(gwRow.locator('.dropdown-menu a', { hasText: 'Open' })).toHaveAttribute('href', /\/admin\/gateways\/gateway\/e2e-smoke-gw$/);
+        await gwRow.locator('.list-delete-btn').click();
+        await expect(page.locator('#deleteGateway.open')).toHaveCount(1);
+        await expect(page.locator('#deleteGateway .delete-target-name')).toHaveText('E2E Smoke Gateway');
+        // Cancel closes without submitting
+        await page.locator('#deleteGateway button', { hasText: 'Cancel' }).click();
+        await expect(page.locator('#deleteGateway.open')).toHaveCount(0);
+        // reopen and confirm - the gateway is actually removed
+        await gwRow.locator('.dropdown-toggle').click();
+        await gwRow.locator('.list-delete-btn').click();
+        await expect(page.locator('#deleteGateway.open')).toHaveCount(1);
+        await page.locator('#deleteGateway button[type="submit"]').click();
+        await page.waitForURL(/\/admin\/gateways(\?|$)/);
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Gateway' })).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('row-actions: the kebab wrapper does not trap the open menu', async ({ page, request }) => {
+        // Regression: the row-actions wrapper must not carry a z-index. A per-row
+        // stacking context traps the open menu (FlyonUI gives .dropdown-menu
+        // z-index:10) inside it, so the next row's kebab painted over the menu.
+        // Asserted structurally (computed z-index) rather than by pixel occlusion,
+        // which depends on floating-ui's viewport-driven flip direction.
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // seed two gateways so the list renders row-actions kebabs
+        const token = await createApiToken(page, 'e2e kebab-z token');
+        const auth = { Authorization: `Bearer ${token}`, 'Content-type': 'application/json' };
+        const seeded = ['e2e-zorder-1', 'e2e-zorder-2'];
+        for (const g of seeded) {
+            await request.post('/v1/gateway', { headers: auth, data: { gateway: g, name: g, host: '127.0.0.1', port: 2525 } });
+        }
+
+        try {
+            await page.goto('/admin/gateways');
+            const rows = page.locator('tbody tr');
+            expect(await rows.count()).toBeGreaterThanOrEqual(2);
+
+            // the wrapper must resolve to z-index:auto (no stacking context) while
+            // FlyonUI keeps the open menu at z-index:10, position:fixed
+            const wrap = rows.nth(0).locator('.dropdown').first();
+            expect(await wrap.evaluate(el => window.getComputedStyle(el).zIndex)).toBe('auto');
+
+            await rows.nth(0).locator('.dropdown-toggle').click();
+            const menu = rows.nth(0).locator('.dropdown-menu');
+            await expect(menu.locator('.list-delete-btn')).toBeVisible();
+            const menuStyle = await menu.evaluate(el => ({ z: window.getComputedStyle(el).zIndex, pos: window.getComputedStyle(el).position }));
+            expect(menuStyle.pos).toBe('fixed');
+            expect(Number(menuStyle.z)).toBeGreaterThan(1);
+        } finally {
+            for (const g of seeded) {
+                await request.delete(`/v1/gateway/${g}`, { headers: auth }).catch(() => {});
+            }
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('tokens: list renders, delete modal wires the description', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // guarantee at least one token exists via the shared reveal-flow helper
+        await createApiToken(page, 'e2e tokens-page token');
+        await dismissTokenReveal(page);
+
+        await expect(page.locator('h1', { hasText: 'Access Tokens' })).toBeVisible();
+        await expect(page.locator('tbody tr').first()).toBeVisible();
+
+        // the ui/entity-id copy button copies the full row id via the
+        // data-copy-value branch of the ui.js .copy-btn handler
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        const idBtn = page.locator('tbody tr').first().locator('.copy-btn[data-copy-value]');
+        const idValue = await idBtn.getAttribute('data-copy-value');
+        expect(idValue).toBeTruthy();
+        await idBtn.click();
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(idValue);
+
+        // topbar search filters the token list by description (case-insensitive)
+        await searchTopbar(page, '/admin/tokens', 'TOKENS-page');
+        await expect(page.locator('tbody tr', { hasText: 'e2e tokens-page token' }).first()).toBeVisible();
+        await page.goto('/admin/tokens');
+
+        // the row-actions kebab opens the shared delete modal, which the
+        // .list-delete-btn handler fills with the token description; close
+        // without deleting
+        const firstRow = page.locator('tbody tr').first();
+        const deleteItem = firstRow.locator('.list-delete-btn');
+        const description = await deleteItem.getAttribute('data-delete-name');
+        await firstRow.locator('.dropdown-toggle').click();
+        await deleteItem.click();
+        await expect(page.locator('#deleteToken.open')).toHaveCount(1);
+        await expect(page.locator('#deleteToken .delete-target-name')).toHaveText(description);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#deleteToken.open')).toHaveCount(0);
+        await overlaySettled(page);
+
+        // usage instructions panel toggles
+        await page.locator('summary', { hasText: 'Usage instructions' }).click();
+        await expect(page.getByText('To collect Prometheus metrics')).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('templates: create via editor form, tabs on the detail page, delete', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/templates');
+        await expect(page.locator('h1', { hasText: 'Templates' })).toBeVisible();
+
+        // create through the ACE-backed form (editor content is optional)
+        await page.goto('/admin/templates/new');
+        await page.fill('#inputName', 'E2E Smoke Template');
+        await page.fill('#inputSubject', 'e2e subject');
+
+        // editor fullscreen round-trip through the shared uiEditorFullscreen
+        // helper. Assert the effect, not the class: ACE's runtime stylesheet
+        // once overrode .full-screen-div so the class was on but the editor
+        // collapsed - the rect must actually cover the viewport.
+        const editorRect = () =>
+            page.evaluate(() => {
+                const r = document.getElementById('editor-html').getBoundingClientRect();
+                return { x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight };
+            });
+        await expect(page.locator('#fullscreen-close-btn')).toBeHidden();
+        await page.locator('.toggle-fullscreen[data-target="editor-html"]').click();
+        let rect = await editorRect();
+        expect(rect.x).toBe(0);
+        expect(rect.y).toBe(0);
+        expect(rect.w).toBe(rect.vw);
+        expect(rect.h).toBe(rect.vh);
+
+        // the floating close button is the touch-device exit (no Escape key there)
+        await expect(page.locator('#fullscreen-close-btn')).toBeVisible();
+        await page.locator('#fullscreen-close-btn').click();
+        rect = await editorRect();
+        expect(rect.h).toBeLessThan(rect.vh / 2);
+        await expect(page.locator('#fullscreen-close-btn')).toBeHidden();
+
+        // Escape still exits for keyboard users
+        await page.locator('.toggle-fullscreen[data-target="editor-html"]').click();
+        rect = await editorRect();
+        expect(rect.h).toBe(rect.vh);
+        await page.keyboard.press('Escape');
+        rect = await editorRect();
+        expect(rect.h).toBeLessThan(rect.vh / 2);
+
+        // the toolbar copy control puts the full editor content on the
+        // clipboard (the ACE branch of the ui.js .copy-btn handler); compare
+        // against the editor's own value - ACE auto-closes typed tags
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        await page.locator('#editor-html').click();
+        await page.keyboard.type('<p>e2e copy</p>');
+        await page.locator('.copy-btn[data-copy-target="#editor-html"]').click();
+        const editorContent = await page.evaluate(() => document.getElementById('editor-html').env.editor.getValue());
+        expect(editorContent).toContain('e2e copy');
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(editorContent);
+
+        // FlyonUI tabs switch the editor panes and mark the selected one
+        await expectSelectedTab(page, 'html-tab', ['text-tab']);
+        await page.locator('#text-tab').click();
+        await expect(page.locator('#text')).toBeVisible();
+        await expect(page.locator('#html')).toBeHidden();
+        await expectSelectedTab(page, 'text-tab', ['html-tab']);
+        await page.locator('button[type="submit"]', { hasText: 'Create template' }).click();
+        await page.waitForURL(/\/admin\/templates\/template\//);
+
+        // detail page: ACE preview initialized, send-test modal opens with the
+        // send button gated on the recipient
+        await expect(page.locator('#html-preview .ace_content')).toBeAttached();
+
+        // the copy button puts the template ID on the clipboard (ui.js handler)
+        // and briefly swaps its icon to a check mark as feedback
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        const templateId = await page.locator('#templateIdValue').inputValue();
+        expect(templateId).not.toBe('');
+        await page.locator('.copy-btn').click();
+        await expect(page.locator('.copy-btn [class*="icon-"]')).toHaveClass(/tabler--check\]/);
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(templateId);
+        await expect(page.locator('.copy-btn [class*="icon-"]')).toHaveClass(/tabler--copy\]/, { timeout: 3000 });
+        await page.locator('#test-btn').click();
+        await expect(page.locator('#sendTestModal.open')).toHaveCount(1);
+        expect(await page.evaluate(() => document.getElementById('send-test-btn').disabled)).toBe(true);
+
+        // The account field in this modal is the shared picker. A modal body scrolls its own
+        // content, which would clip an absolutely positioned dropdown, so the list joins the flow
+        // here - and the send button, which gates on the account, has to follow a pick.
+        // This template was created above with no account, so the picker always renders here -
+        // asserted rather than branched on, or a change that stopped rendering it would leave the
+        // rest of this block silently doing nothing
+        await expect(page.locator('#sendTestModal [data-picker="account"]')).toHaveCount(1);
+
+        await page.locator('#inputAccount-search').click();
+        const results = page.locator('#inputAccount-results');
+        await expect(results).toBeVisible();
+
+        const option = page.locator('#inputAccount-results [role="option"]').first();
+        // A standalone run of this spec has no account registered yet, and an empty list is a
+        // correct answer rather than a broken control
+        if (await option.count()) {
+            await option.click();
+            await expect(page.locator('#inputAccount')).not.toHaveValue('');
+            await page.locator('#inputTo').fill('someone@ethereal.email');
+            expect(await page.evaluate(() => document.getElementById('send-test-btn').disabled)).toBe(false);
+
+            // Reopening resets the form, and the card has to go with it - writing '' into the
+            // hidden input alone would leave an account on screen the form no longer holds
+            await page.keyboard.press('Escape');
+            await expect(page.locator('#sendTestModal.open')).toHaveCount(0);
+            await page.locator('#test-btn').click();
+            await expect(page.locator('#sendTestModal.open')).toHaveCount(1);
+            await expect(page.locator('#inputAccount')).toHaveValue('');
+            await expect(page.locator('#inputAccount-search')).toBeVisible();
+        } else {
+            await expect(results).toContainText('No account matches that.');
+        }
+
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#sendTestModal.open')).toHaveCount(0);
+
+        // topbar search matches the name with normalized case and whitespace
+        const templateUrl = page.url();
+        await page.goto('/admin/templates');
+        await searchTopbar(page, '/admin/templates', 'e2e  smoke');
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Template' })).toBeVisible();
+        await page.goto(templateUrl);
+
+        await deleteViaModal(page, /\/admin\/templates(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('webhooks: create a route with live filter evaluation, tabs on the detail page, delete', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/webhooks');
+        await expect(page.locator('h1', { hasText: 'Webhook Routes' })).toBeVisible();
+
+        // create through the ACE-backed editor form
+        await page.goto('/admin/webhooks/new');
+        await page.fill('#inputName', 'E2E Smoke Route');
+        await page.fill('#inputTargetUrl', 'https://example.com/e2e-webhook');
+        await expect(page.locator('#editor-fn .ace_content')).toBeAttached();
+
+        // the filter function is evaluated live in the evaluation Web Worker
+        await page.evaluate(() => window.ace.edit('editor-fn').setValue('return true;'));
+        await expect(page.locator('#filter-res')).toHaveText('filter matches');
+
+        // test-payload modal opens and offers predefined payloads
+        await page.locator('#test-payload-btn').click();
+        await expectModalOpen(page, 'setPayloadModal');
+        expect(await page.locator('#select-predefined-payload option').count()).toBeGreaterThan(1);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#setPayloadModal.open')).toHaveCount(0);
+
+        // the editor toolbar: the title cell reads as a label (distinct
+        // background from the action cells), and the scope-info tooltip
+        // renders as one solid bubble (an inline body once fragmented its
+        // background around the block list, leaving ghost text)
+        const titleBg = await page
+            .locator('.editor-embed-title')
+            .first()
+            .evaluate(el => window.getComputedStyle(el).backgroundColor);
+        const actionBg = await page
+            .locator('.editor-embed-content:not(.editor-embed-title)')
+            .first()
+            .evaluate(el => window.getComputedStyle(el).backgroundColor);
+        expect(titleBg).not.toBe(actionBg);
+
+        await page.locator('.editor-embed-content .tooltip-toggle').last().hover();
+        const bubble = await page
+            .locator('.editor-embed-content .tooltip-body')
+            .last()
+            .evaluate(el => {
+                const cs = window.getComputedStyle(el);
+                const bodyRect = el.getBoundingClientRect();
+                const listRect = el.querySelector('ul').getBoundingClientRect();
+                return {
+                    background: cs.backgroundColor,
+                    display: cs.display,
+                    enclosesList: bodyRect.top <= listRect.top && bodyRect.bottom >= listRect.bottom && bodyRect.height > 0
+                };
+            });
+        expect(bubble.background).not.toBe('rgba(0, 0, 0, 0)');
+        expect(bubble.display).toBe('block');
+        expect(bubble.enclosesList).toBe(true);
+        await page.mouse.move(0, 0);
+
+        await page.locator('button[type="submit"]', { hasText: 'Create webhook route' }).click();
+        await page.waitForURL(/\/admin\/webhooks\/webhook\//);
+
+        // detail page: read-only ACE previews, FlyonUI tabs switch fn/map panes
+        // and mark the selected one
+        await expect(page.locator('#fn-preview .ace_content')).toBeAttached();
+        await expectSelectedTab(page, 'fn-tab', ['map-tab']);
+        await page.locator('#map-tab').click();
+        await expect(page.locator('#map')).toBeVisible();
+        await expect(page.locator('#fn')).toBeHidden();
+        await expectSelectedTab(page, 'map-tab', ['fn-tab']);
+
+        // topbar search also matches the target URL of a route
+        const routeUrl = page.url();
+        await page.goto('/admin/webhooks');
+        await searchTopbar(page, '/admin/webhooks', 'e2e-webhook');
+        await expect(page.locator('tbody tr', { hasText: 'E2E Smoke Route' })).toBeVisible();
+        await page.goto(routeUrl);
+
+        await deleteViaModal(page, /\/admin\/webhooks(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config network: or-else-all gating, IP rescan and remove-address modal', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/network');
+        await expect(page.locator('h1', { hasText: 'Network' })).toBeVisible();
+
+        // the proxy checkbox is disabled until a proxy URL is entered (app.js or-else-all)
+        expect(await page.evaluate(() => document.getElementById('proxy_enabled').disabled)).toBe(true);
+        await page.fill('#proxyUrl', 'socks://localhost:1080');
+        await page.locator('#proxyUrl').dispatchEvent('change');
+        expect(await page.evaluate(() => document.getElementById('proxy_enabled').disabled)).toBe(false);
+
+        // scan for IPs re-renders the address list through the browser-side
+        // Handlebars template; the delete trigger is delegated so it works on
+        // re-rendered rows
+        await page.locator('#reload-btn').click();
+        await page.waitForFunction(() => !document.getElementById('reload-btn').disabled);
+        await expect(page.locator('#address-list tr').first()).toBeVisible();
+
+        const firstDelete = page.locator('#address-list .address-action-delete').first();
+        const address = await firstDelete.getAttribute('data-address');
+        await firstDelete.click();
+        await expect(page.locator('#deleteAddress.open')).toHaveCount(1);
+        await expect(page.locator('#deleteAddressLabel')).toHaveText(`Remove ${address}?`);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#deleteAddress.open')).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config webhooks: event-type gating and test-webhook button state', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/webhooks');
+        await expect(page.locator('h1', { hasText: 'Webhooks' })).toBeVisible();
+        expect(await page.locator('.event-type').count()).toBeGreaterThan(10);
+
+        // the script-variables (env) ACE editor lives on this page now
+        await expect(page.locator('#editor-env .ace_content')).toBeAttached();
+
+        // "All events" disables the individual event checkboxes
+        await page.locator('#notifyAll').check();
+        expect(await page.evaluate(() => [...document.querySelectorAll('.event-type')].every(e => e.disabled))).toBe(true);
+        await page.locator('#notifyAll').uncheck();
+        expect(await page.evaluate(() => [...document.querySelectorAll('.event-type')].every(e => !e.disabled))).toBe(true);
+
+        // the send-test button is gated on the webhook URL
+        await page.fill('#settingsWebhooks', '');
+        await page.locator('#settingsWebhooks').dispatchEvent('change');
+        expect(await page.evaluate(() => document.getElementById('test-payload-btn').disabled)).toBe(true);
+        await page.fill('#settingsWebhooks', 'https://example.com/e2e-hook');
+        await page.locator('#settingsWebhooks').dispatchEvent('change');
+        expect(await page.evaluate(() => document.getElementById('test-payload-btn').disabled)).toBe(false);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config smtp: integration examples render through highlight.js tabs', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/smtp');
+        await expect(page.locator('h1', { hasText: 'SMTP Server' })).toBeVisible();
+        await expect(page.locator('h1 .state-info')).toBeVisible();
+
+        await page.locator('summary', { hasText: 'Integration Examples' }).click();
+        await expect(page.locator('#example-nodemailer-code')).toContainText('createTransport');
+        await expectSelectedTab(page, 'example-nodemailer-tab', ['example-phpmailer-tab']);
+        await page.locator('#example-phpmailer-tab').click();
+        await expect(page.locator('#example-phpmailer')).toBeVisible();
+        await expect(page.locator('#example-phpmailer-code')).toContainText('PHPMailer');
+        await expectSelectedTab(page, 'example-phpmailer-tab', ['example-nodemailer-tab']);
+
+        // editing the port re-renders the examples
+        await page.fill('#smtpServerPort', '3535');
+        await page.locator('#smtpServerPort').dispatchEvent('change');
+        await expect(page.locator('#example-phpmailer-code')).toContainText('3535');
+
+        // the reveal and copy buttons are disabled while the password field is
+        // empty and enable as soon as a value is typed (ui.js .secret-field)
+        await expect(page.locator('#showPassword')).toBeDisabled();
+        await expect(page.locator('.secret-field .copy-btn')).toBeDisabled();
+        await page.fill('#smtpServerPassword', 'e2e-secret');
+        await expect(page.locator('#showPassword')).toBeEnabled();
+        await expect(page.locator('.secret-field .copy-btn')).toBeEnabled();
+        await expectPasswordToggle(page, 'showPassword', 'smtpServerPassword');
+
+        // the copy button puts the secret on the clipboard without revealing it
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        await page.locator('.secret-field .copy-btn').click();
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('e2e-secret');
+
+        // the listen-address input gets native datalist suggestions (uiDatalist)
+        await expect(page.locator('#smtpServerHost')).toHaveAttribute('list', 'available-addresses-list');
+        expect(await page.locator('#available-addresses-list option').count()).toBeGreaterThan(0);
+
+        await expectTlsLabelTooltip(page);
+
+        // hovering an errorless state badge must not show a bubble; the gate
+        // is ee-tooltip-empty on the wrapper, since HSTooltip's show() strips
+        // the hidden class from the content on hover
+        await page.locator('.state-info[data-type="smtp"]').hover();
+        await page.waitForTimeout(300);
+        await expect(page.locator('.tooltip.show .tooltip-content')).not.toBeVisible();
+        await page.mouse.move(0, 0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config smtp: the TLS toggle configures the listener, not the certificate', async ({ page, request }) => {
+        // Ticking this box used to order a Let's Encrypt certificate in the foreground, before the
+        // setting had been saved, and untick itself when the order failed - so it was disabled
+        // whenever no public domain was configured. It decides whether the listener speaks TLS
+        // now, which is always a valid thing to decide, and the certificate lives on its own page.
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const token = await createApiToken(page, 'e2e tls-gate token');
+        const auth = { Authorization: `Bearer ${token}` };
+
+        const orig = await (await request.get('/v1/settings?serviceUrl=true', { headers: auth })).json();
+        // the TLS summary card is on both server config pages
+        const pages = [
+            { path: '/admin/config/smtp', box: '#smtpServerTLSEnabled' },
+            { path: '/admin/config/imap-proxy', box: '#imapProxyServerTLSEnabled' }
+        ];
+
+        try {
+            const cleared = await request.post('/v1/settings', { headers: auth, data: { serviceUrl: '' } });
+            expect(cleared.ok(), `POST /v1/settings -> ${cleared.status()}`).toBeTruthy();
+
+            for (const { path: pagePath, box } of pages) {
+                await page.goto(pagePath);
+                await expect(page.locator(box)).toBeEnabled();
+                await expect(page.locator('a[href="/admin/config/tls"]').first()).toBeVisible();
+            }
+        } finally {
+            const restored = await request.post('/v1/settings', { headers: auth, data: { serviceUrl: orig.serviceUrl || '' } });
+            expect(restored.ok(), `restore serviceUrl -> ${restored.status()}`).toBeTruthy();
+        }
+
+        for (const { path: pagePath, box } of pages) {
+            await page.goto(pagePath);
+            await expect(page.locator(box)).toBeEnabled();
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config imap-proxy: client examples and password reveal', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/imap-proxy');
+        await expect(page.locator('h1', { hasText: 'IMAP Proxy' })).toBeVisible();
+
+        await page.locator('summary', { hasText: 'Client Configuration Examples' }).click();
+        await expect(page.locator('#example-node-imap-code')).toContainText('new Imap');
+
+        await page.fill('#imapProxyServerPassword', 'e2e-secret');
+        await expectPasswordToggle(page, 'showPassword', 'imapProxyServerPassword');
+
+        // the listen-address input gets native datalist suggestions (uiDatalist)
+        await expect(page.locator('#imapProxyServerHost')).toHaveAttribute('list', 'available-addresses-list');
+        expect(await page.locator('#available-addresses-list option').count()).toBeGreaterThan(0);
+
+        await expectTlsLabelTooltip(page);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config ai: ACE editors, live filter evaluation and test-filter modal', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/ai');
+        await expect(page.locator('#editor-fn .ace_content')).toBeAttached();
+        await expect(page.locator('#editor-prompt .ace_content')).toBeAttached();
+
+        await page.evaluate(() => window.ace.edit('editor-fn').setValue('return true;'));
+        await expect(page.locator('#filter-res')).toHaveText('match - will process');
+
+        await page.locator('#test-payload-btn').click();
+        await expectModalOpen(page, 'setPayloadModal');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#setPayloadModal.open')).toHaveCount(0);
+
+        // the model picker: the card shows the default, the search finds a model by any part of
+        // its name, ranks the best answer first (terms are matched one by one, so "gpt 6" reaches
+        // gpt-6-luna and puts it above gpt-5.6-luna), and the hidden input the form posts carries
+        // the picked id
+        const picker = page.locator('[data-picker="model"]');
+        await expect(picker.locator('[data-picker-card]')).toContainText('Default');
+        await picker.locator('[data-picker-card] button').click();
+        await page.locator('#openAiModel-search').fill('gpt 6');
+        await expect(page.locator('#openAiModel-results button').first()).toContainText('GPT-6 Luna');
+        await page.locator('#openAiModel-search').fill('6 luna');
+        await expect(page.locator('#openAiModel-results button').first()).toContainText('GPT-6 Luna');
+        await page.locator('#openAiModel-search').fill('cheap');
+        await expect(page.locator('#openAiModel-results button').first()).toContainText('Nano');
+        await page.locator('#openAiModel-search').fill('nano');
+        await page.locator('#openAiModel-results button', { hasText: 'GPT-5.4 Nano' }).first().click();
+        await expect(page.locator('#openAiModel')).toHaveValue('gpt-5.4-nano');
+        await expect(picker.locator('[data-picker-card]')).toContainText('gpt-5.4-nano');
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config service: language override details and queue cleanup toast', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/service');
+        await expect(page.locator('h1', { hasText: 'General' })).toBeVisible();
+
+        await page.locator('#languageDetails summary').click();
+        await expect(page.locator('#languageDetails .alert')).toBeVisible();
+
+        // the timezone list comes from the runtime ICU data under current IANA names
+        const timezone = page.locator('#settingsServiceTimezone');
+        await expect(timezone.locator('option[value="Europe/Kyiv"]')).toHaveText('Europe/Kyiv (GMT+02:00)');
+        await expect(timezone.locator('option[value="Europe/Kiev"]')).toHaveCount(0);
+
+        // clear-completed-jobs posts to the server and reports through a toast
+        await page.locator('#clean-queues-btn').click();
+        await expect(page.locator('#toastContainer .alert', { hasText: 'Cleanup request sent' })).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config forms: a validation error keeps the submitted values and the menu highlight', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // the content-size field takes free text ("1MB"), so an invalid value reaches
+        // the server-side Joi validation instead of being blocked by the browser
+        await page.goto('/admin/config/webhooks');
+        const sizeField = page.locator('#settingsNotifyTextSize');
+        const origSize = await sizeField.inputValue();
+        await sizeField.fill('not-a-size');
+        await page.getByRole('button', { name: 'Save changes' }).click();
+
+        await expect(page.locator('.flash-alert', { hasText: "Couldn't save settings" })).toBeVisible();
+        // the submitted value stays in the field instead of resetting to the stored one
+        await expect(sizeField).toHaveValue('not-a-size');
+        // and the sidebar still highlights the page being edited
+        await expect(page.locator('#menu-config .menu-active', { hasText: 'Webhooks' })).toBeVisible();
+
+        // restore and confirm the form still saves
+        await sizeField.fill(origSize);
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await expect(page.locator('.flash-alert', { hasText: 'Configuration updated' })).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config security: status badges and service secret reveal', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/security');
+        await expect(page.locator('h1', { hasText: 'Security' })).toBeVisible();
+        await expect(page.locator('#enableTokens')).toBeVisible();
+        await expect(page.locator('#encryption')).toBeDisabled();
+
+        await expectPasswordToggle(page, 'showServiceSecret', 'settingsServiceSecret');
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config email-processing: form renders with effective export defaults', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/email-processing');
+        await expect(page.locator('h1', { hasText: 'Email Processing' })).toBeVisible();
+        await expect(page.locator('#settingsImapIndexer')).toBeVisible();
+        await expect(page.locator('#trackOpens')).toBeVisible();
+        // the export batch inputs render the effective defaults (they were
+        // dead fields before the page split - never loaded, silently dropped)
+        await expect(page.locator('#settingsGmailExportBatchSize')).toHaveValue(/^\d+$/);
+        await expect(page.locator('#settingsOutlookExportBatchSize')).toHaveValue(/^\d+$/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config branding: ACE editors and public-page preview form', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/branding');
+        await expect(page.locator('h1', { hasText: 'Branding' })).toBeVisible();
+        await expect(page.locator('#editor-html .ace_content')).toBeAttached();
+        await expect(page.locator('#editor-html-head .ace_content')).toBeAttached();
+        await expect(page.locator('#settingsPageBrandName')).toBeVisible();
+        await expect(page.locator('#preview-header-btn')).toBeVisible();
+
+        // the ACE editors follow the admin theme: toggling swaps in the dark
+        // theme (ace marks the container with ace_dark) and back again
+        const editorIsDark = id => page.evaluate(id => document.getElementById(id).classList.contains('ace_dark'), id);
+        const startedDark = await page.evaluate(() => window.uiEffectiveTheme() === 'dark');
+        await expect.poll(() => editorIsDark('editor-html')).toBe(startedDark);
+        await page.locator('.theme-toggle-btn').first().click();
+        await expect.poll(() => editorIsDark('editor-html')).toBe(!startedDark);
+        await expect.poll(() => editorIsDark('editor-html-head')).toBe(!startedDark);
+        await page.locator('.theme-toggle-btn').first().click();
+        await expect.poll(() => editorIsDark('editor-html')).toBe(startedDark);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config logging and license: forms render', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/config/logging');
+        await expect(page.locator('h1', { hasText: 'Logging' })).toBeVisible();
+        await expect(page.locator('#settingsLogsMaxLogLines')).toBeVisible();
+
+        await page.goto('/admin/config/license');
+        await expect(page.locator('h1', { hasText: 'License' })).toBeVisible();
+        // the add-license panel is collapsible; the e2e instance runs on a
+        // trial so it starts collapsed
+        const details = page.locator('details', { has: page.locator('summary', { hasText: 'Add License Key' }) });
+        if (!(await details.evaluate(d => d.open))) {
+            await details.locator('summary').click();
+        }
+        await expect(page.locator('#licenseTextElement')).toBeVisible();
+        await expect(page.locator('#licenseFile')).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('oauth apps: create via provider dropdown, verify-setup modal, delete', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // apps list with the create-app dropdown
+        await page.goto('/admin/config/oauth');
+        await expect(page.locator('h1', { hasText: 'OAuth2 Apps' })).toBeVisible();
+        await page.locator('#create-app-dropdown').click();
+        await expect(page.locator('#create-app-dropdown ~ ul .dropdown-item', { hasText: 'Gmail Service Accounts' })).toBeVisible();
+        await page.keyboard.press('Escape');
+
+        // create a Gmail app with dummy credentials through the converted form; the base-scope radios
+        // reveal the section that declares the scope they select (data-base-scopes) plus the
+        // account-type helper
+        await page.goto('/admin/config/oauth/new?provider=gmail');
+        await expect(page.locator('[data-base-scopes="api"]')).toBeHidden();
+        await page.locator('#baseScopesAPI').check();
+        await expect(page.locator('[data-base-scopes="api"]')).toBeVisible();
+        await expect(page.locator('#account-type-card-gmail')).toBeVisible();
+        await expect(page.locator('#pubSubApp')).toBeEnabled();
+        await page.locator('#baseScopesImap').check();
+        await expect(page.locator('[data-base-scopes="api"]')).toBeHidden();
+        await expect(page.locator('#pubSubApp')).toBeDisabled();
+
+        // a scope preset writes the custom scope lists and opens their card so the result can be reviewed
+        await page.locator('#baseScopesAPI').check();
+        await page.locator('.account-type-btn[data-type="sendonly"]').click();
+        await expect(page.locator('#setupScopes')).toHaveAttribute('open', '');
+        await expect(page.locator('#extraScopes')).toHaveValue(/gmail\.send/);
+        await expect(page.locator('#skipScopesList')).toHaveValue(/gmail\.modify/);
+
+        // the Outlook tenant ID appears, and becomes required, for the single-tenant choice only
+        await page.goto('/admin/config/oauth/new?provider=outlook');
+        await expect(page.locator('#tenant')).toBeHidden();
+        await page.selectOption('#authority', 'tenant');
+        await expect(page.locator('#tenant')).toBeVisible();
+        await expect(page.locator('#tenant')).toBeEnabled();
+        await page.selectOption('#authority', 'common');
+        await expect(page.locator('#tenant')).toBeHidden();
+        await expect(page.locator('#tenant')).toBeDisabled();
+
+        // A service account reaches Gmail over the HTTP API the same way an interactive app does, so it
+        // offers the same choice - and its block is the one carrying two toggled sections, the Pub/Sub
+        // service account for `api` and the topic/subscription names for `pubsub`.
+        await page.goto('/admin/config/oauth/new?provider=gmailService');
+        await expect(page.locator('#baseScopesAPI')).toBeVisible();
+        await page.locator('#baseScopesAPI').check();
+        await expect(page.locator('[data-base-scopes="api"]')).toBeVisible();
+        await expect(page.locator('[data-base-scopes="pubsub"]')).toBeHidden();
+        await expect(page.locator('#account-type-card-gmail')).toBeVisible();
+        await expect(page.locator('#pubSubApp')).toBeEnabled();
+
+        await page.locator('#baseScopesPubsub').check();
+        await expect(page.locator('[data-base-scopes="pubsub"]')).toBeVisible();
+        await expect(page.locator('[data-base-scopes="api"]')).toBeHidden();
+        await expect(page.locator('#googleTopicName')).toBeVisible();
+        await expect(page.locator('#pubSubApp')).toBeDisabled();
+        await page.locator('#baseScopesImap').check();
+
+        // the authentication method is a ui/choice-tabs strip: radios drawn as tabs, each swapping
+        // in its own sections
+        await expect(page.locator('#authMethodServiceKey')).toBeChecked();
+        await expect(page.locator('.auth-method-section-externalAccount').first()).toBeHidden();
+        await page.locator('#authMethodExternalAccount').check();
+        await expect(page.locator('.auth-method-section-externalAccount').first()).toBeVisible();
+        await expect(page.locator('.auth-method-section-serviceKey').first()).toBeHidden();
+
+        // The attached service account is a Pub/Sub-only method: its tab is always shown, badged
+        // outside that scope, and choosing it selects the Pub/Sub base scope and says so. Its section
+        // hides and disables the service account fields it does not use (a hidden required field would
+        // block the submit)
+        await expect(page.locator('#authMethodScopeBadge')).toBeVisible();
+        await page.locator('#authMethodMetadataServer').check();
+        await expect(page.locator('#baseScopesPubsub')).toBeChecked();
+        await expect(page.locator('#authMethodNotice')).toContainText('base scope was set to Cloud Pub/Sub');
+        await expect(page.locator('#authMethodScopeBadge')).toBeHidden();
+        await expect(page.locator('[data-base-scopes="pubsub"]')).toBeVisible();
+        await expect(page.locator('#serviceClientEmail')).toBeHidden();
+        await expect(page.locator('#serviceClientEmail')).toBeDisabled();
+        await expect(page.locator('#serviceClient')).toBeDisabled();
+        await expect(page.locator('#googleProjectId')).toBeEnabled();
+
+        // This host is not on Google Cloud, so asking reports why rather than filling anything in
+        await page.locator('#metadataProbe').click();
+        await expect(page.locator('#metadataProbeResult')).toContainText('metadata server', { timeout: 20000 });
+        await expect(page.locator('#metadataProbe')).toBeEnabled();
+
+        // leaving Pub/Sub while it is selected falls back to the key, and says so
+        await page.locator('#baseScopesImap').check();
+        await expect(page.locator('#authMethodScopeBadge')).toBeVisible();
+        await expect(page.locator('#authMethodServiceKey')).toBeChecked();
+        await expect(page.locator('#authMethodNotice')).toContainText('switched to Service account key');
+        await expect(page.locator('#serviceClientEmail')).toBeEnabled();
+
+        // the Gmail API mode's "Register one" link opens the form with Pub/Sub preselected
+        await page.goto('/admin/config/oauth/new?provider=gmailService&baseScopes=pubsub');
+        await expect(page.locator('#baseScopesPubsub')).toBeChecked();
+        await expect(page.locator('#authMethodScopeBadge')).toBeHidden();
+
+        await page.goto('/admin/config/oauth/new?provider=gmail');
+        await page.locator('#baseScopesImap').check();
+        await page.fill('#name', 'E2E OAuth App');
+        await page.fill('#clientId', '1234567890-e2e.apps.googleusercontent.com');
+        await page.fill('#clientSecret', 'GOCSPX-e2e-dummy');
+        await page.locator('button[type="submit"]', { hasText: 'Register app' }).click();
+        await page.waitForURL(/\/admin\/config\/oauth\/app\//);
+
+        // detail page: the join-variant ui/copy-field copies the provider ID
+        await expect(page.locator('#appIdValue')).toBeVisible();
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        await page.locator('.copy-btn').click();
+        const appId = await page.locator('#appIdValue').inputValue();
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(appId);
+
+        // verify-setup modal auto-runs the configuration checks
+        await page.locator('#verify-btn').click();
+        await expectModalOpen(page, 'verifySetupModal');
+        // the run finishes (dummy credentials, so the verdict may report failures)
+        await page.waitForFunction(() => !document.getElementById('verify-run-btn').disabled);
+        expect(await page.locator('#verify-steps li').count()).toBeGreaterThan(0);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#verifySetupModal.open')).toHaveCount(0);
+
+        await deleteViaModal(page, /\/admin\/config\/oauth(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('internals: thread table with restart and snapshot modals', async ({ page }) => {
+        // Counts the worker threads, and without a license every worker but the API server is
+        // suspended. happy-path.spec.js activates the trial in a full run.
+        test.skip(!!process.env.EE_E2E_STANDALONE, 'needs the trial license happy-path.spec.js activates (EE_E2E_STANDALONE run)');
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/internals');
+        await expect(page.locator('h1', { hasText: 'Workers' })).toBeVisible();
+        expect(await page.locator('tbody tr').count()).toBeGreaterThan(3);
+
+        // every thread row carries an event loop reading (or a dash before its first one)
+        await expect(page.locator('thead th', { hasText: 'Event loop' }).first()).toBeVisible();
+        for (const cell of await page.locator('td[data-label="Event loop"]').allTextContents()) {
+            expect(cell.trim()).toMatch(/^(\d[\d,.\s]* ms|-)$/);
+        }
+
+        // row actions live in a per-row kebab (ui/row-actions): open the row's menu, then the
+        // item fills the hidden thread input and opens the modal. openRowMenu waits out the close
+        // fade of a previous menu, which is what used to make this look like a random close.
+        const openRowActionAndClick = async itemLocator => {
+            await openRowMenu(itemLocator.locator('xpath=ancestor::tr[1]'), 'Worker actions');
+            await itemLocator.click();
+        };
+
+        await openRowActionAndClick(page.locator('.snapshot-thread-btn').first());
+        await expect(page.locator('#snapshotThread.open')).toHaveCount(1);
+        expect(await page.evaluate(() => document.getElementById('snapshot-thread').value)).not.toBe('');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#snapshotThread.open')).toHaveCount(0);
+        await overlaySettled(page);
+
+        // the kill/restart action only renders for non-main threads
+        const killBtn = page.locator('.kill-thread-btn').first();
+        const killThread = await killBtn.getAttribute('data-thread');
+        await openRowActionAndClick(killBtn);
+        await expect(page.locator('#killThread.open')).toHaveCount(1);
+        expect(await page.evaluate(() => document.getElementById('kill-thread').value)).toBe(killThread);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#killThread.open')).toHaveCount(0);
+        await overlaySettled(page);
+
+        // thread detail page: follow an accounts-count link when an account is
+        // assigned; otherwise open an IMAP worker thread ("Email worker" row)
+        // and assert the empty branch. Late in a full-suite run the IMAP
+        // worker may no longer be listed (pre-existing e2e-environment
+        // behaviour, unrelated to the theme) - then assert the route guard
+        // instead: thread URLs for non-IMAP threads redirect to the list.
+        const threadLink = page.locator('tbody a[href^="/admin/internals/thread/"]').first();
+        const imapRow = page.locator('tbody tr', { hasText: 'Email worker' }).first();
+        if (await threadLink.count()) {
+            await threadLink.click();
+            await page.waitForURL(/\/admin\/internals\/thread\//);
+            await expect(page.locator('.state-info').first()).toBeVisible();
+            await expect(page.locator('h1', { hasText: 'Accounts' })).toBeVisible();
+            await expect(page.getByText('Total Accounts:')).toBeVisible();
+        } else if (await imapRow.count()) {
+            const imapThread = await imapRow.locator('.kill-thread-btn').getAttribute('data-thread');
+            await page.goto(`/admin/internals/thread/${imapThread}`);
+            await expect(page.getByText('No accounts assigned to this thread.')).toBeVisible();
+            await expect(page.locator('h1', { hasText: 'Accounts' })).toBeVisible();
+            await expect(page.getByText('Total Accounts:')).toBeVisible();
+        } else {
+            await page.goto(`/admin/internals/thread/${killThread}`);
+            await page.waitForURL(/\/admin\/internals(\?|$)/);
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('public pages: index and license render under the main layout', async ({ page, browser }) => {
+        // both routes are unauthenticated; use a clean context to prove that
+        const context = await browser.newContext({ storageState: undefined });
+        const anonPage = await context.newPage();
+        const errors = trackConsoleErrors(anonPage);
+
+        await anonPage.goto('/');
+        await expect(anonPage.locator('img[alt="EmailEngine"]')).toBeVisible();
+        await expect(anonPage.locator('a.btn', { hasText: 'Manage EmailEngine' })).toBeVisible();
+        await expect(anonPage.getByText(/Postal Systems/)).toBeVisible();
+
+        await anonPage.goto('/license.html');
+        await expect(anonPage.locator('img[alt="EmailEngine"]')).toBeVisible();
+        expect((await anonPage.locator('body').textContent()).length).toBeGreaterThan(500);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+        await context.close();
+    });
+
+    test('account security: status rows and 2FA/logout modals', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/account/security');
+        await expect(page.locator('h1', { hasText: 'Account Security' })).toBeVisible();
+        // auth is enabled on the e2e instance, so all status rows render
+        expect(await page.locator('.card ul > li').count()).toBeGreaterThanOrEqual(4);
+
+        // passkeys are summarized here and managed on their own page, like the password row
+        const passkeySummary = page.locator('#passkeys-summary');
+        await expect(passkeySummary.locator('.badge')).toHaveText('Not configured');
+        await expect(passkeySummary.locator('a[href="/admin/account/passkeys"]')).toBeVisible();
+        // with no passkeys registered the 2FA row makes no claim about them
+        await expect(page.locator('.card ul > li', { hasText: 'Two-Factor Authentication' })).not.toContainText('passkey');
+        // the credential list itself does not live on this page
+        await expect(page.locator('#passkeys')).toHaveCount(0);
+
+        // open and close the confirmation modals without submitting
+        await page.locator('#logout-all-btn').click();
+        await expectModalOpen(page, 'logoutAllModal');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#logoutAllModal.open')).toHaveCount(0);
+
+        await page.locator('#enable-tfa-btn').click();
+        await expect(page.locator('#enableTfaModal.open')).toHaveCount(1);
+        await expect(page.locator('#enableTfaModal img[alt="TOTP QR code"]')).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#enableTfaModal.open')).toHaveCount(0);
+
+        // SSO is documentation, not configuration: one button, one dialog, a tab per provider
+        await page.locator('#sso-instructions').click();
+        await expectModalOpen(page, 'ssoInstructionsModal');
+        await expect(page.locator('#sso-oidc')).toBeVisible();
+        await expect(page.locator('#sso-okta')).toBeHidden();
+        await page.locator('#sso-okta-tab').click();
+        await expect(page.locator('#sso-okta')).toBeVisible();
+        await expect(page.locator('#sso-oidc')).toBeHidden();
+        await expect(page.locator('#sso-okta')).toContainText('OKTA_OAUTH2_ISSUER');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#ssoInstructionsModal.open')).toHaveCount(0);
+
+        // password page renders its form
+        await page.goto('/admin/account/password');
+        await expect(page.locator('#password')).toBeVisible();
+        await expect(page.locator('#password2')).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('passkeys page: empty state and the register dialog', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // reached the way a reader reaches it, through the security page's summary row
+        await page.goto('/admin/account/security');
+        await page.locator('#passkeys-summary a').click();
+        await page.waitForURL(/\/admin\/account\/passkeys$/);
+
+        await expect(page.locator('.breadcrumbs')).toContainText('Account Security');
+        await expect(page.locator('.card-title')).toHaveText('Passkeys');
+        await expect(page.getByText('No passkeys registered')).toBeVisible();
+
+        // registering needs an authenticator the browser does not have, so this only covers the
+        // dialog opening; the button is live because config/e2e.toml sets a serviceUrl
+        const addPasskey = page.locator('#register-passkey-btn');
+        await expect(addPasskey).toBeEnabled();
+        await addPasskey.click();
+        await expectModalOpen(page, 'registerPasskeyModal');
+        // the name field opens pre-filled, so a passkey is identifiable in the list by default
+        await expect(page.locator('#passkey-name')).not.toHaveValue('');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#registerPasskeyModal.open')).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('passkeys page: the list describes each credential and removes one', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        const DAY = 24 * 3600 * 1000;
+        const SEEDED = [
+            {
+                id: 'e2e-passkey-laptop',
+                name: 'E2E Laptop',
+                transports: ['internal'],
+                createdAt: new Date(Date.now() - 10 * DAY).toISOString(),
+                lastUsedAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+            },
+            {
+                // no lastUsedAt: a credential from before sign-ins were stamped looks the same as
+                // one that has never been used, so the column says neither
+                id: 'e2e-passkey-key',
+                name: 'E2E Security Key',
+                transports: ['usb', 'nfc'],
+                createdAt: new Date(Date.now() - DAY).toISOString()
+            }
+        ];
+        await seedPasskeys(SEEDED);
+
+        try {
+            // the security page counts them, and the 2FA row says what they do to the guarantee
+            // its badge implies - a passkey skips the code whether or not TOTP is on
+            await page.goto('/admin/account/security');
+            await expect(page.locator('#passkeys-summary .badge')).toHaveText('2 registered');
+            await expect(page.locator('.card ul > li', { hasText: 'Two-Factor Authentication' })).toContainText(
+                '2 passkeys sign in without a password or a code'
+            );
+
+            await page.goto('/admin/account/passkeys');
+            const rows = page.locator('tbody tr');
+            await expect(rows).toHaveCount(2);
+
+            const laptop = rows.filter({ hasText: 'E2E Laptop' });
+            await expect(laptop).toContainText('Built-in authenticator');
+            // the client-side .relative-time formatter fills the cell in
+            await expect(laptop.locator('.relative-time').last()).toContainText('hours ago');
+
+            const securityKey = rows.filter({ hasText: 'E2E Security Key' });
+            await expect(securityKey).toContainText('Security key');
+
+            // the actions live in the row's trailing cell, not floating mid-page
+            const actions = laptop.locator('td:last-child .dropdown-toggle');
+            await expect(actions).toBeVisible();
+            await actions.click();
+            await laptop.locator('.list-delete-btn').click();
+
+            // the shared confirm modal names the passkey the kebab belongs to
+            await expectModalOpen(page, 'deletePasskey');
+            await expect(page.locator('#deletePasskey .delete-target-name')).toHaveText('E2E Laptop');
+            await page.locator('#deletePasskey button[type="submit"]').click();
+
+            // removing returns to this page, not to the security page the flow started on
+            await page.waitForURL(/\/admin\/account\/passkeys$/);
+            await expect(page.locator('.flash-alert', { hasText: 'Passkey removed' })).toBeVisible();
+            await expect(page.locator('tbody tr')).toHaveCount(1);
+            await expect(page.locator('tbody tr')).toContainText('E2E Security Key');
+
+            // the summary and the 2FA note count the same list, so they follow the removal
+            await page.goto('/admin/account/security');
+            await expect(page.locator('#passkeys-summary .badge')).toHaveText('1 registered');
+            await expect(page.locator('.card ul > li', { hasText: 'Two-Factor Authentication' })).toContainText(
+                'A passkey signs in without a password or a code'
+            );
+        } finally {
+            await removePasskeys(SEEDED.map(credential => credential.id));
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('passkey registration refuses a sign-in challenge and an unconfirmed password', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // /admin/passkey/auth/options only answers once the instance has a passkey to offer
+        const SEEDED = [{ id: 'e2e-passkey-challenge', name: 'E2E Challenge Probe', transports: ['internal'] }];
+        await seedPasskeys(SEEDED);
+
+        try {
+            await page.goto('/admin/account/passkeys');
+
+            const result = await page.evaluate(async password => {
+                const crumb = document.querySelector('#security-crumb').value;
+                const post = (url, body) =>
+                    fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(Object.assign({ crumb }, body))
+                    }).then(async res => ({ status: res.status, body: await res.json() }));
+
+                // A syntactically valid credential is enough: both requests must be refused before
+                // anything looks at it.
+                const credential = {
+                    id: 'AAAA',
+                    rawId: 'AAAA',
+                    type: 'public-key',
+                    response: { clientDataJSON: 'AAAA', attestationObject: 'AAAA' }
+                };
+
+                // 1. a nonce from the unauthenticated sign-in endpoint, spent on registration
+                const signIn = await post('/admin/passkey/auth/options', {});
+                const borrowed = await post('/admin/account/passkeys/register/verify', {
+                    challengeId: signIn.body.challengeId,
+                    password,
+                    name: 'planted',
+                    credential
+                });
+
+                // 2. a genuine registration nonce, but the password is not resent
+                const issued = await post('/admin/account/passkeys/register/options', { password });
+                const unconfirmed = await post('/admin/account/passkeys/register/verify', {
+                    challengeId: issued.body.challengeId,
+                    name: 'planted',
+                    credential
+                });
+
+                return { signInStatus: signIn.status, borrowed, unconfirmed };
+            }, ADMIN_PASSWORD);
+
+            // the sign-in endpoint really did hand out a challenge, so the refusal below is the
+            // namespacing and not a missing precondition
+            expect(result.signInStatus).toBe(200);
+
+            expect(result.borrowed.status).toBe(400);
+            expect(result.borrowed.body.error).toMatch(/Challenge expired or invalid/);
+
+            expect(result.unconfirmed.status).toBe(403);
+            expect(result.unconfirmed.body.error).toMatch(/Invalid password/);
+
+            // neither attempt stored anything
+            await page.goto('/admin/account/passkeys');
+            await expect(page.locator('tbody tr')).toHaveCount(1);
+            await expect(page.locator('tbody tr')).toContainText('E2E Challenge Probe');
+        } finally {
+            await removePasskeys(SEEDED.map(credential => credential.id));
+        }
+
+        // The two refusals are the point of the test, and Chromium logs every non-2xx fetch as a
+        // console error - their status codes are asserted above, so only anything else is breakage
+        const unexpected = errors.filter(text => !/responded with a status of (400|403)/.test(text));
+        expect(unexpected, unexpected.join('\n')).toHaveLength(0);
+    });
+
+    test('state badge: connection error shows in the FlyonUI tooltip', async ({ page, request }) => {
+        // The account has to reach the IMAP worker, and without a license every worker but the API
+        // server is suspended, so its badge would sit on Initializing. happy-path.spec.js activates
+        // the trial in a full run.
+        test.skip(!!process.env.EE_E2E_STANDALONE, 'needs the trial license happy-path.spec.js activates (EE_E2E_STANDALONE run)');
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        const token = await createApiToken(page, 'e2e state-badge token');
+        const auth = { Authorization: `Bearer ${token}` };
+        const ACCOUNT_ID = 'e2e-bad-auth';
+
+        // an account with intentionally wrong IMAP credentials fails auth fast
+        // and deterministically, driving its badge into the error state (via
+        // SSE repaint while the list is open, or the server render if the
+        // failure lands first - both paths feed the same ui/state-badge)
+        await request.delete(`/v1/account/${ACCOUNT_ID}`, { headers: auth }).catch(() => {});
+        const res = await request.post('/v1/account', {
+            headers: auth,
+            data: {
+                account: ACCOUNT_ID,
+                name: 'E2E Bad Auth',
+                email: 'e2e-bad-auth@ethereal.email',
+                imap: {
+                    host: 'imap.ethereal.email',
+                    port: 993,
+                    secure: true,
+                    auth: { user: 'e2e-nonexistent@ethereal.email', pass: 'wrong-password' }
+                }
+            }
+        });
+        expect(res.ok(), `POST /v1/account -> ${res.status()} ${await res.text()}`).toBeTruthy();
+
+        try {
+            await page.goto('/admin/accounts');
+            const badge = page.locator(`.state-info[data-account="${ACCOUNT_ID}"]`);
+            await expect(badge).toBeVisible();
+
+            await expect(badge).toHaveText(/Connection failed/, { timeout: 90000 });
+            await expect(badge).toHaveClass(/badge-error/);
+
+            // the error text lands in the tooltip body and the content unhides
+            const wrap = page.locator(`.tooltip:has(.state-info[data-account="${ACCOUNT_ID}"])`);
+            await expect(wrap).not.toHaveClass(/ee-tooltip-empty/);
+            expect((await wrap.locator('.tooltip-body').textContent()).trim()).not.toBe('');
+
+            await expectTooltipOnHover(page, badge);
+
+            // the failing account rolls up into the dashboard "Needs attention"
+            // card (the connections gauge refreshes on the metrics interval, so
+            // poll across reloads) and its link opens the combined errors filter
+            await expect
+                .poll(
+                    async () => {
+                        await page.goto('/admin');
+                        let value = await page.locator('.card', { hasText: 'Needs attention' }).locator('.text-xl').textContent();
+                        return Number(value.trim()) || 0;
+                    },
+                    { timeout: 60000 }
+                )
+                .toBeGreaterThan(0);
+
+            const attentionLink = page.getByRole('link', { name: 'Needs attention' });
+            await expect(attentionLink).toHaveAttribute('href', '/admin/accounts?state=errors');
+            await attentionLink.click();
+            await page.waitForURL(/\/admin\/accounts\?state=errors/);
+            await expect(page.locator(`.state-info[data-account="${ACCOUNT_ID}"]`)).toBeVisible();
+            await expect(page.locator('#search-state-dropdown')).toHaveText(/Needs attention/);
+
+            await page.goto('/admin/accounts');
+            await expect(badge).toBeVisible();
+
+            // live SSE repaint: watch the badge for DOM mutations, then force
+            // a state change server-side - the /admin/changes EventSource must
+            // repaint the badge with no page reload involved
+            await page.evaluate(id => {
+                window.__badgeMutations = 0;
+                const badgeElm = document.querySelector(`.state-info[data-account="${id}"]`);
+                // attributeFilter: the tooltip teardown from the hover above
+                // mutates the badge's style attribute asynchronously; the SSE
+                // repaint always touches class/children, never style
+                new window.MutationObserver(() => window.__badgeMutations++).observe(badgeElm, {
+                    childList: true,
+                    characterData: true,
+                    attributeFilter: ['class'],
+                    subtree: true
+                });
+            }, ACCOUNT_ID);
+            const reconnect = await request.put(`/v1/account/${ACCOUNT_ID}/reconnect`, {
+                headers: auth,
+                data: { reconnect: true }
+            });
+            expect(reconnect.ok(), `PUT reconnect -> ${reconnect.status()}`).toBeTruthy();
+            await expect.poll(() => page.evaluate(() => window.__badgeMutations), { timeout: 30000 }).toBeGreaterThan(0);
+        } finally {
+            // wait out the async teardown - a mid-deletion account transiently
+            // 404s account lookups on the internals thread pages
+            await request.delete(`/v1/account/${ACCOUNT_ID}`, { headers: auth });
+            await expect.poll(async () => (await request.get(`/v1/account/${ACCOUNT_ID}`, { headers: auth })).status(), { timeout: 15000 }).toBe(404);
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('config pages: every settings form saves and reports through a flash alert', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // idempotent save round-trip on every config page: the forms post their
+        // rendered (persisted) values back, so nothing changes server-side
+        const configPages = [
+            '/admin/config/webhooks',
+            '/admin/config/service',
+            '/admin/config/security',
+            '/admin/config/email-processing',
+            '/admin/config/branding',
+            '/admin/config/logging',
+            '/admin/config/network',
+            '/admin/config/smtp',
+            '/admin/config/imap-proxy',
+            '/admin/config/ai'
+        ];
+        for (const configPath of configPages) {
+            await page.goto(configPath);
+            await page.getByRole('button', { name: 'Save changes' }).click();
+            const flash = page.locator('.flash-alert', { hasText: 'Configuration updated' });
+            await expect(flash, `${configPath} save`).toBeVisible({ timeout: 15000 });
+            // the close button removes the alert (ui.js .flash-alert-close handler);
+            // wait for ui.js to have executed before relying on its binding
+            await page.waitForFunction(() => typeof window.uiDismissFade === 'function');
+            await flash.locator('.flash-alert-close').click();
+            await expect(flash, `${configPath} flash close`).toHaveCount(0);
+        }
+
+        // a changed value actually persists across the redirect
+        await page.goto('/admin/config/logging');
+        const maxLines = page.locator('#settingsLogsMaxLogLines');
+        const origLines = await maxLines.inputValue();
+        await maxLines.fill('12345');
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await expect(page.locator('.flash-alert', { hasText: 'Configuration updated' })).toBeVisible();
+        await expect(maxLines).toHaveValue('12345');
+        await maxLines.fill(origLines);
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await expect(maxLines).toHaveValue(origLines);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('gateways: edit page prefills and updates', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/gateways/new');
+        await page.fill('#gateway', 'e2e-edit-gw');
+        await page.fill('#name', 'E2E Edit Gateway');
+        await page.fill('#host', '127.0.0.1');
+        await page.fill('#port', '2525');
+        await page.locator('button[type="submit"]', { hasText: 'Create gateway' }).click();
+        await page.waitForURL(/\/admin\/gateways\/gateway\//);
+
+        await page.goto('/admin/gateways/edit/e2e-edit-gw');
+        await expect(page.locator('#name')).toHaveValue('E2E Edit Gateway');
+        await expect(page.locator('#host')).toHaveValue('127.0.0.1');
+        await page.fill('#name', 'E2E Edited Gateway');
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await page.waitForURL(/\/admin\/gateways\/gateway\//);
+        await expect(page.getByRole('heading', { name: 'E2E Edited Gateway' })).toBeVisible();
+
+        await deleteViaModal(page, /\/admin\/gateways(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('templates: edit page prefills the ACE editors and updates', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/templates/new');
+        await page.fill('#inputName', 'E2E Edit Template');
+        await page.fill('#inputSubject', 'e2e edit subject');
+        await page.locator('button[type="submit"]', { hasText: 'Create template' }).click();
+        await page.waitForURL(/\/admin\/templates\/template\//);
+        const detailUrl = new URL(page.url()).pathname;
+
+        await page.goto(`${detailUrl}/edit`);
+        await expect(page.locator('#inputName')).toHaveValue('E2E Edit Template');
+        await expect(page.locator('#inputSubject')).toHaveValue('e2e edit subject');
+        await expect(page.locator('#editor-html .ace_content')).toBeAttached();
+        await page.fill('#inputName', 'E2E Edited Template');
+        await page.locator('button[type="submit"]', { hasText: 'Save changes' }).click();
+        await page.waitForURL(new RegExp(`${detailUrl.replace(/[/]/g, '\\/')}(\\?|$)`));
+        await expect(page.getByRole('heading', { name: 'E2E Edited Template' })).toBeVisible();
+
+        await deleteViaModal(page, /\/admin\/templates(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('webhooks: edit page prefills the editors and updates', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.goto('/admin/webhooks/new');
+        await page.fill('#inputName', 'E2E Edit Route');
+        await page.fill('#inputTargetUrl', 'https://example.com/e2e-edit-webhook');
+        await page.locator('button[type="submit"]', { hasText: 'Create webhook route' }).click();
+        await page.waitForURL(/\/admin\/webhooks\/webhook\//);
+        const detailUrl = new URL(page.url()).pathname;
+
+        await page.goto(`${detailUrl}/edit`);
+        await expect(page.locator('#inputName')).toHaveValue('E2E Edit Route');
+        await expect(page.locator('#inputTargetUrl')).toHaveValue('https://example.com/e2e-edit-webhook');
+        await expect(page.locator('#editor-fn .ace_content')).toBeAttached();
+        await page.fill('#inputName', 'E2E Edited Route');
+        await page.locator('button[type="submit"]', { hasText: 'Save changes' }).click();
+        await page.waitForURL(new RegExp(`${detailUrl.replace(/[/]/g, '\\/')}(\\?|$)`));
+        await expect(page.getByRole('heading', { name: 'E2E Edited Route' })).toBeVisible();
+
+        await deleteViaModal(page, /\/admin\/webhooks(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('oauth apps: edit page prefills and updates', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // registered in API mode, because that is the base scope whose extra sections the edit page has
+        // to keep showing
+        await page.goto('/admin/config/oauth/new?provider=gmail');
+        await page.locator('#baseScopesAPI').check();
+        await page.fill('#name', 'E2E OAuth Edit App');
+        await page.fill('#clientId', '1234567890-e2e-edit.apps.googleusercontent.com');
+        await page.fill('#clientSecret', 'GOCSPX-e2e-edit-dummy');
+        await page.locator('button[type="submit"]', { hasText: 'Register app' }).click();
+        await page.waitForURL(/\/admin\/config\/oauth\/app\//);
+        const appId = await page.locator('#appIdValue').inputValue();
+
+        await page.goto(`/admin/config/oauth/edit/${appId}`);
+        await expect(page.locator('#name')).toHaveValue('E2E OAuth Edit App');
+        await expect(page.locator('#clientId')).toHaveValue('1234567890-e2e-edit.apps.googleusercontent.com');
+
+        // A stored app's base scope cannot be changed, so this form renders it as a static row and
+        // carries no radios - and the section the stored scope reveals has to stay as the server
+        // rendered it. Driving visibility from "which radio is checked" hid every one of them, which on
+        // this page is the only way to change an API-mode app's Pub/Sub service account.
+        await expect(page.locator('.base-scopes-radio')).toHaveCount(0);
+        await expect(page.locator('[data-base-scopes="api"]')).toBeVisible();
+        await expect(page.locator('#pubSubApp')).toBeEnabled();
+        await page.fill('#name', 'E2E OAuth Edited App');
+        await page.locator('button[type="submit"]', { hasText: 'Update app' }).click();
+        await page.waitForURL(/\/admin\/config\/oauth\/app\//);
+        await expect(page.getByRole('heading', { name: 'E2E OAuth Edited App' })).toBeVisible();
+
+        await deleteViaModal(page, /\/admin\/config\/oauth(\?|$)/);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('tokens: delete flow actually removes the token', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await createApiToken(page, 'e2e delete-me token');
+        await dismissTokenReveal(page);
+
+        const row = page.locator('tbody tr', { hasText: 'e2e delete-me token' }).first();
+        await row.locator('.dropdown-toggle').click();
+        await row.locator('.list-delete-btn').click();
+        await expect(page.locator('#deleteToken.open')).toHaveCount(1);
+        await page.locator('#deleteToken button[type="submit"]').click();
+        await page.waitForURL(/\/admin\/tokens(\?|$)/);
+        await expect(page.locator('.flash-alert')).toBeVisible();
+        await expect(page.locator('tbody tr', { hasText: 'e2e delete-me token' })).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('tokens: list paginates once it outgrows one page', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // 25 root tokens through the same endpoint the UI uses (page size is 20)
+        const created = await page.evaluate(async () => {
+            const crumb = document.getElementById('crumb').value;
+            const tokens = [];
+            for (let i = 0; i < 25; i++) {
+                const res = await fetch('/admin/tokens/new', {
+                    method: 'post',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ crumb, description: `e2e page filler ${i}`, scopes: ['api'], account: '' })
+                });
+                const data = await res.json();
+                if (data && data.token) {
+                    tokens.push(data.token);
+                }
+            }
+            return tokens;
+        });
+        expect(created.length).toBe(25);
+
+        const bearer = await createApiToken(page, 'e2e pagination cleanup token');
+        await dismissTokenReveal(page);
+        const api = await request.newContext({
+            baseURL: BASE_URL,
+            extraHTTPHeaders: { Authorization: `Bearer ${bearer}` }
+        });
+
+        try {
+            await page.goto('/admin/tokens');
+            const pager = page.locator('.join', { has: page.locator('.btn', { hasText: '2' }) }).last();
+            await expect(pager).toBeVisible();
+            await pager.locator('.btn', { hasText: '2' }).click();
+            await page.waitForURL(/[?&]page=2/);
+            expect(await page.locator('tbody tr').count()).toBeGreaterThan(0);
+        } finally {
+            await Promise.all(created.map(tok => api.delete(`/v1/tokens/${tok}`).catch(() => {})));
+            await api.dispose();
+        }
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('account edit: rename round-trip and folder-path datalist', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+
+        await page.goto(`${url}/edit`);
+        const nameField = page.locator('#name');
+        const origName = await nameField.inputValue();
+
+        // All five special-use folder overrides are offered, each carrying native datalist suggestions
+        // built from the account's real folder listing (uiDatalist). Only sentMailPath used to be on
+        // the form, so the other four were settable over PUT /v1/account/{account} alone. What a save
+        // then stores is covered hermetically in test/ui-routes-handlers-test.js, because writing one
+        // here would be an imap diff and reconnect the account the later specs share.
+        for (const field of ['sentMailPath', 'draftsMailPath', 'junkMailPath', 'trashMailPath', 'archiveMailPath']) {
+            await expect(page.locator(`#imap_${field}`), field).toHaveAttribute('list', 'available-paths-list');
+        }
+        expect(await page.locator('#available-paths-list option').count()).toBeGreaterThan(0);
+
+        await nameField.fill('E2E Renamed Account');
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await page.waitForURL(u => u.pathname === url);
+        await expect(page.getByText('E2E Renamed Account').first()).toBeVisible();
+
+        await page.goto(`${url}/edit`);
+        await page.locator('#name').fill(origName);
+        await page.getByRole('button', { name: 'Save changes' }).click();
+        await page.waitForURL(u => u.pathname === url);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('account detail: reconnect, sync, logs toggle/flush and logs download', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+        await page.goto(url);
+
+        const toast = text => page.locator('#toastContainer .alert', { hasText: text });
+
+        // reconnect + sync both POST with the layout crumb and report via toast
+        const [reconnectRes] = await Promise.all([
+            page.waitForResponse(r => r.url().includes('/reconnect') && r.request().method() === 'POST'),
+            page.locator('#request-reconnect').click()
+        ]);
+        expect(reconnectRes.ok()).toBeTruthy();
+        await expect(toast('Account reconnection requested')).toBeVisible();
+
+        const [syncRes] = await Promise.all([
+            page.waitForResponse(r => r.url().includes('/sync') && r.request().method() === 'POST'),
+            page.locator('#request-sync').click()
+        ]);
+        expect(syncRes.ok()).toBeTruthy();
+        await expect(toast('Account sync requested')).toBeVisible();
+
+        // logs controls are consolidated into the toolbar "Logs" dropdown (#logs-info):
+        // enable logging, flush, then restore. Tie each action to its POST response
+        // rather than the auto-dismissing toast, and retry the open-then-click since the
+        // dropdown can close on its own between opening and the item click (animations).
+        const clickLogsItem = async (id, pathRe) => {
+            await expect(async () => {
+                if (!(await page.locator(id).isVisible())) {
+                    await page.locator('#logs-info').click();
+                    await expect(page.locator(id)).toBeVisible({ timeout: 2000 });
+                }
+                const [res] = await Promise.all([
+                    page.waitForResponse(r => r.request().method() === 'POST' && pathRe.test(new URL(r.url()).pathname), { timeout: 4000 }),
+                    page.locator(id).click({ timeout: 2000 })
+                ]);
+                expect(res.ok(), `${id} -> ${res.status()}`).toBeTruthy();
+            }).toPass({ timeout: 30000 });
+        };
+
+        await clickLogsItem('#toggle-logs', /\/logs$/);
+        await expect(toast('Logging settings updated')).toBeVisible();
+
+        // Enabling logging reconnects the account, which is what fills the log. Reload until the
+        // page has seen the stored entries: the download entry is gated on them, and this is the
+        // only state in which the flush below can be seen to switch it back off.
+        const downloadLogs = page.locator('#download-logs');
+        await expect(async () => {
+            await page.reload();
+            await expect(downloadLogs).toHaveAttribute('href', /\/logs\.txt$/, { timeout: 1000 });
+        }).toPass({ timeout: 30000 });
+        // asserted on the class, not on visibility: the whole menu is display:none while closed
+        await expect(page.locator('#no-stored-logs')).toHaveClass(/hidden/);
+
+        await clickLogsItem('#flush-logs', /\/logs-flush$/);
+        await expect(toast('Stored logs were flushed')).toBeVisible();
+
+        // Downloading or clearing an emptied log is a no-op dressed as work, so both entries go
+        // inert with the entries they would have acted on - without waiting for a page reload.
+        for (const entry of [downloadLogs, page.locator('#flush-logs')]) {
+            await expect(entry).toHaveAttribute('aria-disabled', 'true');
+            await expect(entry).toHaveCSS('pointer-events', 'none');
+            expect(await entry.getAttribute('href')).toBeNull();
+        }
+        // and the menu says why, since an entry out of hit testing cannot show a tooltip
+        await expect(page.locator('#no-stored-logs')).not.toHaveClass(/hidden/);
+
+        // restore the original (disabled) logging state
+        await clickLogsItem('#toggle-logs', /\/logs$/);
+
+        // download last: the logs.txt GET rotates the CSRF crumb cookie, so a
+        // crumb-protected POST issued afterwards from this already-rendered page
+        // (whose #crumb is now stale) would 403.
+        const logsRes = await page.request.get(`${url}/logs.txt`);
+        expect(logsRes.ok(), `logs.txt -> ${logsRes.status()}`).toBeTruthy();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('account detail: export flow completes and serves the download', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        const url = await requireAccountUrl(page);
+        await page.goto(url);
+
+        await page.locator('#request-export').click();
+        await expectModalOpen(page, 'exportModal');
+        // the date range is required (the start handler toasts and bails without it)
+        await page.fill('#export-start-date', '2020-01-01');
+        await page.fill('#export-end-date', '2030-12-31');
+        await page.locator('#export-start-btn').click();
+
+        // the modal switches to the status view and polls until completion
+        await expect(page.locator('#export-status-view')).toBeVisible({ timeout: 15000 });
+        await expect(page.locator('#export-status-badge')).toHaveText(/Completed/i, { timeout: 120000 });
+
+        const downloadHref = await page.locator('#export-download-link').getAttribute('href');
+        expect(downloadHref).toBeTruthy();
+        const dl = await page.request.get(downloadHref);
+        expect(dl.ok(), `export download -> ${dl.status()}`).toBeTruthy();
+
+        // close via the corner button: FlyonUI ignores Escape while focus sits
+        // on <body>, which is where the fetch-driven button flow leaves it
+        await page.locator('#exportModal [aria-label="Close"]').click();
+        await expect(page.locator('#exportModal.open')).toHaveCount(0);
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('topbar search: query and state filter narrow the accounts list', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+        await requireAccountUrl(page);
+
+        await page.goto('/admin/accounts');
+        await page.locator('header form input[name="query"]').fill('e2e');
+        await page.locator('header form button[type="submit"]').click();
+        await page.waitForURL(/[?&]query=e2e/);
+        await expect(page.getByText('Results for "e2e"')).toBeVisible();
+
+        // the state dropdown navigates with the state filter applied
+        await page.locator('#search-state-dropdown').click();
+        await page.locator('.dropdown-item', { hasText: 'Connected' }).first().click();
+        await page.waitForURL(/[?&]state=connected/);
+        await expect(page.locator('#search-state-dropdown')).toContainText('Connected');
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('add-account modal: submit redirects to the signed hosted form', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        // the redirect target is built from the public serviceUrl; bounce it
+        // back to the local test server (the signed blob is host-independent)
+        await page.route('https://e2e.emailengine.app/**', route => {
+            const u = new URL(route.request().url());
+            route.fulfill({ status: 302, headers: { location: `${BASE_URL}${u.pathname}${u.search}` } });
+        });
+
+        await page.goto('/admin/accounts');
+        await page.locator('[data-overlay="#addAccount"]').first().click();
+        await expect(page.locator('#addAccount.open')).toHaveCount(1);
+        await page.fill('#account-name', 'E2E Modal Smoke');
+        await page.locator('#addAccount button[type="submit"]').click();
+
+        await page.waitForURL(/\/accounts\/new\?data=/);
+        await expect(page.locator('form[action^="/accounts/new"]').first()).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('unknown admin path renders the themed error page with a 404', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        const response = await page.goto('/admin/definitely-not-a-page');
+        expect(response.status()).toBe(404);
+        await expect(page.getByRole('heading', { name: 'Something went wrong' })).toBeVisible();
+        await expect(page.getByRole('link', { name: 'Dashboard' })).toBeVisible();
+
+        // the intentional 404 itself logs a resource error; anything else is a bug
+        const unexpected = errors.filter(err => !/status of 404/.test(err));
+        expect(unexpected, unexpected.join('\n')).toHaveLength(0);
+    });
+
+    test('mobile viewport: the sidebar opens as a drawer', async ({ page }) => {
+        const errors = trackConsoleErrors(page);
+        await ensureAdminSession(page);
+
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.goto('/admin');
+
+        const dashboardLink = page.locator('#layout-sidebar').getByRole('link', { name: 'Dashboard' });
+        await expect(dashboardLink).toBeHidden();
+
+        await page.locator('header [data-overlay="#layout-sidebar"]').click();
+        await expect(dashboardLink).toBeVisible();
+
+        // the drawer's own close button dismisses it
+        await page.locator('#layout-sidebar [data-overlay="#layout-sidebar"]').click();
+        await expect(dashboardLink).toBeHidden();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+    });
+
+    test('anonymous visitor is redirected to the login page', async ({ page, browser }) => {
+        // make sure auth is enabled even when this test runs alone
+        await ensureAdminSession(page);
+
+        // fresh context without the admin session cookie (storageState must be
+        // explicitly unset - manual contexts inherit the fixture options)
+        const context = await browser.newContext({ storageState: undefined });
+        const anonPage = await context.newPage();
+        const errors = trackConsoleErrors(anonPage);
+
+        await anonPage.goto('/admin');
+        await anonPage.waitForURL(/\/admin\/login/);
+        await expect(anonPage.locator('#loginUsername')).toBeVisible();
+        await expect(anonPage.locator('#loginPassword')).toBeVisible();
+        await expect(anonPage.locator('form[action="/admin/login"] button[type="submit"]')).toBeVisible();
+
+        expect(errors, errors.join('\n')).toHaveLength(0);
+        await context.close();
+    });
+    test('message browser dialogs answer through the shared confirm helper', async ({ page, request }) => {
+        // The embed asks this page for confirmations and alerts. Both dialogs used to close the
+        // overlay from their own OK handler, which races with HSOverlay's deferred open and
+        // close and can strand one on screen; they dismiss through data-overlay now and settle
+        // through window.uiConfirmModal.
+        //
+        // Its own account rather than the shared one the other browse test uses: driving the
+        // dialogs needs a page that is not also raising them. Against a working mailbox the
+        // embed is live throughout, and its own confirm/alert traffic answers or outlives the
+        // dialog this test is driving. Credentials that cannot connect give a quiet page, which
+        // is the whole fixture.
+        const errors = trackConsoleErrors(page);
+
+        const token = await createApiToken(page, 'e2e browse-dialog token');
+        const auth = { Authorization: `Bearer ${token}` };
+        const ACCOUNT_ID = 'e2e-browse-dialogs';
+
+        await request.delete(`/v1/account/${ACCOUNT_ID}`, { headers: auth }).catch(() => {});
+        // IMAP config is only there because the route redirects away from an account with no
+        // mail access. It never has to work.
+        const created = await request.post('/v1/account', {
+            headers: auth,
+            data: {
+                account: ACCOUNT_ID,
+                name: 'E2E Browse Dialogs',
+                email: 'e2e-browse-dialogs@ethereal.email',
+                imap: { host: 'imap.ethereal.email', port: 993, secure: true, auth: { user: 'nobody@ethereal.email', pass: 'wrong-password' } }
+            }
+        });
+        expect(created.ok(), `POST /v1/account -> ${created.status()} ${await created.text()}`).toBeTruthy();
+
+        try {
+            await page.goto(`/admin/accounts/${ACCOUNT_ID}/browse`);
+
+            // The helper's promise is left in flight while Playwright waits on the DOM.
+            // Waiting for open.overlay from an in-page listener instead hangs with no
+            // diagnosis whenever it misses that edge, and HSOverlay marks a dialog opened
+            // from a timer. `opened` is the settled state.
+            // okId is what the helper is told counts as confirming; clickId is what actually
+            // gets pressed. They differ for the decline case, and conflating them would make
+            // this test assert that pressing Cancel confirms.
+            const answer = async (modalId, okId, clickId = okId) => {
+                const pending = page.evaluate(ids => window.uiConfirmModal(`#${ids.modal}`, `#${ids.ok}`), { modal: modalId, ok: okId });
+                await expect(page.locator(`#${modalId}`)).toHaveClass(/opened/);
+                await page.locator(`#${clickId}`).click();
+                return pending;
+            };
+
+            const settled = () => overlaySettled(page);
+
+            expect(await answer('confirmModal', 'confirm-ok')).toBe(true);
+            await settled();
+
+            // Anything other than OK declines, which is the safe answer for a confirmation
+            expect(await answer('confirmModal', 'confirm-ok', 'confirm-cancel')).toBe(false);
+            await settled();
+
+            // The alert has nothing to answer; dismissing it just has to settle
+            await answer('alertModal', 'alert-ok');
+            await settled();
+        } finally {
+            await request.delete(`/v1/account/${ACCOUNT_ID}`, { headers: auth });
+        }
+
+        // The embed cannot reach a mailbox behind credentials that do not work, so its own
+        // folder-load failures (ee-client 1.7.1 reports them as a failed initial view) and the
+        // 503 the mailbox endpoint answers with are this fixture's expected state. Only 503 is
+        // tolerated, not a blanket "failed to load resource" - that would swallow any 404 or
+        // 500 the page itself produced.
+        const unexpected = errors.filter(
+            text =>
+                !/Failed to load folders|Failed to auto-select inbox|Failed to load the initial view: .*Service Unavailable|503 \(Service Unavailable\)/.test(
+                    text
+                )
+        );
+        expect(unexpected, unexpected.join('\n')).toHaveLength(0);
+    });
+});

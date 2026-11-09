@@ -20,6 +20,7 @@ const test = require('node:test');
 const assert = require('node:assert').strict;
 
 const { getRawEmail, removeBcc } = require('../lib/get-raw-email');
+const { MAX_DELIVERY_ATTEMPTS } = require('../lib/consts');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 
@@ -47,6 +48,21 @@ test('getRawEmail - raw path (processMessage)', async t => {
         assert.strictEqual(res.hasBcc, false);
         assert.strictEqual(res.envelope.from, 'alice@example.com');
         assert.deepStrictEqual(res.envelope.to, ['bob@example.org']);
+    });
+
+    await t.test('a delivery-attempts header is held to the bound the API applies', async () => {
+        // the header is what a stored draft or an SMTP submission carries, and nothing else
+        // validated it: 1e9 attempts, or zero, were taken as written
+        const attempts = async value => {
+            const raw = rawMessage(['From: Alice <alice@example.com>', 'To: bob@example.org', `X-EE-Delivery-Attempts: ${value}`], 'Body');
+            const res = await getRawEmail({ raw }, null);
+            assert.doesNotMatch(res.raw.toString(), /^X-EE-Delivery-Attempts/m, 'the header is removed');
+            return res.deliveryAttempts;
+        };
+        assert.strictEqual(await attempts('5'), 5);
+        assert.strictEqual(await attempts('1000000000'), MAX_DELIVERY_ATTEMPTS);
+        assert.strictEqual(await attempts('0'), 1);
+        assert.strictEqual(await attempts('-3'), 1);
     });
 
     await t.test('accepts data.raw as a base64 string', async () => {
@@ -186,6 +202,30 @@ test('getRawEmail - raw path (processMessage)', async t => {
         assert.strictEqual(att.encoding, 'base64');
         assert.strictEqual(att.isInline, false);
         assert.strictEqual(Buffer.from(att.content, 'base64').toString(), 'attached text');
+    });
+});
+
+test('getRawEmail - envelope addresses from the raw headers', async t => {
+    await t.test('an IDN domain stays in ASCII form in the envelope', async () => {
+        // the envelope goes to an SMTP server, which may not accept a Unicode domain
+        const raw = rawMessage(['From: Alice <alice@xn--mnchen-3ya.de>', 'To: bob@xn--mnchen-3ya.de', 'Cc: Team: carol@xn--mnchen-3ya.de;'], 'Body');
+        const res = await getRawEmail({ raw }, null);
+        assert.strictEqual(res.envelope.from, 'alice@xn--mnchen-3ya.de');
+        assert.deepStrictEqual(res.envelope.to, ['bob@xn--mnchen-3ya.de', 'carol@xn--mnchen-3ya.de']);
+    });
+
+    await t.test('an encoded word in the address part is not taken for a recipient', async () => {
+        // RFC 2047 keeps encoded words out of the addr-spec; this one would name ceo@bank.com
+        const raw = rawMessage(['From: =?utf-8?B?SsO1ZQ==?= <joe@example.com>', 'To: =?utf-8?Q?ceo=40bank=2Ecom?=@example.com, dave@example.org'], 'Body');
+        const res = await getRawEmail({ raw }, null);
+        assert.strictEqual(res.envelope.from, 'joe@example.com');
+        assert.deepStrictEqual(res.envelope.to, ['dave@example.org']);
+    });
+
+    await t.test('a header that names a group with no address yields no empty recipient', async () => {
+        const raw = rawMessage(['From: alice@example.com', 'To: undisclosed-recipients:;', 'Bcc: hidden@example.com'], 'Body');
+        const res = await getRawEmail({ raw }, null);
+        assert.deepStrictEqual(res.envelope.to, ['hidden@example.com']);
     });
 });
 
@@ -359,4 +399,101 @@ test('removeBcc', async t => {
         assert.match(out, /^Subject: no bcc/m);
         assert.match(out, /body/);
     });
+});
+
+// A multipart message with more MIME nodes than the splitter allows (1000). The splitter raises
+// EMAXLEN on it, and before the error was forwarded that was an uncaught exception that took the
+// whole IMAP worker down (every account on it) instead of failing the one submission.
+function manyPartsMessage(parts) {
+    const lines = [
+        'From: a@example.com',
+        'To: b@example.com',
+        'Bcc: c@example.com',
+        'Subject: many parts',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="xx"',
+        ''
+    ];
+    for (let i = 0; i < parts; i++) {
+        lines.push('--xx', 'Content-Type: text/plain', '', `part${i}`);
+    }
+    lines.push('--xx--', '');
+    return Buffer.from(lines.join('\r\n'));
+}
+
+// A single MIME node whose header block exceeds the splitter's 1MB cap.
+function hugeHeaderMessage() {
+    return Buffer.from(['From: a@example.com', 'To: b@example.com', 'Bcc: c@example.com', `X-Big: ${'a'.repeat(1100 * 1024)}`, '', 'body'].join('\r\n'));
+}
+
+test('splitter limits reject instead of crashing the worker', async t => {
+    const assertPermanent = err => {
+        assert.strictEqual(err.code, 'EMAXLEN');
+        assert.match(err.message, /Failed to parse message/);
+        // 552 is what lib/delivery-error.js reads as a permanent rejection, so a retried
+        // delivery does not hit the same wall again; 400 is what the API answers.
+        assert.strictEqual(err.responseCode, 552);
+        assert.strictEqual(err.statusCode, 400);
+        return true;
+    };
+
+    await t.test('getRawEmail with 1100 MIME parts rejects', async () => {
+        await assert.rejects(() => getRawEmail({ raw: manyPartsMessage(1100) }, null), assertPermanent);
+    });
+
+    await t.test('getRawEmail with an oversized header block rejects', async () => {
+        await assert.rejects(() => getRawEmail({ raw: hugeHeaderMessage() }, null), assertPermanent);
+    });
+
+    await t.test('removeBcc with 1100 MIME parts rejects', async () => {
+        await assert.rejects(() => removeBcc(manyPartsMessage(1100)), assertPermanent);
+    });
+
+    await t.test('the rejection is classified as permanent by the submit worker', async () => {
+        const { isPermanentDeliveryError } = require('../lib/delivery-error');
+        const err = await removeBcc(manyPartsMessage(1100)).catch(err => err);
+        assert.strictEqual(isPermanentDeliveryError(err), true);
+    });
+
+    await t.test('a message within the limits still goes through', async () => {
+        const out = (await removeBcc(manyPartsMessage(10))).toString();
+        assert.doesNotMatch(out, /^Bcc:/im);
+        assert.match(out, /part9/);
+    });
+});
+
+test('getRawEmail - custom headers and forwarded messages', async t => {
+    await t.test('a non-ASCII custom header is encoded instead of sent as raw 8-bit (regression)', async () => {
+        const raw = rawMessage(['From: Alice <alice@example.com>', 'To: bob@example.org', 'Subject: Hello'], 'Body text');
+        const res = await getRawEmail({ raw, headers: { 'x-customer': 'Jõgeva Öö', 'x-plain': 'ascii only' } }, null);
+        const out = res.raw.toString();
+        assert.match(out, /^X-Customer: =\?UTF-8\?Q\?J=C3=B5geva_=C3=96=C3=B6\?=$/m);
+        assert.match(out, /^X-Plain: ascii only$/m);
+        assert.ok(!/[\u0080-￿]/.test(out.split('\r\n\r\n')[0]), 'the header block is 7-bit');
+    });
+
+    for (const [label, body, encoding] of [
+        ['an ASCII message is labelled 7bit', 'From: a@example.com\r\nSubject: inner\r\n\r\nHello', '7bit'],
+        ['a message with 8-bit content is labelled 8bit', 'From: a@example.com\r\nSubject: inner\r\n\r\nTere õhtust', '8bit']
+    ]) {
+        await t.test(`a forwarded message/rfc822 attachment: ${label}, inserted as is`, async () => {
+            const res = await getRawEmail(
+                {
+                    from: { address: 'alice@example.com' },
+                    to: [{ address: 'bob@example.org' }],
+                    subject: 'Fwd',
+                    text: 'see attached',
+                    attachments: [
+                        { filename: 'forwarded.eml', contentType: 'message/rfc822', content: Buffer.from(body).toString('base64'), encoding: 'base64' }
+                    ]
+                },
+                null
+            );
+            const out = res.raw.toString();
+            const part = out.slice(out.indexOf('Content-Type: message/rfc822'));
+            assert.match(part, new RegExp(`^Content-Transfer-Encoding: ${encoding}$`, 'm'));
+            assert.match(part, /^Content-Disposition: attachment; filename=forwarded\.eml$/m);
+            assert.ok(part.includes(body), 'the forwarded message is not re-encoded');
+        });
+    }
 });

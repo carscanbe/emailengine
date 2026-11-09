@@ -7,7 +7,8 @@ const logger = require('../lib/logger');
 
 const { threadStats } = require('../lib/tools');
 
-const { run } = require('../lib/imapproxy/imap-server');
+const { run, reloadCertificates } = require('../lib/imapproxy/imap-server');
+const { respond, isCall } = require('../lib/worker-rpc');
 
 const { initSentry } = require('../lib/sentry');
 initSentry('imapProxy');
@@ -16,6 +17,9 @@ async function onCommand(command) {
     switch (command.cmd) {
         case 'resource-usage':
             return threadStats.usage();
+
+        case 'imapProxyReloadCertificates':
+            return await reloadCertificates();
         default:
             logger.debug({ msg: 'Unhandled command', command });
             return 999;
@@ -34,38 +38,24 @@ setInterval(() => {
 // Send initial ready signal
 parentPort.postMessage({ cmd: 'ready' });
 
+// Responses to this worker's own calls are settled by lib/imapproxy/imap-server.js, which owns the
+// calling half
 parentPort.on('message', message => {
-    if (message && message.cmd === 'call' && message.mid) {
-        return onCommand(message.message)
-            .then(response => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    response
-                });
-            })
-            .catch(err => {
-                parentPort.postMessage({
-                    cmd: 'resp',
-                    mid: message.mid,
-                    error: err.message,
-                    code: err.code,
-                    statusCode: err.statusCode
-                });
-            });
+    if (isCall(message)) {
+        return respond(parentPort, message, onCommand, { logger });
     }
 });
 
 run()
     .then(imapServer => {
         let address = imapServer.server.address();
-        logger.debug({
+        logger.info({
             msg: 'Started IMAP proxy server thread',
             address,
             version: packageData.version
         });
     })
     .catch(err => {
-        logger.error({ msg: 'Failed to initialize IMAP server', err });
+        logger.fatal({ msg: 'Failed to initialize IMAP proxy server', err });
         logger.flush(() => process.exit(3));
     });

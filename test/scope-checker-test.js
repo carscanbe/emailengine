@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
+const exitWhenStandalone = require('./helpers/exit-standalone');
 
 const {
     checkAccountScopes,
@@ -16,7 +17,7 @@ const {
 
 test('OAuth Scope Checker tests', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     // Constants tests
@@ -35,6 +36,11 @@ test('OAuth Scope Checker tests', async t => {
         assert.ok(MS_GRAPH_DOMAINS.includes('graph.microsoft.us'));
         assert.ok(MS_GRAPH_DOMAINS.includes('dod-graph.microsoft.us'));
         assert.ok(MS_GRAPH_DOMAINS.includes('microsoftgraph.chinacloudapi.cn'));
+    });
+
+    await t.test('gmail.labels is not a read scope, send + labels is send-only', async () => {
+        const scopes = ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/gmail.labels'];
+        assert.deepStrictEqual(checkAccountScopes('gmail', scopes), { hasSendScope: true, hasReadScope: false });
     });
 
     // normalizeMsGraphScope tests

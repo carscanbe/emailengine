@@ -23,13 +23,13 @@ function createMockRedis() {
         hgetallBuffer: async () => ({}),
         multi: () => ({
             exec: async () => [],
-            hset: function () {
+            hset() {
                 return this;
             },
-            hdel: function () {
+            hdel() {
                 return this;
             },
-            del: function () {
+            del() {
                 return this;
             }
         }),
@@ -39,14 +39,14 @@ function createMockRedis() {
         exists: async () => 0,
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         // ioredfour Lock calls defineCommand() to register Lua scripts
         defineCommand: () => {},
         // ioredfour Lock calls redis.duplicate() to create a subscriber connection.
         // Return a mock to prevent real Redis connections.
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -65,9 +65,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -75,6 +73,7 @@ require.cache[dbPath] = {
 
 // Now safe to import IMAPClient without opening real connections
 const { IMAPClient } = require('../lib/email-client/imap-client');
+const { ReconnectBackoff } = require('../lib/email-client/reconnect-backoff');
 
 function createMockLogger() {
     let calls = [];
@@ -117,11 +116,12 @@ function createBaseUploadCtx(overrides) {
         prepareRawMessage: async () => ({
             raw: Buffer.from('test message'),
             messageId: '<test@example.com>',
-            documentStoreUsed: false,
             referencedMessage: null
         }),
         packUid: async () => 'encodedId',
         onTaskCompleted: () => {},
+        // the real IDLE decision, shared with the Sent copy (see test/resume-idle-test.js)
+        resumeIdle: IMAPClient.prototype.resumeIdle,
         ...overrides
     };
 }
@@ -152,15 +152,13 @@ test('IMAP null guard tests', async t => {
             logger,
             imapClient: createMockImapClient(),
             mailboxes,
-            untaggedExpungeTimer: null,
             resyncTimer: null,
             completedTimer: null,
             state: 'connected',
             syncing: false,
-            refreshFolderList: async () => {
+            refreshFolderList: async () =>
                 // Return null so all mailboxes enter the sync branch
-                return null;
-            },
+                null,
             setStateVal: async () => {},
             getAccountKey: () => 'test:account',
             redis: mockRedis,
@@ -198,7 +196,6 @@ test('IMAP null guard tests', async t => {
             logger,
             imapClient: mockImapClient,
             mailboxes,
-            untaggedExpungeTimer: null,
             resyncTimer: null,
             completedTimer: null,
             state: 'connected',
@@ -244,15 +241,20 @@ test('IMAP null guard tests', async t => {
                 serverInfo: {}
             }),
             mailboxes,
-            mailbox: { path: 'INBOX' },
             main: { path: 'INBOX' },
-            untaggedExpungeTimer: null,
             resyncTimer: null,
             completedTimer: null,
             state: 'syncing',
             syncing: false,
             account: 'test-account',
+            subconnections: [],
             refreshFolderList: async () => null,
+            // the sync ends by returning the connection to the main mailbox
+            select: async () => {},
+            // and by arming the periodic resync
+            scheduleResync: IMAPClient.prototype.scheduleResync,
+            resyncBackoff: new ReconnectBackoff({ baseDelay: 4000, maxDelay: 30000, factor: 2 }),
+            resyncDelay: 60 * 1000,
             setStateVal: async () => {},
             getAccountKey: () => 'test:account',
             redis: mockRedis,
@@ -260,6 +262,8 @@ test('IMAP null guard tests', async t => {
         };
 
         await IMAPClient.prototype.syncMailboxes.call(ctx);
+        // a completed sync arms the periodic resync, which has no business firing after the test
+        clearTimeout(ctx.resyncTimer);
 
         assert.deepStrictEqual(syncedMailboxes, ['INBOX', 'Sent'], 'All mailboxes should have been synced');
         assert.strictEqual(ctx.state, 'connected', 'State should be connected after successful sync');
@@ -436,5 +440,30 @@ test('IMAP null guard tests', async t => {
         assert.ok(result, 'Should return a result');
         assert.strictEqual(result.uid, 99);
         assert.ok(!idleCalled, 'IDLE should not be called when connectionClient !== imapClient');
+    });
+
+    await t.test('uploadMessage() builds the id from the UIDVALIDITY of APPENDUID', async () => {
+        // A folder created moments earlier is not registered yet, so the id needs the value the
+        // server reported for the append
+        let { logger } = createMockLogger();
+        let packed;
+        let connectionClient = createMockImapClient({
+            append: async () => ({ uid: 7, path: 'INBOX', destination: 'Fresh', uidValidity: 12n })
+        });
+        let ctx = createBaseUploadCtx({
+            logger,
+            imapClient: createMockImapClient(),
+            isConnected: () => true,
+            getImapConnection: async () => connectionClient,
+            packUid: async (...args) => {
+                packed = args;
+                return 'encodedId';
+            }
+        });
+
+        let result = await IMAPClient.prototype.uploadMessage.call(ctx, { path: 'Fresh', flags: [], raw: Buffer.from('test') }, { allowSecondary: true });
+
+        assert.strictEqual(result.id, 'encodedId');
+        assert.deepStrictEqual(packed, ['Fresh', 7, null, 12n]);
     });
 });

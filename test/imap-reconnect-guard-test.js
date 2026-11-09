@@ -5,11 +5,23 @@
 // or when the client is paused/closing/closed - otherwise accounts get duplicate
 // connections or reconnect storms. The actual connect (start()) is stubbed so we
 // assert only the guard decisions.
+//
+// Also covers the flip side of the _connecting guard: a failed connection
+// cycle must clear the flag again, otherwise every later reconnection attempt
+// short-circuits on the guard and the account stays dead until the worker is
+// restarted.
+//
+// Account data is loaded inside start(), within reconnect()'s backOff loop, so
+// a transient load failure (e.g. a Redis hiccup) is retried like any other
+// connection failure. It used to be loaded by reconnect() itself, where a
+// throw escaped past the retry scheduling and stalled the account until the
+// next external trigger (resume, account update, worker restart).
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
 const { IMAPClient } = require('../lib/email-client/imap-client');
+const { STABLE_CONNECTION_TIME } = require('../lib/consts');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 
@@ -92,5 +104,141 @@ test('IMAPClient.reconnect() guards', async t => {
 
         await client.reconnect(true);
         assert.strictEqual(startCalled(), true, 'forced reconnect must call start() even when closed');
+    });
+
+    await t.test('clears the connecting flag when the connection cycle fails', async () => {
+        const { client } = stubbedClient();
+        client.state = 'unset';
+        const startError = new Error('Redis connection lost');
+        client.start = async () => {
+            // Flag the client as closed so backOff's retry predicate declines
+            // and the failure propagates out of the retry loop
+            client.isClosed = true;
+            throw startError;
+        };
+
+        await assert.rejects(() => client.reconnect(), startError);
+
+        assert.strictEqual(client._connecting, false, 'a failed connection cycle must not leave the connecting flag set');
+    });
+
+    // The 'error' event handler only schedules its debounced reconnection while
+    // this.reconnectTimer is unset, and only the timer callback ever nulls the
+    // field. close()/delete() used to clearTimeout() the handle but leave it
+    // assigned, so after pause()+resume() (which reuse the same instance) every
+    // later error event saw the stale truthy handle and skipped scheduling.
+    await t.test('close() drops the cleared reconnect timer handle', () => {
+        const { client } = stubbedClient();
+        client.reconnectTimer = setTimeout(() => {}, 60 * 1000).unref();
+
+        client.close();
+
+        assert.strictEqual(client.reconnectTimer, null, 'close() must drop the reconnect timer handle, not just clear it');
+    });
+
+    await t.test('delete() drops the cleared reconnect timer handle', async () => {
+        const { client } = stubbedClient();
+        client.reconnectTimer = setTimeout(() => {}, 60 * 1000).unref();
+
+        await client.delete();
+
+        assert.strictEqual(client.reconnectTimer, null, 'delete() must drop the reconnect timer handle, not just clear it');
+    });
+
+    await t.test('a later reconnect attempt is not blocked by the failed one', async () => {
+        const { client } = stubbedClient();
+        client.state = 'unset';
+        let startCalls = 0;
+        client.start = async () => {
+            startCalls++;
+            if (startCalls === 1) {
+                client.isClosed = true;
+                throw new Error('Redis connection lost');
+            }
+        };
+
+        await assert.rejects(() => client.reconnect());
+
+        // The failed cycle set isClosed to break out of the retry loop; a
+        // forced reconnect (the resume path) must not be blocked by a stale
+        // connecting flag left over from the failure
+        const result = await client.reconnect(true);
+
+        assert.notStrictEqual(result, false, 'reconnect must not short-circuit on a stale connecting flag');
+        assert.strictEqual(startCalls, 2, 'the retry must reach start()');
+        assert.strictEqual(client._connecting, false);
+    });
+
+    // Account data used to be loaded by reconnect() itself, outside the backOff
+    // retry loop: the throw escaped past the retry scheduling (all reconnect()
+    // callers only log rejections), so one Redis blip at the wrong instant left
+    // the account disconnected until an external trigger. The load now happens
+    // inside start(), where the existing backOff loop retries it.
+    await t.test('a transient account data load failure is retried within the same cycle', async () => {
+        const { client } = stubbedClient();
+        delete client.start; // use the real start(), the load happens there
+        client.state = 'unset';
+        client.notify = async () => {};
+
+        let loadCalls = 0;
+        client.accountObject = {
+            loadAccountData: async () => {
+                loadCalls++;
+                if (loadCalls === 1) {
+                    throw new Error('Redis connection lost');
+                }
+                // No imap/oauth2 config: start() bails out cleanly with
+                // state 'unset' right after the successful load
+                return {};
+            }
+        };
+
+        await client.reconnect();
+
+        assert.strictEqual(loadCalls, 2, 'the account data load must be retried after the transient failure');
+        assert.strictEqual(client._connecting, false);
+    });
+});
+
+// The two post-drop reconnect paths (the 'error' and 'close' handlers) share
+// one age policy: only surviving STABLE_CONNECTION_TIME validates a
+// connection. A server that accepts the full connection setup and then drops
+// the connection passes a "successful" setup on every cycle, which resets the
+// sync-gated backoffs - the survival-gated close backoff is the only thing
+// standing between such a server and an unthrottled login loop (measured ~17
+// logins/sec pre-fix), so both handlers must consult it no matter whether the
+// drop surfaces as an error event or a bare close.
+test('IMAPClient drop-path reconnect throttle', async t => {
+    await t.test('only connection survival validates and resets the close backoff', () => {
+        const client = makeClient();
+
+        assert.equal(client.validateConnectionAge({ context: { startedAt: Date.now() } }), false, 'a fresh connection must not count as validated');
+
+        client.closeReconnectBackoff.nextDelay();
+        assert.ok(client.closeReconnectBackoff.attempts > 0);
+
+        assert.equal(
+            client.validateConnectionAge({ context: { startedAt: Date.now() - STABLE_CONNECTION_TIME - 1000 } }),
+            true,
+            'a connection that outlived the stability threshold must count as validated'
+        );
+        assert.equal(client.closeReconnectBackoff.attempts, 0, 'proven survival must reset the close backoff');
+    });
+
+    await t.test('scheduleReconnect debounces into the single reconnect timer slot', () => {
+        const client = makeClient();
+        client.reconnect = async () => {};
+
+        client.scheduleReconnect(client.closeReconnectBackoff, 'test scheduling');
+        const timer = client.reconnectTimer;
+        assert.ok(timer, 'a reconnect timer must be armed');
+        assert.equal(client.closeReconnectBackoff.attempts, 1, 'scheduling must advance the backoff');
+
+        client.scheduleReconnect(client.closeReconnectBackoff, 'test scheduling');
+        assert.equal(client.reconnectTimer, timer, 'a pending timer must not be replaced');
+        assert.equal(client.closeReconnectBackoff.attempts, 1, 'a debounced call must not advance the backoff');
+
+        clearTimeout(client.reconnectTimer);
+        client.reconnectTimer = null;
     });
 });

@@ -9,73 +9,65 @@
     <meta name="description" content="EmailEngine Application page; The Ultimate Email API for Developers" />
     <meta name="author" content="Postal Systems OÜ">
 
-    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} &ndash;
+    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} -
         {{pageTitle}}{{/if}}{{/if}}</title>
 
-    <link rel="apple-touch-icon" href="/static/favicon/apple-touch-icon.png" sizes="180x180" />
-    <link rel="icon" href="/static/favicon/favicon-32x32.png" sizes="32x32" type="image/png" />
-    <link rel="icon" href="/static/favicon/favicon-16x16.png" sizes="16x16" type="image/png" />
-    <link rel="manifest" href="/static/favicon/manifest.json" />
-    <link rel="icon" href="/favicon.ico" />
+    {{!-- The forced-SSO hand-off starts its navigation here, above the stylesheets, rather than
+          from the page body. An inline script cannot run until the stylesheets declared before it
+          have loaded, and this layout pulls in the font sheet plus a 236 KB flyonui.css, so a
+          script placed after them only runs once the card has already painted - which is a visible
+          flash of login chrome on every forced-SSO sign-in. Nothing has painted this early.
 
-    <link href="/static/vendor/fontawesome-free/css/all.min.css" rel="stylesheet" type="text/css">
+          Only views/account/login-redirect.hbs sets ssoRedirectUrl, and it is a fixed path chosen
+          in lib/ui-routes/auth-routes.js rather than anything a request carries, so the ordinary
+          login form never emits this and no user input reaches the string. Why that page navigates
+          itself instead of the server answering a redirect is the whole story in the view. --}}
+    {{#if ssoRedirectUrl}}
+    <meta name="ee-sso-redirect" content="{{ssoRedirectUrl}}">
+    <script data-cfasync="false" nonce="{{cspNonce}}">window.location.replace(document.querySelector('meta[name="ee-sso-redirect"]').content);</script>
+    {{/if}}
 
-    <link href="/static/fonts/nunito-font.css" rel="stylesheet">
+    {{> head_assets}}
 
-    <link href="/static/css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="/static/css/app.css" rel="stylesheet">
+    <link href="/static/css/flyonui.css" rel="stylesheet">
 
 </head>
 
-<body class="bg-gradient-primary">
+<body class="from-primary to-secondary min-h-screen bg-gradient-to-br">
 
-    <div class="container">
+    {{!-- centered in the viewport, not pinned to the top: the card is short and the page is
+          otherwise a full screen of gradient under it. min-h-screen on the flex container
+          rather than a fixed height, so a card taller than the screen grows the page instead
+          of having its top cut off. --}}
+    <div class="container mx-auto flex min-h-screen items-center justify-center px-4 py-12">
 
-        <!-- Outer Row -->
-        <div class="row justify-content-center">
+        <div class="w-full max-w-4xl">
 
-            <div class="col-xl-10 col-lg-12 col-md-9">
+            <div class="card bg-base-100 overflow-hidden shadow-lg">
+                <div class="grid grid-cols-1 lg:grid-cols-2">
+                    <div class="bg-login-page-image hidden lg:block"></div>
+                    <div class="alert-margin">
+                        {{> alerts}}
 
-                <div class="card o-hidden border-0 shadow-lg my-5">
-                    <div class="card-body p-0">
-                        <!-- Nested Row within Card Body -->
-                        <div class="row">
-                            <div class="col-lg-6 d-none d-lg-block bg-login-page-image"></div>
-                            <div class="col-lg-6 alert-margin">
-                                {{> alerts}}
+                        <div class="p-12">
 
-                                <div class="p-5">
-
-                                    {{{content}}}
-                                </div>
-                            </div>
+                            {{{content}}}
                         </div>
                     </div>
                 </div>
-
             </div>
-
         </div>
 
     </div>
 
-    <!-- Bootstrap core JavaScript-->
-    <script src="/static/js/jquery-3.6.0.min.js" crossorigin="anonymous"></script>
-    <script src="/static/bootstrap-4.6.2-dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
+    <script data-cfasync="false" src="/static/js/flyonui.js"></script>
+    <script data-cfasync="false" src="/static/js/ui.js"></script>
 
-    <!-- Core plugin JavaScript-->
-    <script src="/static/vendor/jquery-easing/jquery.easing.min.js"></script>
-
-    <!-- Custom scripts for all pages-->
-    <script src="/static/js/sb-admin-2.min.js"></script>
-
-    <script src="/static/js/clipboard.min.js"></script>
-
-    <script src="/static/js/app.js"></script>
+    <script data-cfasync="false" src="/static/js/app.js"></script>
 
     {{#if passkeysAvailable}}
-    <script src="/static/vendor/simplewebauthn/browser.min.js"></script>
-    <script src="/static/js/login-passkey.js"></script>
+    <script data-cfasync="false" src="/static/vendor/simplewebauthn/browser.min.js"></script>
+    <script data-cfasync="false" src="/static/js/login-passkey.js"></script>
     {{/if}}
 
 </body>

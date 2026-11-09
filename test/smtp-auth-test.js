@@ -9,14 +9,19 @@
 const test = require('node:test');
 const assert = require('node:assert').strict;
 
-const { createSmtpAuthHandler } = require('../lib/smtp-auth');
+const { createSmtpAuthHandler, createSmtpAccountResolver } = require('../lib/smtp-auth');
+const { AUTH_FAILURE_LIMIT, authFailureKey, authFailureAddressKey, AUTH_FAILURE_WINDOW } = require('../lib/auth-token');
+const { rateLimitWindowKey } = require('../lib/rate-limit');
+const { trackedWindow, exhaustBudget } = require('./helpers/auth-throttle');
 const tokens = require('../lib/tokens');
+const tokenAuditLog = require('../lib/token-audit-log');
 const settings = require('../lib/settings');
 const { redis } = require('../lib/db');
 const registerRedisTeardown = require('./helpers/redis-teardown');
 const { REDIS_PREFIX } = require('../lib/consts');
 
 const ACCOUNT = 'smtp-auth-acct';
+const OTHER_ACCOUNT = 'smtp-auth-acct-2';
 const accountCache = new Map();
 const onAuth = createSmtpAuthHandler({ accountCache, call: async () => ({}) });
 
@@ -25,6 +30,8 @@ const session = (overrides = {}) => Object.assign({ eeAuthEnabled: true, remoteA
 let smtpToken;
 let apiScopeToken;
 let ipRestrictedToken;
+let readOnlyToken;
+let sendPermittedToken;
 let prevSmtpPassword;
 const accountKeys = [];
 
@@ -45,11 +52,29 @@ test.before(async () => {
         description: 'smtp-auth ip restricted',
         nolog: true
     });
+    // A token narrowed to reading must not be able to relay mail, even though it holds the smtp
+    // scope. This is the payoff of putting the permission check in lib/auth-token.js rather than in
+    // the HTTP strategy: the narrowing follows the credential onto the submission surfaces.
+    readOnlyToken = await tokens.provision({
+        account: ACCOUNT,
+        scopes: ['smtp'],
+        permissions: { actions: ['read'] },
+        description: 'smtp-auth read-only permissions',
+        nolog: true
+    });
+    sendPermittedToken = await tokens.provision({
+        account: ACCOUNT,
+        scopes: ['smtp'],
+        permissions: { actions: ['send'], groups: ['submit'] },
+        description: 'smtp-auth send permissions',
+        nolog: true
+    });
     await seedAccount(ACCOUNT);
+    await seedAccount(OTHER_ACCOUNT);
 });
 
 registerRedisTeardown(redis, async () => {
-    for (const tok of [smtpToken, apiScopeToken, ipRestrictedToken]) {
+    for (const tok of [smtpToken, apiScopeToken, ipRestrictedToken, readOnlyToken, sendPermittedToken]) {
         if (tok) {
             try {
                 await tokens.delete(tok);
@@ -67,6 +92,17 @@ registerRedisTeardown(redis, async () => {
     }
     try {
         await settings.set('smtpServerPassword', prevSmtpPassword || '');
+    } catch (err) {
+        // ignore
+    }
+    // The handler tests refuse non-token passwords from the default session address, which the
+    // per-address budget counts; do not leave that for the next run
+    try {
+        await redis.del(
+            rateLimitWindowKey(authFailureAddressKey('127.0.0.1'), AUTH_FAILURE_WINDOW).windowKey,
+            // and the per-username budgets of the same address, so back-to-back runs start clean
+            ...[ACCOUNT, OTHER_ACCOUNT, 'someone-else'].map(account => rateLimitWindowKey(authFailureKey('127.0.0.1', account), AUTH_FAILURE_WINDOW).windowKey)
+        );
     } catch (err) {
         // ignore
     }
@@ -114,10 +150,312 @@ test('SMTP auth handler', async t => {
         }
     });
 
+    await t.test('rejects a token whose permissions do not allow sending', async () => {
+        // Holds the smtp scope, so the scope check passes and only the permission check stands
+        // between this credential and relaying mail
+        await assert.rejects(() => onAuth({ username: ACCOUNT, password: readOnlyToken }, session()), /permissions do not allow/);
+    });
+
     await t.test('accepts a valid scoped token bound to the account', async () => {
         const sess = session();
         const result = await onAuth({ username: ACCOUNT, password: smtpToken }, sess);
         assert.deepStrictEqual(result, { user: ACCOUNT });
         assert.ok(accountCache.has(sess));
     });
+
+    await t.test('a failure to load the account answers 454, not a permanent 535', async () => {
+        const { Account } = require('../lib/account');
+        const realLoad = Account.prototype.loadAccountData;
+        Account.prototype.loadAccountData = async function () {
+            throw new Error('Connection is closed.');
+        };
+        try {
+            await assert.rejects(
+                () => onAuth({ username: ACCOUNT, password: smtpToken }, session({ remoteAddress: '203.0.113.31' })),
+                err => {
+                    assert.match(err.message, /Failed to authenticate user/);
+                    // smtp-server only reads responseCode
+                    assert.strictEqual(err.responseCode, 454);
+                    return true;
+                }
+            );
+        } finally {
+            Account.prototype.loadAccountData = realLoad;
+        }
+    });
+
+    await t.test('accepts a token whose permissions allow sending', async () => {
+        // The narrowing is an allowlist, so a token that names send/submit is not merely un-refused
+        // here - it has to be positively allowed, which is what separates this from the case above
+        const sess = session();
+        const result = await onAuth({ username: ACCOUNT, password: sendPermittedToken }, sess);
+        assert.deepStrictEqual(result, { user: ACCOUNT });
+        assert.ok(accountCache.has(sess));
+    });
+});
+
+test('SMTP auth failure throttle', async t => {
+    // TEST-NET-3 addresses, never a real client; one per case so the counters cannot interfere
+    await t.test('a refused login is recorded against the client address and username', async t => {
+        const ip = '203.0.113.11';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+
+        await assert.rejects(() => onAuth({ username: ACCOUNT, password: 'wrong' }, session({ remoteAddress: ip })), /Failed to authenticate user/);
+
+        assert.strictEqual(await redis.get(windowKey), '1');
+    });
+
+    await t.test('an accepted login spends nothing', async t => {
+        const ip = '203.0.113.12';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+
+        const result = await onAuth({ username: ACCOUNT, password: smtpToken }, session({ remoteAddress: ip }));
+        assert.deepStrictEqual(result, { user: ACCOUNT });
+
+        assert.strictEqual(await redis.get(windowKey), null, 'only failures count, a busy sender must not throttle itself');
+    });
+
+    await t.test('a valid credential is refused once the budget is spent, with a temporary reply code', async t => {
+        const ip = '203.0.113.13';
+        const windowKey = await trackedWindow(t, ip, ACCOUNT);
+        await exhaustBudget(windowKey);
+
+        await assert.rejects(
+            () => onAuth({ username: ACCOUNT, password: smtpToken }, session({ remoteAddress: ip })),
+            err => {
+                assert.match(err.message, /Too many failed authentication attempts/);
+                // 454, not 535: the client should try again later, not conclude its credentials are wrong
+                assert.strictEqual(err.responseCode, 454);
+                return true;
+            }
+        );
+
+        assert.strictEqual(await redis.get(windowKey), String(AUTH_FAILURE_LIMIT), 'a throttled attempt is not evaluated and not counted');
+    });
+
+    await t.test('one failure short of the budget is still evaluated', async t => {
+        const ip = '203.0.113.14';
+        await exhaustBudget(await trackedWindow(t, ip, ACCOUNT), AUTH_FAILURE_LIMIT - 1);
+
+        const result = await onAuth({ username: ACCOUNT, password: smtpToken }, session({ remoteAddress: ip }));
+        assert.deepStrictEqual(result, { user: ACCOUNT });
+    });
+
+    await t.test('the budget is per address: another address is unaffected', async t => {
+        await exhaustBudget(await trackedWindow(t, '203.0.113.15', ACCOUNT));
+
+        const result = await onAuth({ username: ACCOUNT, password: smtpToken }, session({ remoteAddress: '203.0.113.16' }));
+        assert.deepStrictEqual(result, { user: ACCOUNT });
+    });
+
+    await t.test('the budget is per username: the same address still logs in as another account', async t => {
+        // One application host submits for many accounts; a stale credential for one of them
+        // must not lock the others out
+        const ip = '203.0.113.17';
+        await exhaustBudget(await trackedWindow(t, ip, ACCOUNT));
+
+        await settings.set('smtpServerPassword', 'global-smtp-pass');
+        try {
+            await assert.rejects(() => onAuth({ username: ACCOUNT, password: 'global-smtp-pass' }, session({ remoteAddress: ip })), /Too many failed/);
+
+            const result = await onAuth({ username: OTHER_ACCOUNT, password: 'global-smtp-pass' }, session({ remoteAddress: ip }));
+            assert.deepStrictEqual(result, { user: OTHER_ACCOUNT });
+        } finally {
+            await settings.set('smtpServerPassword', '');
+        }
+    });
+});
+
+test('SMTP account resolver', async t => {
+    const resolveAccount = createSmtpAccountResolver({ accountCache, call: async () => ({}) });
+
+    const prevAuthEnabled = await settings.get('smtpServerAuthEnabled');
+    t.after(async () => {
+        await settings.set('smtpServerAuthEnabled', prevAuthEnabled || false);
+    });
+
+    await t.test('a session opened with a token stops submitting once the token is gone', async () => {
+        // A session can stay open for as long as the client likes, so each submission asks
+        // whether the token that opened it still admits it
+        const token = await tokens.provision({ account: ACCOUNT, scopes: ['smtp'], description: 'smtp-auth revoked later', nolog: true });
+        const sess = session();
+        assert.deepStrictEqual(await onAuth({ username: ACCOUNT, password: token }, sess), { user: ACCOUNT });
+
+        const account = await resolveAccount(sess, {});
+        assert.strictEqual(account.account, ACCOUNT, 'the token still admits the session');
+
+        await tokens.delete(token);
+        await assert.rejects(
+            () => resolveAccount(sess, {}),
+            err => {
+                assert.match(err.message, /Authentication required/);
+                assert.strictEqual(err.responseCode, 530);
+                return true;
+            }
+        );
+        assert.ok(!accountCache.has(sess), 'the cached account is dropped with the session');
+    });
+
+    await t.test('the per-submission recheck records neither a use of the token nor an audit entry', async () => {
+        // the token opened the session; what each message asks is whether it still admits it,
+        // and a thousand messages must not look like a thousand logins
+        const prevAudit = await settings.get('tokenAuditLog');
+        await settings.set('tokenAuditLog', true);
+        tokenAuditLog.resetFlagCache();
+        const token = await tokens.provision({ account: ACCOUNT, scopes: ['smtp'], description: 'smtp-auth recheck', nolog: true });
+        const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+        try {
+            const sess = session();
+            assert.deepStrictEqual(await onAuth({ username: ACCOUNT, password: token }, sess), { user: ACCOUNT });
+            await settle();
+            const { id } = await tokens.get(token, false);
+            const accessAfterLogin = await redis.hgetBuffer(`${REDIS_PREFIX}tokens:access`, id);
+            assert.ok(accessAfterLogin, 'the login is a use of the token');
+            const { total: auditAfterLogin } = await tokenAuditLog.list(id);
+            assert.equal(auditAfterLogin, 1, 'and one audit entry');
+
+            await resolveAccount(sess, {});
+            await resolveAccount(sess, {});
+            await settle();
+            assert.deepStrictEqual(await redis.hgetBuffer(`${REDIS_PREFIX}tokens:access`, id), accessAfterLogin, 'the last use is still the login');
+            assert.equal((await tokenAuditLog.list(id)).total, auditAfterLogin, 'and so is the audit trail');
+        } finally {
+            await tokens.delete(token);
+            await settings.set('tokenAuditLog', prevAudit || false);
+            tokenAuditLog.resetFlagCache();
+        }
+    });
+
+    await t.test('an unauthenticated session names its account with the control header', async () => {
+        await settings.set('smtpServerAuthEnabled', false);
+
+        const sess = session({ eeAuthEnabled: false });
+        const account = await resolveAccount(sess, { requestedAccount: ACCOUNT });
+
+        assert.strictEqual(account.account, ACCOUNT);
+        assert.ok(accountCache.has(sess), 'the resolved account is cached on the session');
+    });
+
+    await t.test('an unauthenticated session without the header is refused with 451', async () => {
+        await settings.set('smtpServerAuthEnabled', false);
+
+        await assert.rejects(
+            () => resolveAccount(session({ eeAuthEnabled: false }), {}),
+            err => {
+                assert.match(err.message, /Sender account ID not provided/);
+                assert.strictEqual(err.responseCode, 451);
+                return true;
+            }
+        );
+    });
+
+    await t.test('an unknown account in the header is refused with 451', async () => {
+        await settings.set('smtpServerAuthEnabled', false);
+
+        await assert.rejects(
+            () => resolveAccount(session({ eeAuthEnabled: false }), { requestedAccount: 'no-such-account' }),
+            err => err.responseCode === 451
+        );
+    });
+
+    await t.test('an unauthenticated session is refused with 530 once authentication has been switched on', async () => {
+        // The session was opened while authentication was off and can be held open for as long
+        // as the client likes; the operator's change has to reach it
+        await settings.set('smtpServerAuthEnabled', true);
+
+        await assert.rejects(
+            () => resolveAccount(session({ eeAuthEnabled: false }), { requestedAccount: ACCOUNT }),
+            err => {
+                assert.match(err.message, /Authentication required/);
+                assert.strictEqual(err.responseCode, 530);
+                return true;
+            }
+        );
+    });
+
+    await t.test('an authenticated session submits through the account it logged in as', async () => {
+        await settings.set('smtpServerAuthEnabled', true);
+
+        const sess = session();
+        await onAuth({ username: ACCOUNT, password: smtpToken }, sess);
+
+        // the header must not override the login
+        const account = await resolveAccount(sess, { requestedAccount: OTHER_ACCOUNT });
+        assert.strictEqual(account.account, ACCOUNT);
+    });
+
+    await t.test('an authenticated session that never logged in is refused with 451', async () => {
+        await settings.set('smtpServerAuthEnabled', true);
+
+        await assert.rejects(
+            () => resolveAccount(session(), { requestedAccount: ACCOUNT }),
+            err => err.responseCode === 451
+        );
+    });
+});
+
+test('sessionDisabledCommands', async t => {
+    const { sessionDisabledCommands } = require('../lib/smtp-auth');
+
+    await t.test('AUTH follows the setting, the server list is kept', () => {
+        assert.deepStrictEqual(sessionDisabledCommands(['STARTTLS'], false).sort(), ['AUTH', 'STARTTLS']);
+        assert.deepStrictEqual(sessionDisabledCommands(['STARTTLS'], true), ['STARTTLS']);
+        assert.deepStrictEqual(sessionDisabledCommands(['STARTTLS', 'AUTH'], true), ['STARTTLS']);
+        assert.deepStrictEqual(sessionDisabledCommands([], false), ['AUTH']);
+    });
+
+    await t.test('never changes the server list it is given (regression: the list was shared by every session)', () => {
+        const serverList = ['STARTTLS'];
+        sessionDisabledCommands(serverList, false);
+        sessionDisabledCommands(serverList, true);
+        assert.deepStrictEqual(serverList, ['STARTTLS']);
+    });
+});
+
+test('per-session AUTH on a real smtp-server', async t => {
+    const net = require('node:net');
+    const { SMTPServer } = require('smtp-server');
+    const { sessionDisabledCommands } = require('../lib/smtp-auth');
+
+    let authEnabled = false;
+    const server = new SMTPServer({
+        disabledCommands: ['STARTTLS'],
+        hideSTARTTLS: true,
+        allowInsecureAuth: true,
+        authOptional: true,
+        logger: false,
+        onConnect(session, callback) {
+            session.disabledCommands = sessionDisabledCommands(server.options.disabledCommands, authEnabled);
+            callback();
+        },
+        onAuth: (auth, session, callback) => callback(null, { user: auth.username })
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const port = server.server.address().port;
+
+    const ehlo = () =>
+        new Promise((resolve, reject) => {
+            const socket = net.connect(port, '127.0.0.1');
+            let data = '';
+            socket.on('data', chunk => {
+                data += chunk;
+                if (/^220 /m.test(data) && !data.includes('EHLO-SENT')) {
+                    data += 'EHLO-SENT';
+                    socket.write('EHLO test\r\n');
+                } else if (/^250 /m.test(data.split('EHLO-SENT')[1] || '')) {
+                    socket.end('QUIT\r\n');
+                    resolve(data.split('EHLO-SENT')[1]);
+                }
+            });
+            socket.on('error', reject);
+        });
+
+    const offered = await ehlo();
+    assert.doesNotMatch(offered, /AUTH/);
+
+    // switching the setting affects the next session, and the server's own list stays untouched
+    authEnabled = true;
+    assert.match(await ehlo(), /AUTH/);
+    assert.deepStrictEqual(server.options.disabledCommands, ['STARTTLS']);
 });

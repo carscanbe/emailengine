@@ -1,0 +1,395 @@
+{{> ui/page-header title="MCP" icon="icon-[tabler--plug-connected]" badgeLabel="Beta" badgeVariant="info" class="mb-1"}}
+
+<p class="mb-6">
+    Connect AI agents through the Model Context Protocol (MCP). Choose whether each agent can manage this
+    EmailEngine instance, work with email, or both. Access tokens control which tools and accounts it can use.
+</p>
+
+<div class="mb-6 alert alert-soft alert-info">
+    <span class="icon-[tabler--flask] size-5 shrink-0"></span>
+    <span>MCP support is in beta. The endpoint is off by default and the tool set may still change between releases -
+        feedback is welcome.</span>
+</div>
+
+{{#unless mcpFeatureEnabled}}
+<div class="mb-6 alert alert-soft alert-warning">
+    <span class="icon-[tabler--alert-triangle] size-5 shrink-0"></span>
+    <span>The MCP endpoint is disabled for this deployment (<code>EENGINE_MCP_ENABLED</code> or <code>[mcp]
+            enabled</code> in the configuration file), so the settings below take effect only after MCP is enabled at startup and EmailEngine is restarted.</span>
+</div>
+{{/unless}}
+
+{{!-- Two jobs share this page: configuring the instance (a settings form, done once) and
+     connecting agents (done every time a new client shows up). Tabbed so each reads as the
+     other settings pages do - the form's Save sits at the bottom of its own content instead
+     of mid-page above a wall of unrelated cards. Settings stays the default tab so a
+     validation-error re-render can never hide the errors behind the other tab. --}}
+{{#> ui/tabs label="MCP configuration sections" class="mb-6"}}
+{{> ui/tab target="mcp-settings" label="Settings" active=true}}
+{{> ui/tab target="mcp-connect" label="Connect an agent"}}
+{{/ui/tabs}}
+
+<div id="mcp-settings" role="tabpanel" aria-labelledby="mcp-settings-tab">
+
+{{> ui/env-managed-alert}}
+
+<form method="post" action="/admin/config/mcp">
+    {{!-- no id: the layout already renders the #crumb element scripts read --}}
+    <input type="hidden" name="crumb" value="{{crumb}}" />
+
+    {{#> ui/card bodyClass="space-y-4"}}
+    <div>
+        {{> ui/setting-ref name="mcpEnabled"}}
+        {{> ui/checkbox id="settingsMcpEnabled" name="mcpEnabled" label="Enable the MCP endpoint"
+        checked=values.mcpEnabled error=errors.mcpEnabled}}
+        <span class="helper-text">Serves the Model Context Protocol at <code>/mcp</code>. The
+            <button type="button" class="link cursor-pointer" data-goto-tab="mcp-connect">Connect an agent</button> tab
+            generates access tokens and ready-to-paste setup for clients; a token with the <code>mcp-manage</code> or
+            <code>mcp</code> scope works only here and not against the REST API.</span>
+    </div>
+
+    {{!-- Nested rather than a peer: OAuth is a sub-option of an endpoint that is already on,
+          not a second decision of equal weight. It adds the sign-in path for clients that
+          cannot hold a static token, so with the endpoint off it decides nothing. The nesting
+          is presentational only - the checkbox is never disabled, so toggling the endpoint off
+          and back on cannot silently clear the stored setting. --}}
+    <div class="ps-6">
+        {{> ui/setting-ref name="mcpOAuthEnabled"}}
+        {{> ui/checkbox id="settingsMcpOAuthEnabled" name="mcpOAuthEnabled" label="Enable OAuth sign-in for MCP clients"
+        checked=values.mcpOAuthEnabled error=errors.mcpOAuthEnabled}}
+        <span class="helper-text">For web connectors and other MCP clients that cannot be configured with a static
+            token. Requires the Service URL to be set under General. The
+            <button type="button" class="link cursor-pointer" data-goto-tab="mcp-connect-oauth">Connect an agent</button>
+            tab shows exactly what to enter in the client's connector form.</span>
+    </div>
+    {{/ui/card}}
+
+    <div class="mb-6">
+        {{> ui/btn label="Save changes" type="submit" icon="icon-[tabler--settings]"}}
+    </div>
+</form>
+
+</div>
+
+<div id="mcp-connect" class="hidden" role="tabpanel" aria-labelledby="mcp-connect-tab">
+
+{{!-- Only the "gate on, setting off" state: with the deployment gate off, the page-level
+     warning above already says the settings are inert, and telling the operator to flip a
+     switch that will not help would contradict it --}}
+{{#if mcpFeatureEnabled}}
+{{#unless values.mcpEnabled}}
+<div class="mb-6 alert alert-soft alert-warning">
+    <span class="icon-[tabler--alert-triangle] size-5 shrink-0"></span>
+    <span>Enable the MCP endpoint before connecting a client. Turn it on under
+        <button type="button" class="link cursor-pointer" data-goto-tab="mcp-settings">Settings</button> first.</span>
+</div>
+{{/unless}}
+{{/if}}
+
+{{!-- The two connection methods are mutually exclusive per client, so they are a segmented
+     switch (labeled by client type - "which one am I connecting" is the question the operator
+     arrives with), not stacked cards to scroll past. Deliberately vendor-neutral: EmailEngine
+     is a generic MCP server, so specific clients appear only as examples inside the panels.
+     The badge and the OAuth panel's warnings all key on the one route-supplied
+     oauthMethodBlocker, which also owns the rationale for keeping a blocked method's tab
+     clickable. --}}
+{{#> ui/tabs label="Connection methods" variant="segment" class="mb-4"}}
+{{> ui/tab target="mcp-connect-token" label="Desktop and self-hosted agents" active=true}}
+{{> ui/tab target="mcp-connect-oauth" label="Web connectors"
+    badgeLabel=(when oauthMethodBlocker "not enabled" "") badgeVariant="warning"}}
+{{/ui/tabs}}
+
+<div id="mcp-connect-token" role="tabpanel" aria-labelledby="mcp-connect-token-tab">
+
+{{#> ui/card bodyClass="space-y-4"}}
+
+<p class="text-sm">Generate an access token and ready-to-paste client configuration in one step. The token gets the MCP
+    scopes you choose below (<code>mcp-manage</code> for the instance, <code>mcp</code> for mail), so it works against
+    the MCP endpoint and nothing else.</p>
+
+{{#unless canProvision}}
+<div class="alert alert-soft alert-warning text-sm">
+    <span class="icon-[tabler--lock] size-5 shrink-0"></span>
+    <span>Generating a token requires an authenticated admin session. Set an admin password and sign in first.</span>
+</div>
+{{/unless}}
+
+<div id="mcpTokenGen" data-mcp-url="{{mcpUrl}}" class="space-y-4">
+    {{!-- One column on purpose: two-up put the account field a full screen away from its
+          label-mate on wide displays, and the form reads as one top-to-bottom flow --}}
+    {{> ui/form-field id="mcpGenLabel" label="What is this token for?" placeholder="for example Cursor or Claude"
+        hint="Shows up as the token description, so you can tell agents apart on the Access Tokens page."}}
+
+    {{!-- The same two sections, in the same order and from the same table, as the OAuth consent
+          prompt: management first, mail declined unless picked. The radio group of a section is
+          named mcpGen_<key>, which is what ui.js reads the selection back from. --}}
+    {{#each mcpSections}}
+    <fieldset class="space-y-2">
+        <legend class="label-text mb-1">{{label}}</legend>
+        {{> mcp_access_levels section=this name=(concat "mcpGen_" @key) idPrefix=(concat "mcpGen_" @key) selected=defaultLevel includeNone=true}}
+    </fieldset>
+    {{/each}}
+
+    {{!-- At the decision point rather than only in the collapsed manual-config block: the
+          level chosen here is what decides whether injected instructions can act --}}
+    <p class="text-base-content/60 text-sm">The connected client may send email content to its AI model. Instructions in received emails can influence
+        the agent. Grant permission to send or delete email only when the agent needs it.</p>
+
+    {{> mcp_account_limit id="mcpGenAccount"}}
+
+    {{!-- What the selected levels actually leave the client able to call, which the level names
+          alone cannot say: the count follows both sections and the account limit, exactly as
+          tools/list will --}}
+    {{> mcp_tool_count id="mcpGenToolCount" autoWire=true levelPrefix="mcpGen_" accountId="mcpGenAccount" class="pt-1"}}
+
+    <div class="flex items-center gap-3">
+        {{#if canProvision}}
+        <button type="button" id="mcpGenSubmit" class="btn btn-primary">
+            <span class="icon-[tabler--key] size-4 shrink-0"></span>Generate connection command
+        </button>
+        {{/if}}
+        <span id="mcpGenError" class="text-error text-sm hidden"></span>
+    </div>
+
+    <div id="mcpGenResult" class="hidden space-y-4">
+        <div class="alert alert-soft alert-warning text-sm">
+            <span class="icon-[tabler--alert-triangle] size-5 shrink-0"></span>
+            {{!-- Just the one-time warning: the standing footer below already carries the
+                  Access Tokens review/revoke pointer --}}
+            <span>The token below is shown only once.</span>
+        </div>
+
+        {{#> ui/code-block id="mcpGenJsonCfg" label="JSON configuration" copy=true}}
+        For clients configured through a JSON file, for example Cursor or a project-level <code>.mcp.json</code>. Some
+        clients name the top-level key <code>servers</code> instead of <code>mcpServers</code>.
+        {{/ui/code-block}}
+
+        {{#> ui/code-block id="mcpGenClaudeCmd" label="Command-line example (Claude Code)" copy=true}}
+        Other command-line clients register MCP servers with a similar command - check the client's documentation.
+        {{/ui/code-block}}
+    </div>
+
+    <div class="text-sm text-base-content/60">
+        Each agent connects using an access token with the <code>mcp-manage</code> or <code>mcp</code> scope.
+        Review or revoke these tokens on the <a href="/admin/tokens?scope=mcp-manage&amp;scope=mcp" class="link">Access
+            Tokens</a> page.
+    </div>
+</div>
+
+{{/ui/card}}
+
+{{#> ui/details summary="Manual configuration" class="card bg-base-100 shadow-md mb-6"}}
+<div class="space-y-4">
+
+    <div>
+        <label class="label-text" for="mcpEndpointUrl">MCP endpoint</label>
+        {{> ui/copy-field id="mcpEndpointUrl" value=mcpUrl ariaLabel="MCP endpoint URL"}}
+    </div>
+
+    {{#unless serviceUrlConfigured}}
+    <div class="alert alert-soft alert-info text-sm">
+        <span class="icon-[tabler--info-circle] size-5 shrink-0"></span>
+        <span>No Service URL is configured, so the address above is how this browser reached the instance. Set the
+            Service URL on the <a href="/admin/config/service" class="link">General</a> page to pin the public
+            endpoint address.</span>
+    </div>
+    {{/unless}}
+
+    {{> ui/code-block id="mcpManualJsonCfg" label="JSON configuration"}}
+
+    {{> ui/code-block id="mcpManualClaudeCmd" label="Command-line example (Claude Code)"}}
+
+    {{!-- No prompt-injection sentence here: the generator fieldset in this same panel already
+          carries it, at the point where the access level is chosen --}}
+    <div class="text-sm text-base-content/60">
+        Create a token on the <a href="/admin/tokens" class="link">Access Tokens</a> page with
+        <code>mcp-manage</code> scope for instance management, <code>mcp</code> scope for email, or both.
+        If the agent only needs one mailbox, limit the token to that account.
+    </div>
+
+</div>
+{{/ui/details}}
+
+</div>
+
+<div id="mcp-connect-oauth" class="hidden" role="tabpanel" aria-labelledby="mcp-connect-oauth-tab">
+
+{{#> ui/card bodyClass="space-y-4"}}
+
+<p class="text-sm">Web-based agents (for example a claude.ai connector) cannot store a pre-made token, so the
+    client signs itself in with OAuth instead. In the client, fill the connector form like this:</p>
+
+{{!-- One blocking precondition at a time, keyed on the same oauthMethodBlocker the tab badge
+      reads, so the badge and its "matching warning" cannot disagree --}}
+{{#equals oauthMethodBlocker 'setting'}}
+<div class="alert alert-soft alert-warning text-sm">
+    <span class="icon-[tabler--alert-triangle] size-5 shrink-0"></span>
+    <span>OAuth sign-in is not enabled yet, so a connector cannot sign itself in. Turn on "Enable OAuth sign-in for
+        MCP clients" under <button type="button" class="link cursor-pointer" data-goto-tab="mcp-settings">Settings</button>
+        first.</span>
+</div>
+{{/equals}}
+{{#equals oauthMethodBlocker 'serviceUrl'}}
+<div class="alert alert-soft alert-warning text-sm">
+    <span class="icon-[tabler--alert-triangle] size-5 shrink-0"></span>
+    <span>No Service URL is configured, and OAuth sign-in stays inactive without one - the sign-in flow has to
+        publish a fixed public address. Set it on the <a href="/admin/config/service" class="link">General</a>
+        page.</span>
+</div>
+{{/equals}}
+
+<div>
+    <span class="label-text">Name</span>
+    <p class="text-base-content/60 text-sm">Anything that identifies this instance in the client, for example
+        "EmailEngine".</p>
+</div>
+
+<div>
+    <label class="label-text" for="mcpOAuthUrl">Remote MCP server URL</label>
+    {{> ui/copy-field id="mcpOAuthUrl" value=mcpUrl ariaLabel="MCP endpoint URL for OAuth connectors"}}
+    <span class="helper-text">The full endpoint address, including the <code>/mcp</code> path.</span>
+</div>
+
+<div>
+    <span class="label-text">OAuth Client ID and Client Secret</span>
+    <p class="text-base-content/60 text-sm">Leave both empty - there is no pre-made client ID to copy. EmailEngine
+        supports automatic client registration, so the connector creates its own credentials when it first connects.
+        Some clients, claude.ai among them, keep these fields behind an "Advanced settings" toggle.</p>
+</div>
+
+<div>
+    <span class="label-text">What happens next</span>
+    <ol class="text-base-content/80 ms-4 mt-1 list-decimal space-y-1 text-sm">
+        <li>When you connect, the client opens this instance's authorization prompt in the browser. Sign in with the
+            admin credentials if asked.</li>
+        <li>On the prompt, pick what the connector may manage (observing the instance is the default), switch on mail
+            access if it should read mail, optionally limit it to a single account, then approve.</li>
+        <li>The connector receives its own access token with the MCP scopes you chose - review or revoke it at any
+            time on the <a href="/admin/tokens?scope=mcp-manage&amp;scope=mcp" class="link">Access Tokens</a> page.</li>
+    </ol>
+</div>
+
+<div class="text-base-content/60 text-sm">Approval happens on the admin interface, so it works wherever admin access
+    works - if admin access is limited to specific IP addresses (<code>EENGINE_ADMIN_ACCESS_ADDRESSES</code>), connect
+    new clients from one of those addresses.</div>
+
+{{/ui/card}}
+
+</div>
+
+{{!-- Outside the method panels: what a connected agent receives is the same either way --}}
+{{#> ui/details summary="Exposed tools" summarySmall=(concat toolCatalog.total " tools") class="card bg-base-100 shadow-md mb-6"}}
+<div class="space-y-6">
+    <p class="text-sm text-base-content/60">Available MCP tools, grouped by scope. A connected agent receives only the tools allowed by its token
+        scopes, permissions, and account restriction.</p>
+    {{#each toolCatalog.sections}}
+    <div>
+        <h6 class="mb-2 font-bold">{{label}} <span class="text-base-content/60 font-normal">({{tools.length}} tools,
+                <code>{{scope}}</code>)</span></h6>
+        <div class="space-y-3">
+            {{#each tools}}
+            <div class="flex flex-wrap items-baseline gap-2">
+                <code>{{name}}</code>
+                {{> ui/badge label=badge.label variant=badge.variant soft=true}}
+                {{#if shared}}{{> ui/badge label="both scopes" variant="neutral" soft=true}}{{/if}}
+                <span class="text-sm text-base-content/60 basis-full sm:basis-auto sm:grow">{{description}}</span>
+            </div>
+            {{/each}}
+        </div>
+    </div>
+    {{/each}}
+    {{#if toolCatalog.unreached.length}}
+    <div>
+        <h6 class="mb-2 font-bold">Not offered by any MCP scope</h6>
+        <div class="space-y-3">
+            {{#each toolCatalog.unreached}}
+            <div class="flex flex-wrap items-baseline gap-2">
+                <code>{{name}}</code>
+                <span class="text-sm text-base-content/60 basis-full sm:basis-auto sm:grow">{{description}}</span>
+            </div>
+            {{/each}}
+        </div>
+    </div>
+    {{/if}}
+</div>
+{{/ui/details}}
+
+</div>
+
+<script data-cfasync="false" nonce="{{cspNonce}}">
+    (() => {
+        let container = document.getElementById('mcpTokenGen');
+        // The section table is embedded once, on the tool count element ui.js wires
+        let sections = JSON.parse(document.getElementById('mcpGenToolCount').dataset.mcpSections || '{}');
+        let mcpUrl = container.dataset.mcpUrl;
+
+        // The one place each artifact is written; the manual block shows them with a
+        // placeholder, the generator repeats them with the real token. The mcpServers shape
+        // is what most JSON-configured clients read (Cursor, project-level .mcp.json files);
+        // "type" disambiguates the transport for clients that ask.
+        let claudeCommand = token => 'claude mcp add --transport http emailengine ' + mcpUrl + ' \\\n    --header "Authorization: Bearer ' + token + '"';
+        let jsonConfig = token =>
+            JSON.stringify({ mcpServers: { emailengine: { type: 'http', url: mcpUrl, headers: { Authorization: 'Bearer ' + token } } } }, null, 4);
+
+        document.getElementById('mcpManualJsonCfg').textContent = jsonConfig('<access token>');
+        document.getElementById('mcpManualClaudeCmd').textContent = claudeCommand('<access token>');
+
+        // Cross-tab pointers on this page use data-goto-tab, handled centrally in ui.js
+
+        let submitElm = document.getElementById('mcpGenSubmit');
+        if (!submitElm) {
+            return;
+        }
+
+        let errorElm = document.getElementById('mcpGenError');
+
+        submitElm.addEventListener('click', async () => {
+            errorElm.classList.add('hidden');
+            uiButtonBusy(submitElm, true);
+
+            let label = (document.getElementById('mcpGenLabel').value || '').trim() || 'MCP agent';
+            let account = (document.getElementById('mcpGenAccount').value || '').trim();
+            let choice = uiMcpLevelChoice(sections, 'mcpGen_');
+
+            try {
+                if (!sections.manage || !sections.mail) {
+                    // A missing table must not silently mint a wider credential than the
+                    // selected levels promise
+                    throw new Error('The access levels failed to load. Reload the page and try again.');
+                }
+
+                // The same union the consent prompt mints, computed by the shared helper: the
+                // scopes of the sections that were not declined and the grant pairs of their
+                // levels. A token always carries its grants explicitly, so what the operator saw
+                // is exactly what the credential holds.
+                let record = uiMcpLevelRecord(sections, choice);
+                if (!record.surfaces.length) {
+                    throw new Error('Choose at least one kind of access.');
+                }
+
+                let data = await uiPostJson('/admin/tokens/new', {
+                    description: 'MCP: ' + label,
+                    scopes: record.surfaces,
+                    // The empty string, not null: accountIdSchema is `Joi.string().empty('')`,
+                    // which converts '' to the schema default and refuses an explicit null
+                    account: account,
+                    permissions: { grants: record.grants }
+                });
+
+                if (!data.success) {
+                    throw new Error(data.message || data.error || 'Failed to generate the token');
+                }
+
+                document.getElementById('mcpGenJsonCfg').textContent = jsonConfig(data.token);
+                document.getElementById('mcpGenClaudeCmd').textContent = claudeCommand(data.token);
+
+                document.getElementById('mcpGenResult').classList.remove('hidden');
+            } catch (err) {
+                errorElm.textContent = err.message;
+                errorElm.classList.remove('hidden');
+            } finally {
+                uiButtonBusy(submitElm, false);
+            }
+        });
+    })();
+</script>

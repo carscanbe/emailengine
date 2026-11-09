@@ -23,13 +23,13 @@ function createMockRedis() {
         hgetallBuffer: async () => ({}),
         multi: () => ({
             exec: async () => [],
-            hset: function () {
+            hset() {
                 return this;
             },
-            hdel: function () {
+            hdel() {
                 return this;
             },
-            del: function () {
+            del() {
                 return this;
             }
         }),
@@ -39,11 +39,11 @@ function createMockRedis() {
         exists: async () => 0,
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         defineCommand: () => {},
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -61,9 +61,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -80,6 +78,7 @@ require.cache[getSecretPath] = {
 };
 
 const {
+    checkFetchRetryTimeout,
     hasUidValidityChanged,
     hasNoModseqChanges,
     canUseCondstorePartialSync,
@@ -124,9 +123,17 @@ function mailboxStatus(overrides = {}) {
 }
 
 test('hasUidValidityChanged returns false when stored has no uidValidity (first sync)', () => {
-    const stored = storedStatus();
-    delete stored.uidValidity;
-    assert.equal(hasUidValidityChanged(stored, mailboxStatus({ uidValidity: 123n })), false);
+    // getStoredStatus() always carries the key and reports a missing value as false.
+    // Keyed on the presence of the key, every first sync counted as a UIDVALIDITY
+    // change and was reseeded silently instead of running the full sync that
+    // advertises the existing messages
+    assert.equal(hasUidValidityChanged(storedStatus(), mailboxStatus({ uidValidity: 123n })), false);
+});
+
+test('hasUidValidityChanged returns false when the server stops reporting a valid UIDVALIDITY', () => {
+    // mailboxStatusFromInfo() maps a missing or malformed value to false. Reading that as a change
+    // wiped the folder index and sent mailboxReset over a non-compliant SELECT answer
+    assert.equal(hasUidValidityChanged(storedStatus({ uidValidity: 123n }), mailboxStatus({ uidValidity: false })), false);
 });
 
 test('hasUidValidityChanged returns false when values match', () => {
@@ -237,4 +244,26 @@ test('getFetchRange yields initial batch, advances, and terminates', () => {
 
 test('getFetchRange returns false when the mailbox has fewer messages than already fetched', () => {
     assert.equal(getFetchRange(0, false), false);
+});
+
+test('a FETCH the server keeps refusing gives up within minutes, not a day', () => {
+    // The retries run under the folder's mailbox lock, which holds up IDLE, EXISTS handling and
+    // every API command on that connection. Walk the real backoff schedule until the limit trips
+    const { calculateFetchBackoff } = require('../lib/tools');
+    let elapsed = 0;
+    let attempt = 0;
+    let gaveUp = false;
+    while (!gaveUp && attempt < 10000) {
+        elapsed += calculateFetchBackoff(++attempt);
+        try {
+            checkFetchRetryTimeout(attempt, Date.now() - elapsed);
+        } catch (err) {
+            assert.equal(err.code, 'FetchRetryTimeout');
+            gaveUp = true;
+        }
+    }
+
+    assert.ok(gaveUp, 'the retry loop must end');
+    assert.ok(elapsed <= 10 * 60 * 1000, `gave up after ${Math.round(elapsed / 1000)}s`);
+    assert.ok(attempt >= 5, 'a transient failure still gets several retries');
 });

@@ -22,13 +22,13 @@ function createMockRedis() {
         hgetallBuffer: async () => ({}),
         multi: () => ({
             exec: async () => [],
-            hset: function () {
+            hset() {
                 return this;
             },
-            hdel: function () {
+            hdel() {
                 return this;
             },
-            del: function () {
+            del() {
                 return this;
             }
         }),
@@ -38,11 +38,11 @@ function createMockRedis() {
         exists: async () => 0,
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         defineCommand: () => {},
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -62,9 +62,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: mockQueue,
         submitQueue: mockQueue,
-        documentsQueue: mockQueue,
         exportQueue: mockQueue,
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -111,7 +109,7 @@ function createMockContext(overrides) {
             getAccountKey: () => 'iam:test-account'
         },
         packUidWithLogging: Mailbox.prototype.packUidWithLogging,
-        markUpdated: async function () {
+        async markUpdated() {
             markUpdatedCalled = true;
         },
         get _markUpdatedCalled() {

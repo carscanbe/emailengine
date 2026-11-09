@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert').strict;
+const exitWhenStandalone = require('./helpers/exit-standalone');
 
 // In-memory mock Redis data store
 let mockRedisData = {};
@@ -16,8 +17,11 @@ function createMockRedis() {
             if (!mockRedisData[key]) mockRedisData[key] = {};
             if (args.length === 1 && typeof args[0] === 'object') {
                 Object.assign(mockRedisData[key], args[0]);
-            } else if (args.length === 2) {
-                mockRedisData[key][args[0]] = args[1];
+            } else {
+                // variadic field/value pairs, the way ioredis accepts them
+                for (let i = 0; i + 1 < args.length; i += 2) {
+                    mockRedisData[key][args[i]] = args[i + 1];
+                }
             }
         },
         hgetall: async key => {
@@ -149,39 +153,37 @@ function createMockRedis() {
             };
             return pipeObj;
         },
-        multi: () => {
-            return {
-                hset() {
-                    return this;
-                },
-                hdel() {
-                    return this;
-                },
-                del() {
-                    return this;
-                },
-                expire() {
-                    return this;
-                },
-                srem() {
-                    return this;
-                },
-                hincrby() {
-                    return this;
-                },
-                async exec() {
-                    return [];
-                }
-            };
-        },
+        multi: () => ({
+            hset() {
+                return this;
+            },
+            hdel() {
+                return this;
+            },
+            del() {
+                return this;
+            },
+            expire() {
+                return this;
+            },
+            srem() {
+                return this;
+            },
+            hincrby() {
+                return this;
+            },
+            async exec() {
+                return [];
+            }
+        }),
         ttl: async () => 3600,
         quit: async () => {},
         disconnect: () => {},
-        subscribe: () => {},
+        subscribe: async () => {},
         on: () => {},
         off: () => {},
         defineCommand: () => {},
-        duplicate: function () {
+        duplicate() {
             return createMockRedis();
         }
     };
@@ -202,9 +204,7 @@ require.cache[dbPath] = {
         queueConf: { connection: {} },
         notifyQueue: { add: async () => ({}) },
         submitQueue: { add: async () => ({}) },
-        documentsQueue: { add: async () => ({}) },
         exportQueue: { add: async () => ({}) },
-        getFlowProducer: () => ({}),
         REDIS_CONF: {},
         getRedisURL: () => 'redis://mock'
     }
@@ -227,7 +227,7 @@ const { REDIS_PREFIX } = require('../lib/consts');
 
 test('Passkeys module tests', async t => {
     t.after(() => {
-        setTimeout(() => process.exit(), 1000).unref();
+        exitWhenStandalone();
     });
 
     t.beforeEach(() => {
@@ -257,30 +257,57 @@ test('Passkeys module tests', async t => {
     // -- storeChallenge / consumeChallenge --
 
     await t.test('storeChallenge() stores challenge and returns challengeId', async () => {
-        let challengeId = await passkeys.storeChallenge('test-challenge-data');
+        let challengeId = await passkeys.storeChallenge('test-challenge-data', passkeys.CHALLENGE_AUTH);
         assert.strictEqual(typeof challengeId, 'string');
         assert.strictEqual(challengeId.length, 64); // 32 bytes hex
     });
 
     await t.test('consumeChallenge() retrieves and deletes challenge', async () => {
-        let challengeId = await passkeys.storeChallenge('my-challenge');
-        let challenge = await passkeys.consumeChallenge(challengeId);
+        let challengeId = await passkeys.storeChallenge('my-challenge', passkeys.CHALLENGE_AUTH);
+        let challenge = await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_AUTH);
         assert.strictEqual(challenge, 'my-challenge');
 
         // Second retrieval should return null (consumed)
-        let again = await passkeys.consumeChallenge(challengeId);
+        let again = await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_AUTH);
         assert.strictEqual(again, null);
     });
 
+    // The bypass this namespacing closes: sign-in mints challenges without a password (it is the
+    // login endpoint), registration is gated behind one, and while both drew from a single
+    // keyspace a sign-in nonce could be spent completing a registration.
+    await t.test('a sign-in challenge cannot be consumed as a registration challenge', async () => {
+        let challengeId = await passkeys.storeChallenge('auth-nonce', passkeys.CHALLENGE_AUTH);
+
+        assert.strictEqual(await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_REGISTER), null);
+
+        // and the rejection did not consume it - sign-in still works
+        assert.strictEqual(await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_AUTH), 'auth-nonce');
+    });
+
+    await t.test('a registration challenge cannot be consumed as a sign-in challenge', async () => {
+        let challengeId = await passkeys.storeChallenge('register-nonce', passkeys.CHALLENGE_REGISTER);
+
+        assert.strictEqual(await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_AUTH), null);
+        assert.strictEqual(await passkeys.consumeChallenge(challengeId, passkeys.CHALLENGE_REGISTER), 'register-nonce');
+    });
+
+    await t.test('an unknown purpose throws rather than falling back to a shared keyspace', async () => {
+        await assert.rejects(() => passkeys.storeChallenge('nonce', 'sign-in'), /Unknown WebAuthn challenge purpose/);
+        await assert.rejects(() => passkeys.storeChallenge('nonce'), /Unknown WebAuthn challenge purpose/);
+        await assert.rejects(() => passkeys.consumeChallenge('a'.repeat(64)), /Unknown WebAuthn challenge purpose/);
+        // the purpose is checked before the id, so a forgotten argument cannot hide behind one
+        await assert.rejects(() => passkeys.consumeChallenge(null), /Unknown WebAuthn challenge purpose/);
+    });
+
     await t.test('consumeChallenge() returns null for invalid challengeId', async () => {
-        let result = await passkeys.consumeChallenge('nonexistent');
+        let result = await passkeys.consumeChallenge('nonexistent', passkeys.CHALLENGE_AUTH);
         assert.strictEqual(result, null);
     });
 
     await t.test('consumeChallenge() returns null for null/undefined input', async () => {
-        assert.strictEqual(await passkeys.consumeChallenge(null), null);
-        assert.strictEqual(await passkeys.consumeChallenge(undefined), null);
-        assert.strictEqual(await passkeys.consumeChallenge(''), null);
+        assert.strictEqual(await passkeys.consumeChallenge(null, passkeys.CHALLENGE_AUTH), null);
+        assert.strictEqual(await passkeys.consumeChallenge(undefined, passkeys.CHALLENGE_AUTH), null);
+        assert.strictEqual(await passkeys.consumeChallenge('', passkeys.CHALLENGE_AUTH), null);
     });
 
     // -- saveCredential / getCredential --
@@ -340,9 +367,9 @@ test('Passkeys module tests', async t => {
         assert.strictEqual(await passkeys.getCredential(''), null);
     });
 
-    // -- updateCounter --
+    // -- recordAuthentication --
 
-    await t.test('updateCounter() updates the counter value', async () => {
+    await t.test('recordAuthentication() updates the counter and stamps the sign-in time', async () => {
         await passkeys.saveCredential({
             id: 'cred-counter',
             publicKey: 'pk',
@@ -352,10 +379,13 @@ test('Passkeys module tests', async t => {
             user: 'admin'
         });
 
-        await passkeys.updateCounter('cred-counter', 10);
+        assert.ok(!(await passkeys.getCredential('cred-counter')).lastUsedAt);
+
+        await passkeys.recordAuthentication('cred-counter', 10);
 
         let cred = await passkeys.getCredential('cred-counter');
         assert.strictEqual(cred.counter, 10);
+        assert.ok(!isNaN(new Date(cred.lastUsedAt).getTime()));
     });
 
     // -- listCredentials --

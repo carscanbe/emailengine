@@ -1,0 +1,23 @@
+{{!--
+    ui/tabs - FlyonUI tab strip. Block form only; the block holds ui/tab items:
+      {{#> ui/tabs label="Template content"}}
+      {{> ui/tab target="html" label="HTML" active=true}}
+      {{> ui/tab target="text" label="Plain text"}}
+      {{/ui/tabs}}
+    Params:
+      label   - aria-label describing the strip (required)
+      elId    - element id (optional; see ui/badge for why it is not called `id`)
+      class   - extra classes on the nav, e.g. "mb-4" (optional)
+      variant - "segment" for the pill/segmented style (.tabs-segment in
+                app.tailwind.css), for a choice nested inside a page that
+                already has a bordered strip at the top; default bordered
+    A strip that outgrows its column wraps rather than scrolls; that rule is on .tabs in
+    app.tailwind.css, because the three hand-rolled link navs need it too.
+    Panels are the caller's responsibility: each ui/tab target must match a
+    tabpanel element with that id (role="tabpanel" aria-labelledby="<target>-tab").
+    For a form choice submitted as a radio, use ui/choice-tabs instead.
+--}}
+<nav class="tabs {{#equals variant 'segment'}}tabs-segment{{else}}tabs-bordered{{/equals}}{{#if class}} {{class}}{{/if}}" aria-label="{{label}}" role="tablist"{{#if elId}} id="{{elId}}"{{/if}} data-tabs>
+    {{!-- own hash params neutralized against fallthrough into the block --}}
+    {{> @partial-block label="" elId="" class="" variant=""}}
+</nav>

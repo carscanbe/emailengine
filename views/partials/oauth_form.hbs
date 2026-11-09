@@ -1,1135 +1,524 @@
-{{#if activeOutlook}}
-<div class="card border-left-info shadow mb-4">
-    <div class="card-body">
-        <div class="row no-gutters align-items-center">
-            <div class="col mr-2">
-                <strong>Delegated</strong> access means EmailEngine acts on behalf of a signed-in user. Each
-                mailbox owner must complete an interactive OAuth2 login. Use this when users manage their own
-                accounts or when you have access to the mailbox credentials.
-                {{#if providerData.tutorialUrl}}
-                Read about setting up {{providerData.comment}} OAuth2 project from <a
-                    href="{{providerData.tutorialUrl}}" target="_blank" rel="noopener noreferrer"
-                    referrerpolicy="no-referrer">here</a>.
-                {{/if}}
-            </div>
-            <div class="col-auto">
-                <i class="fas fa-info-circle fa-2x text-gray-300"></i>
-            </div>
-        </div>
-    </div>
-</div>
-{{/if}}
+{{!-- The OAuth2 application form, shared by the new and edit pages for every provider. Top to bottom it
+asks what the app is (Application), what it connects with (Base scope, which decides which fields and
+sections apply), how it signs in (Credentials) and, optionally, which scopes to add or drop. --}}
 
-{{#if activeGmailService}}
-<div class="card border-left-info shadow mb-4">
-    <div class="card-body">
-        <div class="row no-gutters align-items-center">
-            <div class="col mr-2">
-                <strong>Service accounts</strong> let EmailEngine access any mailbox in your Google Workspace
-                organization without an interactive user login. The service account must have domain-wide
-                delegation enabled in Workspace. Use this for automated integrations where you cannot perform
-                interactive logins.
-                <p class="mt-2 mb-0">
-                    Two authentication methods are supported: a downloaded <strong>service account key</strong>
-                    (classic) or <strong>Workload Identity Federation</strong> (keyless, for GKE, EKS, AKS, or
-                    any OIDC-emitting workload). Pick one below.
-                </p>
-                <p class="mt-2 mb-0">
-                    Accounts using service access can only be added via the
-                    <a href="/admin/swagger#/Account/postV1Account">REST API</a>, not through the hosted
-                    authentication form.{{#if providerData.tutorialUrl}} Read the
-                    <a href="{{providerData.tutorialUrl}}" target="_blank" rel="noopener noreferrer"
-                        referrerpolicy="no-referrer">setup guide</a> for both methods.{{/if}}
-                </p>
-            </div>
-            <div class="col-auto">
-                <i class="fas fa-info-circle fa-2x text-gray-300"></i>
-            </div>
-        </div>
-    </div>
-</div>
-{{/if}}
-
-{{#if activeOutlookService}}
-<div class="card border-left-info shadow mb-4">
-    <div class="card-body">
-        <div class="row no-gutters align-items-center">
-            <div class="col mr-2">
-                <strong>Application</strong> access means EmailEngine authenticates as the app itself using
-                client credentials, with no interactive user login required. The Entra app registration must have
-                <strong>application permissions</strong> (not delegated) with admin consent. Use this for
-                service integrations, shared mailboxes, or when you cannot perform interactive logins.
-                Accounts using application access can only be added via the
-                <a href="/admin/swagger#/Account/postV1Account">REST API</a>,
-                not through the hosted authentication form.
-                {{#if providerData.tutorialUrl}}
-                Read about setting up {{providerData.comment}} from <a
-                    href="{{providerData.tutorialUrl}}" target="_blank" rel="noopener noreferrer"
-                    referrerpolicy="no-referrer">here</a>.
-                {{/if}}
-            </div>
-            <div class="col-auto">
-                <i class="fas fa-info-circle fa-2x text-gray-300"></i>
-            </div>
-        </div>
-    </div>
-</div>
-{{/if}}
-
-<div class="card mb-4">
-
-    <div class="card-body">
-
-        <div class="form-group">
-
-            <label for="name">
-                Application name
-            </label>
-
-            {{#if appData.legacy}}
-            <input type="text" class="form-control {{#if errors.name}}is-invalid{{/if}}" id="name"
-                value="{{appData.name}}" placeholder="Enter application name, eg. &quot;My App&quot;&mldr;" disabled />
-            {{else}}
-            <input type="text" class="form-control {{#if errors.name}}is-invalid{{/if}}" id="name" name="name"
-                value="{{values.name}}" placeholder="Enter application name, eg. &quot;My App&quot;&mldr;" required />
-            {{/if}}
-
-            {{#if errors.name}}
-            <span class="invalid-feedback">{{errors.name}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Application name used when listing apps.</small>
-        </div>
-
-        <div class="form-group">
-
-            <label for="description">
-                Description
-            </label>
-
-            {{#if appData.legacy}}
-            <input type="text" class="form-control {{#if errors.description}}is-invalid{{/if}}" id="description"
-                value="{{appData.description}}" placeholder="" disabled />
-            {{else}}
-            <input type="text" class="form-control {{#if errors.description}}is-invalid{{/if}}" id="description"
-                name="description" value="{{values.description}}" placeholder="" />
-            {{/if}}
-
-            {{#if errors.description}}
-            <span class="invalid-feedback">{{errors.description}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Optional application description or a comment.</small>
-        </div>
-
-        {{#unless activeGmailService}}{{#unless activeOutlookService}}
-        <div class="form-group">
-
-            <label for="title">
-                Display title
-            </label>
-
-            {{#if appData.legacy}}
-            <input type="text" class="form-control {{#if errors.title}}is-invalid{{/if}}" id="title"
-                value="{{appData.title}}" placeholder="" disabled />
-            {{else}}
-            <input type="text" class="form-control {{#if errors.title}}is-invalid{{/if}}" id="title" name="title"
-                value="{{values.title}}" placeholder="" />
-            {{/if}}
-
-            {{#if errors.title}}
-            <span class="invalid-feedback">{{errors.title}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Optional display title next to the application button on the account
-                type selection page.</small>
-        </div>
-        {{/unless}}{{/unless}}
-
-
+{{#> ui/stat-card variant="info" icon="icon-[tabler--info-circle]" class="mb-6"}}
+<div class="space-y-2">
+    <p>
         {{#if activeGmail}}
-        <div class="form-group form-check">
+        Users sign in with their own Google account, through the hosted authentication form or your own OAuth2 flow.
+        Create an OAuth client of the <em>Web application</em> type in the Google Cloud console and add the redirect
+        URL below to it.
+        {{/if}}
+        {{#if activeGmailService}}
+        <strong>Service accounts</strong> let EmailEngine reach Google without an interactive user login. An
+        <strong>IMAP and SMTP</strong> or <strong>Gmail API</strong> app accesses any mailbox in your Google
+        Workspace organization through domain-wide delegation, which must be enabled for the service account in
+        Workspace. A <strong>Cloud Pub/Sub</strong> app accesses no mailboxes: it sets up the real-time change
+        notifications your Gmail API apps use.
+        {{/if}}
+        {{#if activeOutlook}}
+        <strong>Delegated</strong> access: EmailEngine acts on behalf of a signed-in user, so each mailbox owner
+        completes an interactive OAuth2 login. Use it when users connect their own accounts.
+        {{/if}}
+        {{#if activeOutlookService}}
+        <strong>Application</strong> access: EmailEngine authenticates as the app itself with client credentials,
+        and no user signs in. The Entra app registration needs <strong>application</strong> permissions (not
+        delegated) with admin consent. Use it for service integrations and shared mailboxes.
+        {{/if}}
+        {{#if activeMailRu}}
+        Users sign in with their own Mail.ru account, through the hosted authentication form or your own OAuth2
+        flow.
+        {{/if}}
+    </p>
+    {{#if providerData.serviceAccount}}
+    <p>Accounts of this app can only be added through the <a href="/admin/reference/account#postV1Account"
+            class="link link-animated">REST API</a>, not the hosted authentication form.</p>
+    {{/if}}
+    {{#if providerData.tutorialUrl}}
+    <p><a href="{{providerData.tutorialUrl}}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"
+            class="link link-animated">Read the {{providerData.comment}} setup guide</a></p>
+    {{/if}}
+</div>
+{{/ui/stat-card}}
 
-            <input type="checkbox" class="form-check-input {{#if errors.googleWorkspaceAccounts}}is-invalid{{/if}}"
-                id="googleWorkspaceAccounts" name="googleWorkspaceAccounts" {{#if
-                values.googleWorkspaceAccounts}}checked{{/if}} />
-            <label class="form-check-label" for="googleWorkspaceAccounts">Show only Google Workspace accounts on the
-                OAuth2 login page</label>
-            {{#if errors.googleWorkspaceAccounts}}
-            <span class="invalid-feedback">{{errors.googleWorkspaceAccounts}}</span>
+{{#> ui/card title="Application" bodyClass="space-y-4"}}
+<div>
+    {{#> ui/form-field id="name" label="Application name" error=errors.name}}
+    <input type="text" class="input{{#if errors.name}} is-invalid{{/if}}" id="name" name="name" value="{{values.name}}"
+        placeholder="For example &quot;My App&quot;" required />
+    <span class="helper-text">Shown in the OAuth2 app list.</span>
+    {{/ui/form-field}}
+</div>
+
+<div>
+    {{#> ui/form-field id="description" label="Description" error=errors.description}}
+    <input type="text" class="input{{#if errors.description}} is-invalid{{/if}}" id="description" name="description"
+        value="{{values.description}}" />
+    <span class="helper-text">Optional. A note on what this app is used for.</span>
+    {{/ui/form-field}}
+</div>
+
+{{#unless providerData.serviceAccount}}
+<div>
+    {{#> ui/form-field id="title" label="Display title" error=errors.title}}
+    <input type="text" class="input{{#if errors.title}} is-invalid{{/if}}" id="title" name="title"
+        value="{{values.title}}" />
+    <span class="helper-text">Optional. Shown on this app's button in the hosted authentication form.</span>
+    {{/ui/form-field}}
+</div>
+
+<div>
+    {{> ui/checkbox id="enabled" name="enabled" label="Enable this app" checked=values.enabled error=errors.enabled
+    hint="Offer this app as an account type in the hosted authentication form."}}
+</div>
+{{/unless}}
+
+{{#if activeGmail}}
+<div>
+    {{> ui/checkbox id="googleWorkspaceAccounts" name="googleWorkspaceAccounts"
+    label="Accept only Google Workspace accounts" checked=values.googleWorkspaceAccounts
+    error=errors.googleWorkspaceAccounts
+    hint="Shows only Google Workspace accounts on the Gmail sign-in screen, and refuses the setup if a personal account signs in anyway."}}
+</div>
+{{/if}}
+{{/ui/card}}
+
+{{!-- The base scope comes before the credentials: it decides which sections apply (the Pub/Sub app
+selector, the scope presets, the Graph notification endpoints) and, for a service account, which
+authentication methods can be offered (the attached service account is Pub/Sub only). One panel per
+scope, each marked data-base-scopes; checkScopesRadio() shows the selected one. A stored app's scope
+cannot change, so its page names the scope instead of offering the strip, and the server renders the
+matching panel visible. Mail.ru has a single mode and no card. --}}
+{{#unless activeMailRu}}
+{{!-- wrap-anywhere: the scope URLs in the descriptions have no break points of their own --}}
+{{#> ui/card title="Base scope" bodyClass="space-y-4 wrap-anywhere"}}
+
+        {{#if activeOutlookService}}
+        <input type="hidden" name="baseScopes" value="api" />
+        <p><strong>MS Graph API</strong> <span class="text-sm text-base-content/60">- the only mode application
+                access supports</span></p>
+        {{else if actionCreate}}
+        {{#> ui/choice-tabs label="Base scope" heading="What the app connects with" note="Fixed once the app is created"
+        elId="base-scope-tabs"}}
+            {{> ui/choice-tab id="baseScopesImap" name="baseScopes" value="imap" label="IMAP and SMTP"
+            checked=baseScopesImap class="base-scopes-radio"}}
+            {{> ui/choice-tab id="baseScopesAPI" name="baseScopes" value="api"
+            label=(when activeOutlook "MS Graph API" "Gmail API") checked=baseScopesApi class="base-scopes-radio"}}
+            {{#if activeGmailService}}
+            {{> ui/choice-tab id="baseScopesPubsub" name="baseScopes" value="pubsub" label="Cloud Pub/Sub"
+            checked=baseScopesPubsub class="base-scopes-radio"}}
             {{/if}}
-            <small class="form-text text-muted">When enabled, only Google Workspace accounts will be available on the
-                Gmail OAuth2 login screen.</small>
-        </div>
+            {{/ui/choice-tabs}}
+        {{else}}
+        <p>
+            <strong>{{#if baseScopesPubsub}}Cloud Pub/Sub{{else if baseScopesApi}}{{#if activeOutlook}}MS Graph API{{else}}Gmail API{{/if}}{{else}}IMAP and SMTP{{/if}}</strong>
+            <span class="text-sm text-base-content/60">- fixed once the app is created</span>
+        </p>
         {{/if}}
 
-        {{#unless activeGmailService}}{{#unless activeOutlookService}}
-        <div class="form-group form-check">
-
-            <input type="checkbox" class="form-check-input {{#if errors.enabled}}is-invalid{{/if}}" id="enabled"
-                name="enabled" {{#if values.enabled}}checked{{/if}} />
-            <label class="form-check-label" for="enabled">Enable this app</label>
-            {{#if errors.enabled}}
-            <span class="invalid-feedback">{{errors.enabled}}</span>
-            {{/if}}
-            <small class="form-text text-muted">If enabled, then this OAuth2 app is shown as an
-                account type option in the hosted authentication form.</small>
+        {{#unless activeOutlookService}}
+        <div class="space-y-4{{#unless baseScopesImap}} hidden{{/unless}}" data-base-scopes="imap">
+            <p class="text-sm">
+                {{#if activeGmail}}Mail is synced over IMAP and sent over SMTP. Requires the
+                <code>https://mail.google.com/</code> scope on the OAuth consent screen.{{/if}}
+                {{#if activeGmailService}}Mail is synced over IMAP and sent over SMTP for any mailbox in your
+                Workspace. Authorize the domain-wide delegation for <code>https://mail.google.com/</code>.{{/if}}
+                {{#if activeOutlook}}Mail is synced over IMAP and sent over SMTP. Requires the
+                <code>IMAP.AccessAsUser.All</code> and <code>SMTP.Send</code> delegated permissions.{{/if}}
+            </p>
         </div>
-        {{/unless}}{{/unless}}
+        {{/unless}}
 
+        <div class="space-y-4{{#unless activeOutlookService}}{{#unless baseScopesApi}} hidden{{/unless}}{{/unless}}"
+            data-base-scopes="api">
+            <p class="text-sm">
+                {{#if activeGmail}}Mail is synced and sent through the Gmail HTTP API. Requires the
+                <code>https://www.googleapis.com/auth/gmail.modify</code> scope on the OAuth consent screen.{{/if}}
+                {{#if activeGmailService}}Mail is synced and sent through the Gmail HTTP API for any mailbox in
+                your Workspace. Authorize the domain-wide delegation for
+                <code>https://www.googleapis.com/auth/gmail.modify</code>.{{/if}}
+                {{#if activeOutlook}}Mail is synced and sent through Microsoft Graph. Requires the
+                <code>Mail.ReadWrite</code> and <code>Mail.Send</code> delegated permissions.{{/if}}
+                {{#if activeOutlookService}}Mail is synced and sent through Microsoft Graph. Requires the
+                <code>Mail.ReadWrite</code>, <code>Mail.Send</code> and <code>User.Read.All</code> application
+                permissions with admin consent.{{/if}}
+            </p>
+            {{!-- Guarded on providerData.gmailApi, not on one provider: a service account in Gmail API mode
+            takes the same delegated scopes an interactive app takes, so the presets apply to it too --}}
+            {{#if providerData.gmailApi}}
+            {{> oauth_scope_presets provider="gmail"}}
+            {{> oauth_pubsub_app_select}}
+            {{/if}}
+            {{#if activeOutlook}}
+            {{> oauth_scope_presets provider="outlook"}}
+            {{> oauth_graph_endpoints}}
+            {{/if}}
+            {{#if activeOutlookService}}
+            {{> oauth_graph_endpoints}}
+            {{/if}}
+        </div>
+
+        {{#if activeGmailService}}
+        <div class="space-y-4{{#unless baseScopesPubsub}} hidden{{/unless}}" data-base-scopes="pubsub">
+            <p class="text-sm">Accesses no mailboxes: creates and manages the Pub/Sub topic and subscription that
+                deliver real-time change notifications for your Gmail API apps. The service account needs the
+                <code>Pub/Sub Admin</code> role in the project.</p>
+            {{#if actionCreate}}
+            <div>
+                {{#> ui/form-field id="googleTopicName" label="Topic name" error=errors.googleTopicName}}
+                <input type="text" class="input{{#if errors.googleTopicName}} is-invalid{{/if}}" id="googleTopicName"
+                    name="googleTopicName" value="{{values.googleTopicName}}" placeholder="ee-pub-&lt;app id&gt;" />
+                <span class="helper-text">Optional. Leave empty to use the generated name shown.</span>
+                {{/ui/form-field}}
+            </div>
+            <div>
+                {{#> ui/form-field id="googleSubscriptionName" label="Subscription name"
+                error=errors.googleSubscriptionName}}
+                <input type="text" class="input{{#if errors.googleSubscriptionName}} is-invalid{{/if}}"
+                    id="googleSubscriptionName" name="googleSubscriptionName"
+                    value="{{values.googleSubscriptionName}}" placeholder="ee-sub-&lt;app id&gt;" />
+                <span class="helper-text">Optional. Leave empty to use the generated name shown.</span>
+                {{/ui/form-field}}
+            </div>
+            {{else}}
+            <dl class="ee-dl">
+                <dt>Pub/Sub topic</dt>
+                <dd>{{#if appData.pubSubTopic}}<code>{{lastVal appData.pubSubTopic "/"}}</code>{{else}}Not created
+                    yet{{/if}}</dd>
+                <dt>Pub/Sub subscription</dt>
+                <dd>{{#if appData.pubSubSubscription}}<code>{{lastVal appData.pubSubSubscription
+                        "/"}}</code>{{else}}Not created yet{{/if}}</dd>
+            </dl>
+            {{/if}}
+        </div>
+        {{/if}}
+{{/ui/card}}
+{{/unless}}
+
+{{!-- Hand-rolled rather than ui/card: the whole body is one {{#if}}/{{else}}, which is the shape that
+loses its content inside a partial block (see .claude/rules/admin-ui.md) --}}
+<div class="card bg-base-100 shadow-md mb-6">
+
+    <div class="card-header">
+        <h6 class="card-title text-primary">Credentials</h6>
     </div>
-</div>
 
-<div class="card mb-4">
-
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">OAuth2 Credentials</h6>
-    </div>
-
-    <div class="card-body">
+    <div class="card-body space-y-4">
 
         {{#if activeGmailService}}
 
-        <div class="form-group">
-            <label class="d-block">Authentication method</label>
+        {{#if authMethodLocked}}
+        <div>
+            <span class="label-text block">Authentication method</span>
             <input type="hidden" name="authMethod" id="authMethod"
-                value="{{#if authMethodIsExternalAccount}}externalAccount{{else}}serviceKey{{/if}}" />
-            {{#if authMethodLocked}}
-            <p class="mb-1">
-                <strong>{{#if authMethodIsExternalAccount}}Workload Identity Federation (keyless){{else}}Service account key{{/if}}</strong>
+                value="{{#if authMethodIsExternalAccount}}externalAccount{{else if authMethodIsMetadataServer}}metadataServer{{else}}serviceKey{{/if}}" />
+            <p>
+                <strong>{{#if authMethodIsExternalAccount}}Workload Identity Federation{{else if
+                    authMethodIsMetadataServer}}Attached service account{{else}}Service account key{{/if}}</strong>
+                <span class="text-sm text-base-content/60">- fixed once the app is created</span>
             </p>
-            <small class="form-text text-muted">The authentication method is fixed once the application has been created and
-                cannot be changed.</small>
-            {{else}}
-            <ul class="nav nav-tabs" id="auth-method-tabs" role="tablist">
-                <li class="nav-item" role="presentation">
-                    <a class="nav-link auth-method-tab {{#if authMethodIsServiceKey}}active{{/if}}"
-                        id="auth-method-tab-serviceKey" data-auth-method="serviceKey" href="#" role="tab"
-                        aria-selected="{{#if authMethodIsServiceKey}}true{{else}}false{{/if}}">Service account key</a>
-                </li>
-                <li class="nav-item" role="presentation">
-                    <a class="nav-link auth-method-tab {{#if authMethodIsExternalAccount}}active{{/if}}"
-                        id="auth-method-tab-externalAccount" data-auth-method="externalAccount" href="#" role="tab"
-                        aria-selected="{{#if authMethodIsExternalAccount}}true{{else}}false{{/if}}">Workload Identity Federation (keyless)</a>
-                </li>
-            </ul>
-            <small class="form-text text-muted">"Service account key" expects a downloaded JSON key file.
-                "Workload Identity Federation" authenticates without a long-lived key, using a credential issued
-                by your runtime environment.</small>
-            {{/if}}
         </div>
+        {{else}}
+        {{!-- A ui/choice-tabs strip: the selection is the submitted authMethod radio. Every method is
+              always offered, so the strip never changes shape. The attached service account is Pub/Sub
+              only (the metadata server's token is the service account's own and cannot impersonate a
+              Workspace user): outside that base scope its tab carries a badge saying so, and choosing it
+              selects the Cloud Pub/Sub base scope above. The script at the end of this partial swaps the
+              .auth-method-section blocks, which are interleaved with fields shared by the methods, and
+              each method's own description opens its section. --}}
+        <div>
+            {{#> ui/choice-tabs label="Authentication method" heading="Authentication method"
+            note="Fixed once the app is created" elId="auth-method-tabs"}}
+            {{> ui/choice-tab id="authMethodServiceKey" name="authMethod" value="serviceKey"
+            label="Service account key" checked=authMethodIsServiceKey class="auth-method-radio"}}
+            {{> ui/choice-tab id="authMethodExternalAccount" name="authMethod" value="externalAccount"
+            label="Workload Identity Federation" checked=authMethodIsExternalAccount class="auth-method-radio"}}
+            {{> ui/choice-tab id="authMethodMetadataServer" name="authMethod" value="metadataServer"
+            label="Attached service account" checked=authMethodIsMetadataServer class="auth-method-radio"
+            badgeLabel="Pub/Sub only" badgeId="authMethodScopeBadge" badgeHidden=baseScopesPubsub}}
+            {{/ui/choice-tabs}}
+            <span class="helper-text text-warning hidden" id="authMethodNotice" aria-live="polite"></span>
+        </div>
+        {{/if}}
 
-        <div class="auth-method-section auth-method-section-serviceKey {{#unless authMethodIsServiceKey}}d-none{{/unless}}">
-            <div class="form-group">
-                <button type="button" class="btn btn-info btn-icon-split" id="serviceFile">
-                    <span class="icon text-white-50">
-                        <i class="fas fa-cloud-upload-alt"></i>
-                    </span>
-                    <span class="text">Load configuration from the service key file&#x2026;</span>
-                </button>
-                <small class="form-text text-muted">Select the JSON file you received after generating a new service key to
-                    retrieve the service values.</small>
+        <div class="auth-method-section auth-method-section-serviceKey space-y-3{{#unless authMethodIsServiceKey}} hidden{{/unless}}">
+            {{#unless authMethodLocked}}
+            <p class="text-sm">Signs in with a JSON key file downloaded from the Google Cloud console.</p>
+            {{/unless}}
+            <div>
+                {{> ui/btn label="Load from the key file..." variant="info" id="serviceFile"
+                icon="icon-[tabler--cloud-upload]"}}
+                <span class="helper-text">Choose a service account key JSON file to fill in the credentials below.</span>
             </div>
         </div>
 
-        <div class="auth-method-section auth-method-section-externalAccount {{#unless authMethodIsExternalAccount}}d-none{{/unless}}">
-            <div class="form-group">
-                <button type="button" class="btn btn-info btn-icon-split" id="externalAccountFile">
-                    <span class="icon text-white-50">
-                        <i class="fas fa-cloud-upload-alt"></i>
-                    </span>
-                    <span class="text">Load configuration from the external-account JSON file&#x2026;</span>
-                </button>
-                <small class="form-text text-muted">Select the credential configuration file produced by
-                    <code>gcloud iam workload-identity-pools create-cred-config</code>.</small>
+        <div class="auth-method-section auth-method-section-externalAccount space-y-3{{#unless authMethodIsExternalAccount}} hidden{{/unless}}">
+            {{#unless authMethodLocked}}
+            <p class="text-sm">No long-lived key: EmailEngine exchanges a credential issued by its runtime (GKE,
+                EKS, AKS or any OIDC-emitting workload) for Google access tokens.</p>
+            {{/unless}}
+            <div>
+                {{> ui/btn label="Load from the configuration file..." variant="info"
+                id="externalAccountFile" icon="icon-[tabler--cloud-upload]"}}
+                <span class="helper-text">Select the credential configuration file produced by
+                    <code>gcloud iam workload-identity-pools create-cred-config</code>.</span>
             </div>
         </div>
 
-        <div class="form-group">
-            <label for="googleProjectId">
-                Google Cloud Project ID
-            </label>
-            <input type="text" class="form-control {{#if errors.googleProjectId}}is-invalid{{/if}}" id="googleProjectId"
+        <div class="auth-method-section auth-method-section-metadataServer{{#unless authMethodIsMetadataServer}} hidden{{/unless}}">
+            <div class="space-y-2">
+                <p class="text-sm">Uses the service account of the VM, GKE workload or Cloud Run service EmailEngine
+                    runs on, so there is nothing to store. Available for Cloud Pub/Sub apps only. Grant that service
+                    account the <code>Pub/Sub Admin</code> role, and on Compute Engine give the VM the
+                    <code>cloud-platform</code> access scope.</p>
+                {{#if actionCreate}}
+                <div class="flex flex-wrap items-center gap-3">
+                    {{> ui/btn label="Detect from this host" variant="info" id="metadataProbe"
+                    icon="icon-[tabler--cloud-search]"}}
+                    <span class="helper-text" id="metadataProbeResult" aria-live="polite"></span>
+                </div>
+                {{/if}}
+            </div>
+        </div>
+
+        <div>
+            {{#> ui/form-field id="googleProjectId" label="Google Cloud project ID" error=errors.googleProjectId}}
+            <input type="text" class="input{{#if errors.googleProjectId}} is-invalid{{/if}}" id="googleProjectId"
                 name="googleProjectId" value="{{values.googleProjectId}}"
-                placeholder="Enter the Google Cloud Project ID of the service, for example &quot;project-name-425411&quot;"
+                placeholder="For example &quot;project-name-425411&quot;"
                 required />
-            {{#if errors.googleProjectId}}
-            <span class="invalid-feedback">{{errors.googleProjectId}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Service Project ID</small>
+            <span class="helper-text">The project that owns the service account. A Cloud Pub/Sub app creates its
+                topic and subscription there.</span>
+            {{/ui/form-field}}
         </div>
 
-        <div class="form-group">
-            <label for="serviceClientEmail">
-                Client Email
-            </label>
-            <input type="email" class="form-control {{#if errors.serviceClientEmail}}is-invalid{{/if}}"
-                id="serviceClientEmail" name="serviceClientEmail" value="{{values.serviceClientEmail}}"
-                placeholder="Enter the principal of the service, for example &quot;name@project-123.iam.gserviceaccount.com&quot;"
-                required />
-            {{#if errors.serviceClientEmail}}
-            <span class="invalid-feedback">{{errors.serviceClientEmail}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Service Client Email</small>
+        {{!-- Not used by the attached service account, which the metadata server identifies. The
+              inputs of a hidden auth-method section are disabled, so their required attribute cannot
+              block the form and their values are not submitted --}}
+        <div
+            class="auth-method-section auth-method-section-serviceKey auth-method-section-externalAccount space-y-4{{#if authMethodIsMetadataServer}} hidden{{/if}}">
+            <div>
+                {{#> ui/form-field id="serviceClientEmail" label="Service account email" error=errors.serviceClientEmail}}
+                <input type="email" class="input{{#if errors.serviceClientEmail}} is-invalid{{/if}}" id="serviceClientEmail"
+                    name="serviceClientEmail" value="{{values.serviceClientEmail}}"
+                    placeholder="For example &quot;name@project-123.iam.gserviceaccount.com&quot;"
+                    required {{#if authMethodIsMetadataServer}}disabled{{/if}} />
+                <span class="helper-text">Email address of the Google service account.</span>
+                {{/ui/form-field}}
+            </div>
+
+            <div>
+                {{#> ui/form-field id="serviceClient" label="Service account client ID" error=errors.serviceClient}}
+                <input type="text" class="input{{#if errors.serviceClient}} is-invalid{{/if}}" id="serviceClient"
+                    name="serviceClient" value="{{values.serviceClient}}" placeholder="For example &quot;104226123456789012345&quot;"
+                    required {{#if authMethodIsMetadataServer}}disabled{{/if}} />
+                <span class="helper-text">Numeric client ID used to configure domain-wide delegation.</span>
+                {{/ui/form-field}}
+            </div>
         </div>
 
-        <div class="form-group">
-            <label for="serviceClient">
-                Service client
-            </label>
-            <input type="text" class="form-control {{#if errors.serviceClient}}is-invalid{{/if}}" id="serviceClient"
-                name="serviceClient" value="{{values.serviceClient}}" placeholder="Enter service client ID&mldr;"
-                required />
-            {{#if errors.serviceClient}}
-            <span class="invalid-feedback">{{errors.serviceClient}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Service Client ID</small>
-        </div>
-
-        <div class="auth-method-section auth-method-section-serviceKey {{#unless authMethodIsServiceKey}}d-none{{/unless}}">
-            <div class="form-group">
-
-                <label for="serviceKey">Secret service key</label>
-
-                <textarea class="form-control droptxt autoselect {{#if errors.serviceKey}}is-invalid{{/if}}" id="serviceKey"
-                    name="serviceKey" rows="8" data-enable-grammarly="false" spellcheck="false" {{#if
+        <div class="auth-method-section auth-method-section-serviceKey{{#unless authMethodIsServiceKey}} hidden{{/unless}}">
+            <div>
+                {{#> ui/form-field id="serviceKey" label="Private key" error=errors.serviceKey}}
+                <textarea class="textarea w-full droptxt autoselect{{#if errors.serviceKey}} is-invalid{{/if}}"
+                    id="serviceKey" name="serviceKey" rows="8" data-enable-grammarly="false" spellcheck="false" {{#if
                     hasServiceKey}}placeholder="Service key is set but not shown&mldr;" {{else}}
-                    placeholder="Starts with &quot;-----BEGIN PRIVATE KEY-----&quot;&mldr;" {{/if}}>{{values.serviceKey}}</textarea>
-                {{#if errors.serviceKey}}
-                <span class="invalid-feedback">{{errors.serviceKey}}</span>
-                {{/if}}
+                    placeholder="Starts with &quot;-----BEGIN PRIVATE KEY-----&quot;&mldr;"
+                    {{/if}}>{{values.serviceKey}}</textarea>
+                {{/ui/form-field}}
             </div>
         </div>
 
-        <div class="auth-method-section auth-method-section-externalAccount {{#unless authMethodIsExternalAccount}}d-none{{/unless}}">
-            <div class="form-group">
-
-                <label for="externalAccount">External account configuration</label>
-
-                <textarea class="form-control droptxt autoselect text-monospace {{#if errors.externalAccount}}is-invalid{{/if}}"
-                    id="externalAccount" name="externalAccount" rows="8" data-enable-grammarly="false" spellcheck="false" {{#if
-                    hasExternalAccount}}placeholder="External account configuration is set but not shown&mldr;" {{else}}
-                    placeholder="{&quot;type&quot;:&quot;external_account&quot;,&quot;audience&quot;:&quot;...&quot;,&quot;credential_source&quot;:{&quot;file&quot;:&quot;/var/run/secrets/...&quot;}}" {{/if}}>{{values.externalAccount}}</textarea>
-                {{#if errors.externalAccount}}
-                <span class="invalid-feedback">{{errors.externalAccount}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Paste the JSON produced by
+        <div class="auth-method-section auth-method-section-externalAccount{{#unless authMethodIsExternalAccount}} hidden{{/unless}}">
+            <div>
+                {{#> ui/form-field id="externalAccount" label="External account configuration"
+                error=errors.externalAccount}}
+                <textarea
+                    class="textarea w-full droptxt autoselect font-mono{{#if errors.externalAccount}} is-invalid{{/if}}"
+                    id="externalAccount" name="externalAccount" rows="8" data-enable-grammarly="false"
+                    spellcheck="false" {{#if
+                    hasExternalAccount}}placeholder="External account configuration is set but not shown&mldr;"
+                    {{else}}
+                    placeholder="{&quot;type&quot;:&quot;external_account&quot;,&quot;audience&quot;:&quot;...&quot;,&quot;credential_source&quot;:{&quot;file&quot;:&quot;/var/run/secrets/...&quot;}}"
+                    {{/if}}>{{values.externalAccount}}</textarea>
+                <span class="helper-text">Paste the JSON produced by
                     <code>gcloud iam workload-identity-pools create-cred-config</code>. Only the
-                    <code>file</code> and <code>url</code> credential sources are supported.</small>
+                    <code>file</code> and <code>url</code> credential sources are supported.</span>
+                {{/ui/form-field}}
             </div>
-        </div>
-
-        {{else if activeOutlookService}}
-
-        <div class="form-group">
-
-            <label for="clientId">
-                Azure Application Id
-            </label>
-            <input type="text" class="form-control {{#if errors.clientId}}is-invalid{{/if}}" id="clientId"
-                name="clientId" value="{{values.clientId}}" placeholder="Enter application (client) ID&mldr;" required />
-            {{#if errors.clientId}}
-            <span class="invalid-feedback">{{errors.clientId}}</span>
-            {{/if}}
-            <small class="form-text text-muted">The Application (client) ID from your Entra app registration.</small>
-        </div>
-
-        <div class="form-group">
-
-            <label for="clientSecret">Client Secret</label>
-
-            <input type="text" class="form-control {{#if errors.clientSecret}}is-invalid{{/if}}" id="clientSecret"
-                name="clientSecret" value="{{values.clientSecret}}" {{#if hasClientSecret}}
-                placeholder="Client secret is set but not shown&mldr;" {{else}} placeholder="Enter client secret&mldr;"
-                {{/if}} {{#unless hasClientSecret}}required{{/unless}} />
-            {{#if errors.clientSecret}}
-            <span class="invalid-feedback">{{errors.clientSecret}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Client secret value from Certificates &amp; secrets.</small>
-        </div>
-
-        <div class="form-group">
-            <label for="cloud">Azure cloud environment</label>
-            <select class="custom-select custom-select-sm {{#if errors.cloud}}is-invalid{{/if}}" id="cloud" name="cloud"
-                required>
-
-                {{#each azureClouds}}
-                <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}{{#if
-                    description}} &mdash;
-                    {{description}}{{/if}}</option>
-                {{/each}}
-            </select>
-            {{#if errors.cloud}}
-            <span class="invalid-feedback">{{errors.cloud}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Accounts hosted in different cloud environments use different OAuth2
-                endpoints.</small>
-        </div>
-
-        <div class="form-group">
-            <label for="authority">Directory (tenant) ID</label>
-
-            <input type="text" class="form-control {{#if errors.authority}}is-invalid{{/if}}" id="authority"
-                name="authority" value="{{values.authority}}"
-                placeholder="Enter tenant ID, eg. &quot;f8cdef31-a31e-4b4a-93e4-5f571e91255a&quot;" required />
-            {{#if errors.authority}}
-            <span class="invalid-feedback">{{errors.authority}}</span>
-            {{/if}}
-            <small class="form-text text-muted">The Directory (tenant) ID from your Entra app registration. Client
-                credentials flow requires a specific tenant ID.</small>
         </div>
 
         {{else}}
 
         {{#if activeGmail}}
-
-        <div class="form-group">
-            <button type="button" class="btn btn-info btn-icon-split" id="gmailConfigFile">
-                <span class="icon text-white-50">
-                    <i class="fas fa-cloud-upload-alt"></i>
-                </span>
-                <span class="text">Load configuration from the JSON file&#x2026;</span>
-            </button>
-            <small class="form-text text-muted">Select the JSON file you can download when viewing client credential
-                information in Google Cloud Console.</small>
+        <div>
+            {{> ui/btn label="Load from the client JSON file..." variant="info" id="gmailConfigFile"
+            icon="icon-[tabler--cloud-upload]"}}
+            <span class="helper-text">Fills in the fields below from the client file downloaded from the Google Cloud
+                console.</span>
         </div>
-
-        <div class="form-group">
-            <label for="googleProjectId">
-                Google Cloud Project ID
-            </label>
-            <input type="text" class="form-control {{#if errors.googleProjectId}}is-invalid{{/if}}" id="googleProjectId"
-                name="googleProjectId" value="{{values.googleProjectId}}"
-                placeholder="Enter the Google Cloud Project ID of the service, for example &quot;project-name-425411&quot;" />
-            {{#if errors.googleProjectId}}
-            <span class="invalid-feedback">{{errors.googleProjectId}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Project ID</small>
-        </div>
-
         {{/if}}
 
-        <div class="form-group">
-
-            <label for="clientId">
-                {{#if activeGmail}}
-                Client Id
-                {{/if}}
-
-                {{#if activeMailRu}}
-                Client Id
-                {{/if}}
-
-                {{#if activeOutlook}}
-                Azure Application Id
-                {{/if}}
-            </label>
-            <input type="text" class="form-control {{#if errors.clientId}}is-invalid{{/if}}" id="clientId"
-                name="clientId" value="{{values.clientId}}" placeholder="Enter client ID&mldr;" required />
-            {{#if errors.clientId}}
-            <span class="invalid-feedback">{{errors.clientId}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 client id.</small>
+        <div>
+            {{#> ui/form-field id="clientId" label=(when providerData.microsoft "Application (client) ID" "Client ID") error=errors.clientId}}
+            <input type="text" class="input{{#if errors.clientId}} is-invalid{{/if}}" id="clientId" name="clientId"
+                value="{{values.clientId}}" required />
+            <span class="helper-text">
+                {{#if activeGmail}}From APIs &amp; Services &gt; Credentials in the Google Cloud console.{{/if}}
+                {{#if providerData.microsoft}}From the Overview page of the app registration in Microsoft
+                Entra.{{/if}}
+                {{#if activeMailRu}}From the settings of your Mail.ru OAuth2 application.{{/if}}
+            </span>
+            {{/ui/form-field}}
         </div>
 
-        <div class="form-group">
-
-            <label for="clientSecret">Client Secret</label>
-
-            <input type="text" class="form-control {{#if errors.clientSecret}}is-invalid{{/if}}" id="clientSecret"
-                name="clientSecret" value="{{values.clientSecret}}" {{#if hasClientSecret}}
-                placeholder="Client secret is set but not shown&mldr;" {{else}} placeholder="Enter client secret&mldr;"
-                {{/if}} {{#unless hasClientSecret}}required{{/unless}} />
-            {{#if errors.clientSecret}}
-            <span class="invalid-feedback">{{errors.clientSecret}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 client secret.</small>
+        <div>
+            {{#> ui/form-field id="clientSecret" label="Client secret" error=errors.clientSecret}}
+            {{> ui/secret-field id="clientSecret" value=values.clientSecret toggleId="showClientSecret"
+            toggleLabel="Show client secret" error=errors.clientSecret required=(when hasClientSecret "" "required")
+            placeholder=(when hasClientSecret "Set, not shown. Leave empty to keep it." "")}}
+            <span class="helper-text">
+                {{#if activeGmail}}Shown next to the client ID in the Google Cloud console.{{/if}}
+                {{#if providerData.microsoft}}The secret's Value from Certificates &amp; secrets, not its Secret
+                ID.{{/if}}
+                {{#if activeMailRu}}From the settings of your Mail.ru OAuth2 application.{{/if}}
+            </span>
+            {{/ui/form-field}}
         </div>
 
-        {{#if activeOutlook}}
+        {{#if activeGmail}}
+        <div>
+            {{#> ui/form-field id="googleProjectId" label="Google Cloud project ID" error=errors.googleProjectId}}
+            <input type="text" class="input{{#if errors.googleProjectId}} is-invalid{{/if}}" id="googleProjectId"
+                name="googleProjectId" value="{{values.googleProjectId}}"
+                placeholder="For example &quot;project-name-425411&quot;" />
+            <span class="helper-text">Optional. The project that owns the OAuth client; a Gmail API app uses it to
+                offer Pub/Sub apps from the same project.</span>
+            {{/ui/form-field}}
+        </div>
+        {{/if}}
 
-        <div class="form-group">
-            <label for="cloud">Azure cloud environment</label>
-            <select class="custom-select custom-select-sm {{#if errors.cloud}}is-invalid{{/if}}" id="cloud" name="cloud"
-                required>
-
+        {{#if providerData.microsoft}}
+        <div>
+            {{#> ui/form-field id="cloud" label="Azure cloud environment" error=errors.cloud}}
+            <select class="select max-w-md{{#if errors.cloud}} is-invalid{{/if}}" id="cloud" name="cloud" required>
                 {{#each azureClouds}}
-                <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}{{#if
-                    description}} &mdash;
+                <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}{{#if description}} -
                     {{description}}{{/if}}</option>
                 {{/each}}
             </select>
-            {{#if errors.cloud}}
-            <span class="invalid-feedback">{{errors.cloud}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Accounts hosted in different cloud environments use different OAuth2
-                endpoints and scopes.</small>
+            <span class="helper-text">Accounts in different cloud environments use different OAuth2 endpoints.</span>
+            {{/ui/form-field}}
         </div>
-
         {{/if}}
 
         {{#if activeOutlook}}
-
-        <label for="clientSecret">Supported account types</label>
-
-        <div class="form-check">
-            <input class="form-check-input r-auth" type="radio" name="authority" id="authorityOrganizations"
-                value="organizations" {{#if authorityOrganizations}}checked{{/if}}>
-            <label class="form-check-label" for="authorityOrganizations">
-                Accounts in any organizational directory (Any Microsoft Entra ID tenant - Multitenant)
-            </label>
+        <div>
+            {{#> ui/form-field id="authority" label="Supported account types" error=errors.authority}}
+            <select class="select max-w-md{{#if errors.authority}} is-invalid{{/if}}" id="authority"
+                name="authority" required>
+                {{!-- an app stored without an account type gets no silent default: saving it asks --}}
+                {{#unless authorityCommon}}{{#unless authorityOrganizations}}{{#unless authorityConsumers}}{{#unless
+                authorityTenant}}<option value="" selected disabled>Choose...</option>{{/unless}}{{/unless}}{{/unless}}{{/unless}}
+                <option value="common" {{#if authorityCommon}}selected{{/if}}>Work, school and personal Microsoft
+                    accounts</option>
+                <option value="organizations" {{#if authorityOrganizations}}selected{{/if}}>Work and school accounts
+                    from any organization</option>
+                <option value="consumers" {{#if authorityConsumers}}selected{{/if}}>Personal Microsoft accounts only
+                </option>
+                <option value="tenant" {{#if authorityTenant}}selected{{/if}}>Work and school accounts from one
+                    organization</option>
+            </select>
+            <span class="helper-text">Must match "Supported account types" in the app registration.</span>
+            {{/ui/form-field}}
         </div>
 
-        <div class="form-check">
-            <input class="form-check-input r-auth" type="radio" name="authority" id="authorityCommon" value="common"
-                {{#if authorityCommon}}checked{{/if}}>
-            <label class="form-check-label" for="authorityCommon">
-                Accounts in any organizational directory (Any Microsoft Entra ID tenant - Multitenant) and personal
-                Microsoft accounts (e.g. Skype, Xbox)
-            </label>
-        </div>
-
-        <div class="form-check">
-            <input class="form-check-input r-auth" type="radio" name="authority" id="authorityConsumers"
-                value="consumers" {{#if authorityConsumers}}checked{{/if}}>
-            <label class="form-check-label" for="authorityConsumers">
-                Personal Microsoft accounts only
-            </label>
-        </div>
-
-        <div class="form-check">
-            <input class="form-check-input r-auth" type="radio" name="authority" id="authorityTenant" value="tenant"
-                {{#if authorityTenant}}checked{{/if}}>
-            <label class="form-check-label" for="authorityTenant">
-                Accounts in the specified organizational directory only (Single tenant)
-            </label>
-        </div>
-
-        <div class="form-group mt-3">
-            <label for="tenant">Directory (tenant) ID</label>
-
-            <input type="text" class="form-control {{#if errors.tenant}}is-invalid{{/if}}" id="tenant" name="tenant"
-                value="{{values.tenant}}" />
-            {{#if errors.tenant}}
-            <span class="invalid-feedback">{{errors.tenant}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Fill this value if you checked "Accounts in the specified organizational
-                directory only" above. The Directory ID is a UUID value like
-                &quot;f8cdef31-a31e-4b4a-93e4-5f571e91255a&quot;</small>
+        <div class="{{#unless authorityTenant}}hidden{{/unless}}" id="tenant-field">
+            {{#> ui/form-field id="tenant" label="Directory (tenant) ID" error=errors.tenant}}
+            <input type="text" class="input{{#if errors.tenant}} is-invalid{{/if}}" id="tenant" name="tenant"
+                value="{{values.tenant}}" placeholder="For example &quot;f8cdef31-a31e-4b4a-93e4-5f571e91255a&quot;"
+                {{#unless authorityTenant}}disabled{{/unless}} />
+            <span class="helper-text">From the Overview page of the app registration in Microsoft Entra.</span>
+            {{/ui/form-field}}
         </div>
         {{/if}}
 
+        {{#if activeOutlookService}}
 
+        <div>
+            {{#> ui/form-field id="authority" label="Directory (tenant) ID" error=errors.authority}}
+            <input type="text" class="input{{#if errors.authority}} is-invalid{{/if}}" id="authority" name="authority"
+                value="{{values.authority}}" placeholder="For example &quot;f8cdef31-a31e-4b4a-93e4-5f571e91255a&quot;"
+                required />
+            <span class="helper-text">From the Overview page of the app registration. Application access always
+                needs a specific tenant.</span>
+            {{/ui/form-field}}
+        </div>
+        {{/if}}
 
-        <div class="form-group">
-            <label for="redirectUrl">Redirect URL</label>
-            <input type="url" class="form-control {{#if errors.redirectUrl}}is-invalid{{/if}}" id="redirectUrl"
+        {{#unless activeOutlookService}}
+        <div>
+            {{#> ui/form-field id="redirectUrl" label="Redirect URL" error=errors.redirectUrl}}
+            <input type="url" class="input{{#if errors.redirectUrl}} is-invalid{{/if}}" id="redirectUrl"
                 name="redirectUrl" value="{{values.redirectUrl}}" required />
-            {{#if errors.redirectUrl}}
-            <span class="invalid-feedback">{{errors.redirectUrl}}</span>
-            {{/if}}
-            <small class="form-text text-muted">Redirect URL for OAuth2. If you are using EmailEngine's OAuth2 flow,
-                then set it to <code>{{defaultRedirectUrl}}</code></small>
+            <span class="helper-text">
+                {{#if activeGmail}}Add it to the authorized redirect URIs of the OAuth client.{{/if}}
+                {{#if activeOutlook}}Add it as a Web redirect URI under Authentication in the app registration.{{/if}}
+                {{#if activeMailRu}}Add it to the redirect URIs of your Mail.ru application.{{/if}}
+                Change it only if you run your own OAuth2 flow; EmailEngine's own is
+                <code>{{defaultRedirectUrl}}</code>.
+            </span>
+            {{/ui/form-field}}
         </div>
+        {{/unless}}
+
         {{/if}}
 
     </div>
 </div>
 
-{{#if activeGmailService}}
-
-<div class="card mb-4">
-
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Base scopes</h6>
-    </div>
-
-    <table class="table">
-
-        <thead>
-            <tr>
-                <th>Type</th>
-                <th>Description</th>
-                <th>Requirements</th>
-
-            </tr>
-
-        </thead>
-        <tbody>
-
-            {{#if actionCreate}}
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesImap" value="imap" {{#if baseScopesImap}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesImap">
-                            IMAP and SMTP
-                        </label>
-                    </div>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"https://mail.google.com/"</code> consent screen scope</td>
-
-            </tr>
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesPubsub" value="pubsub" {{#if baseScopesPubsub}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesPubsub">
-                            Cloud Pub/Sub <span class="badge badge-dark">beta</span>
-                        </label>
-                    </div>
-                </td>
-                <td>Webhook management</td>
-                <td><code>"Pub/Sub Admin"</code> service credentials role</td>
-
-            </tr>
-
-            {{else}}
-            {{#if baseScopesImap}}
-            <tr>
-                <td>
-                    <strong>IMAP and SMTP</strong>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"https://mail.google.com/"</code> consent screen scope</td>
-
-            </tr>
-            {{/if}}
-
-            {{#if baseScopesPubsub}}
-            <tr>
-                <td>
-                    <strong>Cloud Pub/Sub</strong> <span class="badge badge-dark">beta</span>
-                </td>
-                <td>Webhook management</td>
-                <td><code>"Pub/Sub Admin"</code> service credentials role</td>
-
-            </tr>
-            {{/if}}
-
-            {{/if}}
-        </tbody>
-
-    </table>
-
-    <div id="select-pubsub-app" class="card-footer {{#unless baseScopesPubsub}}d-none{{/unless}}">
-
-        {{#if actionCreate}}
-
-        <div class="form-group">
-            <label for="googleTopicName">
-                Google Pub/Sub Topic Name
-            </label>
-            <input type="text" class="form-control {{#if errors.googleTopicName}}is-invalid{{/if}}" id="googleTopicName"
-                name="googleTopicName" value="{{values.googleTopicName}}"
-                placeholder="Enter the Topic Name for the Google Pub/Sub subscription, for example &quot;ee-pub-12345&quot;" />
-            {{#if errors.googleTopicName}}
-            <span class="invalid-feedback">{{errors.googleTopicName}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Pub/Sub Topic Name. Automatically generated if not set.</small>
-        </div>
-
-        <div class="form-group">
-            <label for="googleSubscriptionName">
-                Google Pub/Sub Subscription Name
-            </label>
-            <input type="text" class="form-control {{#if errors.googleSubscriptionName}}is-invalid{{/if}}"
-                id="googleSubscriptionName" name="googleSubscriptionName" value="{{values.googleSubscriptionName}}"
-                placeholder="Enter the Subscription Name for the Google Pub/Sub subscription, for example &quot;ee-sub-12345&quot;" />
-            {{#if errors.googleSubscriptionName}}
-            <span class="invalid-feedback">{{errors.googleSubscriptionName}}</span>
-            {{/if}}
-            <small class="form-text text-muted">OAuth2 Pub/Sub Subscription Name. Automatically generated if not
-                set.</small>
-        </div>
-
-        {{else}}
-
-        <dl class="row">
-
-            <dt class="col-sm-3">Pub/Sub Topic</dt>
-            <dd class="col-sm-9">
-                {{#if appData.pubSubTopic}}
-
-                <code>{{lastVal appData.pubSubTopic "/"}}</code>
-                {{else}}
-                Not initialized
-                {{/if}}
-            </dd>
-
-
-            <dt class="col-sm-3">Pub/Sub Subscription</dt>
-            <dd class="col-sm-9">
-                {{#if appData.pubSubSubscription}}
-                <code>{{lastVal appData.pubSubSubscription "/"}}</code>
-                {{else}}
-                Not initialized
-                {{/if}}
-            </dd>
-        </dl>
-
-
-        {{/if}}
-
-    </div>
-
-</div>
-{{/if}}
-
-{{#if activeGmail}}
-
-<div class="card mb-4">
-
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Base scopes</h6>
-    </div>
-
-
-    <table class="table">
-
-        <thead>
-            <tr>
-                <th>Type</th>
-                <th>Description</th>
-                <th>Requirements</th>
-            </tr>
-
-        </thead>
-        <tbody>
-
-            {{#if actionCreate}}
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesImap" value="imap" {{#if baseScopesImap}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesImap">
-                            IMAP and SMTP
-                        </label>
-                    </div>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"https://mail.google.com/"</code> consent screen scope</td>
-
-            </tr>
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesAPI" value="api" {{#if baseScopesApi}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesAPI">
-                            Gmail API <span class="badge badge-dark">beta</span>
-                        </label>
-                    </div>
-                </td>
-                <td>Gmail HTTP API</td>
-                <td><code>"/auth/gmail.modify"</code> consent screen scope</td>
-
-            </tr>
-
-            {{else}}
-
-            {{#if baseScopesImap}}
-            <tr>
-                <td>
-                    <strong>IMAP and SMTP</strong>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"https://mail.google.com/"</code> consent screen scope</td>
-
-            </tr>
-            {{/if}}
-
-            {{#if baseScopesApi}}
-            <tr>
-                <td>
-                    <strong>Gmail API</strong> <span class="badge badge-dark">beta</span>
-                </td>
-                <td>Gmail HTTP API</td>
-                <td><code>"/auth/gmail.modify"</code> consent screen scope</td>
-
-            </tr>
-            {{/if}}
-
-            {{/if}}
-        </tbody>
-    </table>
-
-    <div id="select-pubsub-app" class="card-footer {{#unless baseScopesApi}}d-none{{/unless}}">
-
-        <p>
-            To enable webhooks for email accounts managed by this app, EmailEngine needs to set up a Cloud Pub/Sub
-            service using a Gmail Service Account with the <em>Pub/Sub Admin</em> role. Select the Gmail Pub/Sub Service
-            Account below to configure this.
-        </p>
-
-        <p>
-            <strong>Note:</strong> This is optional but recommended. Without a configured Pub/Sub service account,
-            EmailEngine will not
-            detect or send webhooks for new, updated, or deleted emails, and will not detect bounces. Send-only accounts
-            don't require this.
-        </p>
-
-        <label for="pubSubApp">Select service account to manage webhooks (optional). The service account must be for the
-            same
-            Google Cloud Project.</label>
-        <select class="custom-select custom-select-sm {{#if
-            errors.pubSubApp}}is-invalid{{/if}}" id="pubSubApp" name="pubSubApp" {{#unless
-            baseScopesApi}}disabled{{/unless}}>
-
-            <option value=""> &mdash; Select the service account for your project &mdash; </option>
-
-            {{#each pubSubApps}}
-            <option value="{{id}}" data-project="{{googleProjectId}}" {{#if selected}}selected{{/if}} {{#unless
-                baseScopesApi}}disabled{{/unless}}>{{name}}{{#if
-                description}} &mdash;
-                {{description}}{{/if}} [{{googleProjectId}}]</option>
-            {{/each}}
-
-        </select>
-        {{#if errors.pubSubApp}}
-        <span class="invalid-feedback">{{errors.pubSubApp}}</span>
-        {{/if}}
-        </td>
-    </div>
-
-</div>
-{{/if}}
-
-
-{{#if activeOutlook}}
-
-<div class="card mb-4">
-
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Base scopes</h6>
-    </div>
-
-
-    <table class="table">
-
-        <thead>
-            <tr>
-                <th>Type</th>
-                <th>Description</th>
-                <th>Requirements</th>
-            </tr>
-
-        </thead>
-        <tbody>
-
-            {{#if actionCreate}}
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesImap" value="imap" {{#if baseScopesImap}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesImap">
-                            IMAP and SMTP
-                        </label>
-                    </div>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"IMAP.AccessAsUser.All"</code> and <code>"SMTP.Send"</code> consent screen scopes</td>
-
-            </tr>
-            <tr>
-                <td>
-                    <div class="form-check">
-                        <input class="form-check-input base-scopes-radio" type="radio" name="baseScopes"
-                            id="baseScopesAPI" value="api" {{#if baseScopesApi}}checked{{/if}}>
-                        <label class="form-check-label" for="baseScopesAPI">
-                            MS Graph API <span class="badge badge-dark">beta</span>
-                        </label>
-                    </div>
-                </td>
-                <td>Microsoft HTTP API</td>
-                <td><code>"Mail.ReadWrite"</code> and <code>"Mail.Send"</code> consent screen scopes</td>
-
-            </tr>
-
-            {{else}}
-
-            {{#if baseScopesImap}}
-            <tr>
-                <td>
-                    <strong>IMAP and SMTP</strong>
-                </td>
-                <td>Regular email protocols</td>
-                <td><code>"IMAP.AccessAsUser.All"</code> and <code>"SMTP.Send"</code> consent screen scopes</td>
-
-            </tr>
-            {{/if}}
-
-            {{#if baseScopesApi}}
-            <tr>
-                <td>
-                    <strong>MS Graph API</strong> <span class="badge badge-dark">beta</span>
-                </td>
-                <td>Microsoft HTTP API</td>
-                <td><code>"Mail.ReadWrite"</code> and <code>"Mail.Send"</code> consent screen scopes</td>
-
-            </tr>
-            {{/if}}
-
-            {{/if}}
-        </tbody>
-    </table>
-
-    <div id="select-pubsub-app" class="card-footer {{#unless baseScopesApi}}d-none{{/unless}}">
-
-        <p>Microsoft Graph delivers change notifications to EmailEngine at these two endpoints:</p>
-
-        <pre><code>{{mainServiceUrl}}/oauth/msg/lifecycle
-{{mainServiceUrl}}/oauth/msg/notification</code></pre>
-
-        <p>
-            Both endpoints must be publicly reachable for anonymous HTTPS
-            <strong>POST</strong> requests. When a notification arrives, EmailEngine
-            immediately forwards the event to your application through its own webhooks.
-        </p>
-
-        <p>
-            If your EmailEngine instance cannot be exposed directly, configure a public
-            proxy domain in <span class="text-muted code-link"><a href="/admin/swagger#/Settings/postV1Settings"
-                    target="_blank" rel="noopener noreferrer">notificationBaseUrl</a></span>. Microsoft Graph will then
-            post to <code>https://&lt;proxy-domain&gt;/oauth/msg/...</code> instead of
-            <code>{{mainServiceUrl}}</code>.
-        </p>
-
-
-    </div>
-</div>
-
-{{/if}}
-
-{{#if activeOutlookService}}
-
-<div class="card mb-4">
-
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Connection type</h6>
-    </div>
-
-    <div class="card-body">
-        <input type="hidden" name="baseScopes" value="api" />
-        <p><strong>MS Graph API</strong> &mdash; This app uses Microsoft Graph API with application permissions
-            (client credentials). Requires <code>Mail.ReadWrite</code>, <code>Mail.Send</code>, and
-            <code>User.Read.All</code> application permissions with admin consent in Entra.</p>
-    </div>
-
-    <div class="card-footer">
-
-        <p>Microsoft Graph delivers change notifications to EmailEngine at these two endpoints:</p>
-
-        <pre><code>{{mainServiceUrl}}/oauth/msg/lifecycle
-{{mainServiceUrl}}/oauth/msg/notification</code></pre>
-
-        <p>
-            Both endpoints must be publicly reachable for anonymous HTTPS
-            <strong>POST</strong> requests. When a notification arrives, EmailEngine
-            immediately forwards the event to your application through its own webhooks.
-        </p>
-
-        <p>
-            If your EmailEngine instance cannot be exposed directly, configure a public
-            proxy domain in <span class="text-muted code-link"><a href="/admin/swagger#/Settings/postV1Settings"
-                    target="_blank" rel="noopener noreferrer">notificationBaseUrl</a></span>. Microsoft Graph will then
-            post to <code>https://&lt;proxy-domain&gt;/oauth/msg/...</code> instead of
-            <code>{{mainServiceUrl}}</code>.
-        </p>
-
-    </div>
-</div>
-
-{{/if}}
-
-{{#if activeGmail}}
-<div class="card mb-4 {{#unless baseScopesApi}}d-none{{/unless}}" id="account-type-card-gmail">
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Account Type Helper</h6>
-    </div>
-    <div class="card-body">
-        <p>Click a button to automatically populate the scope fields with preset configurations:</p>
-
-        <div class="btn-group btn-group-sm mb-3" role="group">
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="normal"
-                data-provider="gmail">
-                Normal (Full Access)
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="readonly"
-                data-provider="gmail">
-                Read-Only
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="readonlysend"
-                data-provider="gmail">
-                Read-Only + Send
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="sendonly"
-                data-provider="gmail">
-                Send-Only
-            </button>
-        </div>
-
-        <div class="mt-2">
-            <small class="text-muted">
-                <strong>Normal:</strong> Default Gmail API scopes for full mailbox access<br>
-                <strong>Read-Only:</strong> Uses <code>gmail.readonly</code> scope for read-only access (no send)<br>
-                <strong>Read-Only + Send:</strong> Uses <code>gmail.readonly</code> and <code>gmail.send</code>
-                scopes<br>
-                <strong>Send-Only:</strong> Uses <code>gmail.send</code> scope only. Does not require privileged scope
-                approval from Google.
-            </small>
-        </div>
-
-        <div class="alert alert-info mt-3 mb-0">
-            <p class="mb-2"><strong>Tip:</strong> Send-only accounts are useful when you only need to send emails and don't want to
-            request privileged scopes that require Google verification.</p>
-            <p class="mb-0"><strong>Important limitation:</strong> Messages sent through send-only accounts cannot be tracked by EmailEngine.
-            The Gmail API modifies the Message-ID header when sending emails, and without read permissions,
-            EmailEngine cannot resolve the new Message-ID assigned by Gmail. This means delivery status and bounce
-            notifications may not be accurately associated with the sent message.</p>
-        </div>
-    </div>
-</div>
+{{#> ui/details summary="Custom scopes" summarySmall="Optional" id="setupScopes" class="card bg-base-100 shadow-md mb-6"
+bodyClass="space-y-4 wrap-anywhere"
+open=(when values.extraScopes true values.skipScopes)}}
+<p>Add scopes beyond the defaults, for example when your application uses the access tokens for other services,
+    or drop default scopes your integration does not need.</p>
+
+{{#if providerData.gmailApi}}
+<div class="alert alert-soft alert-info block">Enable the matching APIs for the project (<em>Enabled APIs &amp;
+    services</em> in the <a href="https://console.cloud.google.com/apis/dashboard" target="_blank"
+        rel="noopener noreferrer" referrerpolicy="no-referrer" class="link link-animated">Google Cloud console</a>)
+    before adding accounts with new scopes, or token requests will fail.</div>
 {{/if}}
 
 {{#if activeOutlook}}
-<div class="card mb-4 {{#unless baseScopesApi}}d-none{{/unless}}" id="account-type-card-outlook">
-    <div class="card-header py-3">
-        <h6 class="m-0 font-weight-bold text-primary">Account Type Helper</h6>
-    </div>
-    <div class="card-body">
-        <p>Click a button to automatically populate the scope fields with preset configurations:</p>
-
-        <div class="btn-group btn-group-sm mb-3" role="group">
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="normal"
-                data-provider="outlook">
-                Normal (Full Access)
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="readonly"
-                data-provider="outlook">
-                Read-Only
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="readonlysend"
-                data-provider="outlook">
-                Read-Only + Send
-            </button>
-            <button type="button" class="btn btn-outline-primary account-type-btn" data-type="sendonly"
-                data-provider="outlook">
-                Send-Only
-            </button>
-        </div>
-
-        <div class="mt-2">
-            <small class="text-muted">
-                <strong>Normal:</strong> Default MS Graph API scopes for full mailbox access<br>
-                <strong>Read-Only:</strong> Uses <code>Mail.Read</code> scope for read-only access (no send)<br>
-                <strong>Read-Only + Send:</strong> Uses <code>Mail.Read</code> with <code>Mail.Send</code> enabled<br>
-                <strong>Send-Only:</strong> Uses <code>Mail.Send</code> scope only (disables
-                <code>Mail.ReadWrite</code>)
-            </small>
-        </div>
-    </div>
-</div>
+<div class="alert alert-soft alert-info block">A Microsoft token is issued for one API, so every scope must come
+    from <code>{{#if baseScopesApi}}https://graph.microsoft.com/{{else}}https://outlook.office.com/{{/if}}</code>
+    while this app uses {{#if baseScopesApi}}MS Graph API{{else}}IMAP and SMTP{{/if}}.</div>
 {{/if}}
 
-<div class="card mb-4">
-    <a href="#setupScopes" class="d-block card-header py-3 {{#unless values.extraScopes}} collapsed{{/unless}}"
-        data-toggle="collapse" role="button" aria-expanded="true" aria-controls="setupScopes">
-        <h6 class="m-0 font-weight-bold text-primary">Additional scopes</h6>
-    </a>
-    <div class="collapse {{#if values.extraScopes}} show{{/if}}" id="setupScopes">
-        <div class="card-body">
-
-            <p>Here you can list additional OAuth2 scopes that EmailEngine should ask for. This is mainly needed
-                when you want to re-use the access tokens generated by EmailEngine in other parts of your
-                application.</p>
-
-            {{#if activeGmail}}
-            <div class="alert alert-info">
-                <p>When adding new scopes, ensure that related APIs are
-                    enabled for your OAuth2 app (look for <em>Enabled APIs & services</em> in <a
-                        href="https://console.cloud.google.com/apis/dashboard" target="_blank" rel="noopener noreferrer"
-                        referrerpolicy="no-referrer">Google Cloud Console</a>)
-                    before registering accounts with these permissions. Otherwise, token generations will fail.</p>
-            </div>
-            {{/if}}
-
-            {{#if activeGmailService}}
-            <div class="alert alert-info">When adding new scopes, ensure that related APIs are
-                enabled for your OAuth2 app (look for <em>Enabled APIs & services</em> in <a
-                    href="https://console.cloud.google.com/apis/dashboard" target="_blank" rel="noopener noreferrer"
-                    referrerpolicy="no-referrer">Google Cloud Console</a>)
-                before registering accounts with these permissions. Otherwise, token generations will fail.
-            </div>
-            {{/if}}
-
-            {{#if activeOutlook}}
-            <div class="alert alert-info">
-
-                {{#if baseScopesImap}}
-                All scopes must come exclusively from <code>https://outlook.office.com/</code>; scopes from
-                <code>https://graph.microsoft.com/</code> are not allowed.
-                {{/if}}
-
-                {{#if baseScopesApi}}
-                All scopes must come exclusively from <code>https://graph.microsoft.com/</code>; scopes from
-                <code>https://outlook.office.com/</code> are not allowed.
-                {{/if}}
-
-                You cannot mix APIs from different endpoints within a single application.
-
-
-            </div>
-            {{/if}}
-
-            <div class="form-group">
-                <label for="extraScopes">List of OAuth2 scopes</label>
-
-                <textarea class="form-control text-monospace {{#if errors.extraScopes}}is-invalid{{/if}}"
-                    id="extraScopes" name="extraScopes" rows="5" spellcheck="false" data-enable-grammarly="false"
-                    placeholder="Scope identifiers like &quot;https://mail.google.com/&quot;&mldr;">{{values.extraScopes}}</textarea>
-                {{#if errors.extraScopes}}
-                <span class="invalid-feedback">{{errors.extraScopes}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Keep one scope per line</small>
-            </div>
-
-        </div>
+<div class="grid gap-4 md:grid-cols-2">
+    <div>
+        {{#> ui/form-field id="extraScopes" label="Additional scopes" error=errors.extraScopes}}
+        <textarea class="textarea w-full font-mono{{#if errors.extraScopes}} is-invalid{{/if}}" id="extraScopes"
+            name="extraScopes" rows="5" spellcheck="false" data-enable-grammarly="false"
+            placeholder="One scope per line">{{values.extraScopes}}</textarea>
+        <span class="helper-text">Requested on top of the defaults.</span>
+        {{/ui/form-field}}
+    </div>
+    <div>
+        {{#> ui/form-field id="skipScopesList" label="Disabled scopes" error=errors.skipScopes}}
+        <textarea class="textarea w-full font-mono{{#if errors.skipScopes}} is-invalid{{/if}}" id="skipScopesList"
+            name="skipScopes" rows="5" spellcheck="false" data-enable-grammarly="false"
+            placeholder="One scope per line">{{values.skipScopes}}</textarea>
+        <span class="helper-text">Default scopes to leave out, such as
+            {{#if providerData.gmailApi}}<code>https://www.googleapis.com/auth/gmail.modify</code>{{else}}<code>SMTP.Send</code>{{/if}}.</span>
+        {{/ui/form-field}}
     </div>
 </div>
+{{/ui/details}}
 
-<div class="card mb-4">
-    <a href="#skipScopes" class="d-block card-header py-3 {{#unless values.skipScopes}} collapsed{{/unless}}"
-        data-toggle="collapse" role="button" aria-expanded="true" aria-controls="setupScopes">
-        <h6 class="m-0 font-weight-bold text-primary">Disabled scopes</h6>
-    </a>
-    <div class="collapse {{#if values.skipScopes}} show{{/if}}" id="skipScopes">
-        <div class="card-body">
-
-            <p>Here you can list OAuth2 scopes that EmailEngine should not use. This is mainly needed
-                when you want to disable some default scopes like <code>"SMTP.Send"</code> in Outlook or
-                <code>"https://www.googleapis.com/auth/gmail.modify"</code> in Gmail.
-            </p>
-
-            <div class="form-group">
-                <label for="skipScopes">List of disabled OAuth2 scopes</label>
-
-                <textarea class="form-control text-monospace {{#if errors.skipScopes}}is-invalid{{/if}}" id="skipScopes"
-                    name="skipScopes" rows="5" spellcheck="false" data-enable-grammarly="false"
-                    placeholder="Scope identifiers like &quot;SMTP.Send&quot;&mldr;">{{values.skipScopes}}</textarea>
-                {{#if errors.skipScopes}}
-                <span class="invalid-feedback">{{errors.skipScopes}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Keep one scope per line</small>
-            </div>
-
-        </div>
-    </div>
-</div>
-
-<script>
+<script data-cfasync="false" nonce="{{cspNonce}}">
 
     document.addEventListener('DOMContentLoaded', () => {
 
@@ -1137,62 +526,39 @@
         const pubSubAppElm = document.getElementById('pubSubApp');
 
         /**
-         * Checks and updates the visibility of scope-related UI elements based on selected base scopes radio button.
-         * Handles both API and Pub/Sub scope selections, showing/hiding relevant configuration sections.
+         * Shows the panel whose data-base-scopes matches the selected base scope, and disables the
+         * Pub/Sub selector while its panel is hidden.
          */
         function checkScopesRadio() {
-            let baseScopesAPIElm = document.getElementById('baseScopesAPI');
-            let baseScopesPubsubElm = document.getElementById('baseScopesPubsub');
-            let selectPubsubAppElm = document.getElementById('select-pubsub-app');
-            let accountTypeCardGmail = document.getElementById('account-type-card-gmail');
-            let accountTypeCardOutlook = document.getElementById('account-type-card-outlook');
-
-            if (baseScopesAPIElm && selectPubsubAppElm) {
-                if (baseScopesAPIElm.checked) {
-                    selectPubsubAppElm.classList.remove('d-none');
-                    if (pubSubAppElm) {
-                        pubSubAppElm.disabled = false;
-                    }
-                } else {
-                    selectPubsubAppElm.classList.add('d-none');
-                    if (pubSubAppElm) {
-                        pubSubAppElm.disabled = true;
-                    }
-                }
+            let selected = document.querySelector('.base-scopes-radio:checked');
+            if (!selected) {
+                // A stored app's page renders its base scope as a static row and carries no radios at
+                // all, so the server already decided what is visible. Toggling against "nothing
+                // selected" would hide every section, including the Pub/Sub topic names and the
+                // Microsoft notification endpoints that page exists to show.
+                return;
             }
 
-            if (baseScopesPubsubElm && selectPubsubAppElm) {
-                if (baseScopesPubsubElm.checked) {
-                    selectPubsubAppElm.classList.remove('d-none');
-                } else {
-                    selectPubsubAppElm.classList.add('d-none');
+            let shownElm = null;
+            document.querySelectorAll('[data-base-scopes]').forEach(sectionElm => {
+                let shown = sectionElm.dataset.baseScopes === selected.value;
+                sectionElm.classList.toggle('hidden', !shown);
+                if (shown) {
+                    shownElm = sectionElm;
                 }
-            }
+            });
 
-            // Show/hide account type card based on API mode selection
-            if (baseScopesAPIElm) {
-                if (baseScopesAPIElm.checked) {
-                    if (accountTypeCardGmail) {
-                        accountTypeCardGmail.classList.remove('d-none');
-                    }
-                    if (accountTypeCardOutlook) {
-                        accountTypeCardOutlook.classList.remove('d-none');
-                    }
-                } else {
-                    if (accountTypeCardGmail) {
-                        accountTypeCardGmail.classList.add('d-none');
-                    }
-                    if (accountTypeCardOutlook) {
-                        accountTypeCardOutlook.classList.add('d-none');
-                    }
-                }
+            if (pubSubAppElm) {
+                // A disabled control is left out of the submitted form, which is how a hidden Pub/Sub
+                // selection stays out of the payload instead of riding along. Only the select is touched
+                // here - which options are selectable belongs to filterPubSubApps() alone.
+                pubSubAppElm.disabled = !shownElm || !shownElm.contains(pubSubAppElm);
             }
 
         }
 
         document.querySelectorAll('.base-scopes-radio').forEach(radioElm => {
             radioElm.addEventListener('change', checkScopesRadio);
-            radioElm.addEventListener('click', checkScopesRadio);
         });
 
         checkScopesRadio();
@@ -1223,8 +589,7 @@
         }
 
         if (projectIdElm && pubSubAppElm) {
-            projectIdElm.addEventListener('click', filterPubSubApps)
-            projectIdElm.addEventListener('change', filterPubSubApps)
+            projectIdElm.addEventListener('input', filterPubSubApps)
             filterPubSubApps()
         }
 
@@ -1254,7 +619,10 @@
                     }
 
                     document.getElementById('clientId').value = data.web.client_id;
-                    document.getElementById('clientSecret').value = data.web.client_secret;
+                    let clientSecretElm = document.getElementById('clientSecret');
+                    clientSecretElm.value = data.web.client_secret;
+                    // ui/secret-field enables its reveal and copy buttons on input, which a script write does not fire
+                    clientSecretElm.dispatchEvent(new Event('input', { bubbles: true }));
 
                     document.getElementById('googleProjectId').value = data.web.project_id || '';
 
@@ -1274,39 +642,26 @@
             });
         }
 
-        let authorityElms = document.querySelectorAll('.r-auth');
+        // The tenant ID applies to the single-tenant choice only, so it is shown, required and submitted
+        // only while that choice is selected
+        let authorityElm = document.querySelector('select#authority');
+        let tenantFieldElm = document.getElementById('tenant-field');
         let tenantElm = document.getElementById('tenant');
-        let checkAuthorityState = () => {
-            if (!tenantElm) {
-                return
-            }
-
-            let showtenant = false;
-            for (let aElm of authorityElms) {
-                if (aElm.checked) {
-                    if (aElm.value === 'tenant') {
-                        showtenant = true
-                    }
-                    break;
-                }
-            }
-            tenantElm.disabled = !showtenant;
-            tenantElm.required = showtenant;
+        if (authorityElm && tenantFieldElm && tenantElm) {
+            let checkAuthorityState = () => {
+                let single = authorityElm.value === 'tenant';
+                tenantFieldElm.classList.toggle('hidden', !single);
+                tenantElm.disabled = !single;
+                tenantElm.required = single;
+            };
+            authorityElm.addEventListener('change', checkAuthorityState);
+            checkAuthorityState();
         }
 
-        for (let aElm of authorityElms) {
-            aElm.addEventListener('click', checkAuthorityState)
-            aElm.addEventListener('change', checkAuthorityState)
-        }
-
-        checkAuthorityState();
-
-        // Account type helper for API mode
         const accountTypeButtons = document.querySelectorAll('.account-type-btn');
         const extraScopesElm = document.querySelector('textarea#extraScopes');
         const skipScopesElm = document.querySelector('textarea[name="skipScopes"]');
-        const setupScopesCard = document.getElementById('setupScopes');
-        const skipScopesCard = document.getElementById('skipScopes');
+        const customScopesCard = document.getElementById('setupScopes');
 
         // Scope configurations
         const scopeConfigs = {
@@ -1367,7 +722,6 @@
                 return;
             }
 
-            // Get the appropriate config
             let config = scopeConfigs[provider] && scopeConfigs[provider][type];
 
             if (!config) {
@@ -1394,49 +748,205 @@
             extraScopesElm.value = newExtraScopes.join('\n');
             skipScopesElm.value = newSkipScopes.join('\n');
 
-            // Expand/collapse sections based on content
-            if (newExtraScopes.length > 0) {
-                setupScopesCard.classList.add('show');
-            } else {
-                setupScopesCard.classList.remove('show');
-            }
-
-            if (newSkipScopes.length > 0) {
-                skipScopesCard.classList.add('show');
-            } else {
-                skipScopesCard.classList.remove('show');
-            }
+            // Expand the custom scopes card when the preset left anything in it
+            customScopesCard.open = newExtraScopes.length > 0 || newSkipScopes.length > 0;
         }
 
-        // Define which scopes are managed by the helper buttons
-        const managedScopes = {
-            gmail: {
-                extra: [
-                    'https://www.googleapis.com/auth/gmail.readonly',
-                    'https://www.googleapis.com/auth/gmail.send',
-                    'https://www.googleapis.com/auth/gmail.labels'
-                ],
-                skip: [
-                    'https://www.googleapis.com/auth/gmail.modify'
-                ]
-            },
-            outlook: {
-                extra: [
-                    'Mail.Read'
-                ],
-                skip: [
-                    'Mail.ReadWrite',
-                    'Mail.Send'
-                ]
-            }
-        };
+        // The scopes the preset buttons own: every scope any preset adds or skips. Derived from the presets
+        // so a scope added to one cannot be left behind when another preset replaces it
+        const managedScopes = Object.fromEntries(
+            Object.entries(scopeConfigs).map(([provider, presets]) => [
+                provider,
+                {
+                    extra: [...new Set(Object.values(presets).flatMap(preset => preset.extraScopes))],
+                    skip: [...new Set(Object.values(presets).flatMap(preset => preset.skipScopes))]
+                }
+            ])
+        );
 
-        // Attach event listeners to buttons
         for (let btn of accountTypeButtons) {
             btn.addEventListener('click', function () {
                 const provider = this.getAttribute('data-provider');
                 const type = this.getAttribute('data-type');
                 updateScopesFromAccountType(provider, type);
+            });
+        }
+
+        // Shared by the new/edit pages: gmailService credential-file loaders
+        // and the auth-method strip (all target markup in this partial)
+
+        let serviceFileElm = document.getElementById('serviceFile');
+        if (serviceFileElm) {
+            serviceFileElm.addEventListener('click', e => {
+                e.preventDefault();
+                browseFileContents('text').then(jsonStr => {
+                    if (!jsonStr) {
+                        return
+                    }
+
+                    let data;
+                    try {
+                        data = JSON.parse(jsonStr);
+                    } catch (err) {
+                        return showToast('Selected file is not JSON formatted', 'alert-triangle');
+                    }
+
+                    if (data.type !== 'service_account') {
+                        return showToast('Selected file is not in a service key format', 'alert-triangle');
+                    }
+
+                    if (!data.client_id || !data.private_key) {
+                        return showToast('Selected file does not contain required values', 'alert-triangle');
+                    }
+
+                    document.getElementById('serviceClient').value = data.client_id;
+                    document.getElementById('serviceKey').value = data.private_key;
+                    document.getElementById('googleProjectId').value = data.project_id;
+                    document.getElementById('serviceClientEmail').value = data.client_email;
+
+                    return showToast('Loaded service values from file', 'check-circle');
+
+                }).catch(err => {
+                    console.error(err);
+                    return showToast('Failed to load service key file', 'alert-triangle');
+                });
+            });
+        }
+
+        let externalAccountFileElm = document.getElementById('externalAccountFile');
+        if (externalAccountFileElm) {
+            externalAccountFileElm.addEventListener('click', e => {
+                e.preventDefault();
+                browseFileContents('text').then(jsonStr => {
+                    if (!jsonStr) {
+                        return;
+                    }
+
+                    let data;
+                    try {
+                        data = JSON.parse(jsonStr);
+                    } catch (err) {
+                        return showToast('Selected file is not JSON formatted', 'alert-triangle');
+                    }
+
+                    if (data.type !== 'external_account') {
+                        if (data.type === 'service_account') {
+                            return showToast('This is a service account key file, not a Workload Identity Federation config. Choose the "Service account key" tab to load it.', 'alert-triangle');
+                        }
+                        return showToast(`Selected file is not an external_account credential config (type: ${data.type || 'missing'})`, 'alert-triangle');
+                    }
+
+                    let impersonationUrl = data.service_account_impersonation_url || '';
+                    let emailMatch = impersonationUrl.match(/\/serviceAccounts\/([^/]+):generateAccessToken$/);
+                    if (emailMatch) {
+                        let derivedEmail = decodeURIComponent(emailMatch[1]);
+                        let emailField = document.getElementById('serviceClientEmail');
+                        if (emailField && !emailField.value) {
+                            emailField.value = derivedEmail;
+                        }
+                    }
+
+                    document.getElementById('externalAccount').value = JSON.stringify(data, null, 2);
+                    return showToast('Loaded external account configuration from file', 'check-circle');
+                }).catch(err => {
+                    console.error(err);
+                    return showToast('Failed to load external account file', 'alert-triangle');
+                });
+            });
+        }
+
+        let authMethodRadios = document.querySelectorAll('.auth-method-radio');
+        if (authMethodRadios.length) {
+            let noticeElm = document.getElementById('authMethodNotice');
+            let scopeBadgeElm = document.getElementById('authMethodScopeBadge');
+            let pubsubScopeElm = document.getElementById('baseScopesPubsub');
+
+            let showNotice = text => {
+                noticeElm.textContent = text;
+                noticeElm.classList.toggle('hidden', !text);
+            };
+
+            let selectedMethod = () => document.querySelector('.auth-method-radio:checked').value;
+
+            let updateSections = () => {
+                let selected = selectedMethod();
+                document.querySelectorAll('.auth-method-section').forEach(section => {
+                    let active = section.classList.contains('auth-method-section-' + selected);
+                    section.classList.toggle('hidden', !active);
+                    // a hidden section's required fields must not block the form, nor its values ride along
+                    section.querySelectorAll('input, textarea').forEach(field => {
+                        field.disabled = !active;
+                    });
+                });
+            };
+
+            let selectedScope = () => {
+                let scopeElm = document.querySelector('.base-scopes-radio:checked');
+                return scopeElm && scopeElm.value;
+            };
+
+            authMethodRadios.forEach(radioElm => {
+                radioElm.addEventListener('change', () => {
+                    showNotice('');
+                    updateSections();
+
+                    // The attached service account only works for a Pub/Sub app, so choosing it chooses
+                    // that base scope too, and says so: the base scope card is above, likely out of view
+                    if (radioElm.value === 'metadataServer' && pubsubScopeElm && selectedScope() !== 'pubsub') {
+                        pubsubScopeElm.checked = true;
+                        pubsubScopeElm.dispatchEvent(new Event('change', { bubbles: true }));
+                        showNotice('The attached service account works only for Cloud Pub/Sub apps, so the base scope was set to Cloud Pub/Sub.');
+                    }
+                });
+            });
+
+            // Leaving Pub/Sub while the attached service account is selected falls back to the key, and
+            // says so, because the form must never submit a method the schema refuses for the scope
+            let checkScopedMethod = () => {
+                let scope = selectedScope();
+                if (!scope) {
+                    return;
+                }
+                let offered = scope === 'pubsub';
+                if (scopeBadgeElm) {
+                    scopeBadgeElm.classList.toggle('hidden', offered);
+                }
+                if (!offered && selectedMethod() === 'metadataServer') {
+                    document.getElementById('authMethodServiceKey').checked = true;
+                    updateSections();
+                    showNotice('The attached service account works only for Cloud Pub/Sub apps, so the method was switched to Service account key.');
+                }
+            };
+
+            document.querySelectorAll('.base-scopes-radio').forEach(radioElm => {
+                radioElm.addEventListener('change', checkScopedMethod);
+            });
+
+            checkScopedMethod();
+            // the rendered selection, so a re-rendered form disables the sections it hides from the start
+            updateSections();
+        }
+
+        let metadataProbeElm = document.getElementById('metadataProbe');
+        if (metadataProbeElm) {
+            let resultElm = document.getElementById('metadataProbeResult');
+            metadataProbeElm.addEventListener('click', e => {
+                e.preventDefault();
+                resultElm.textContent = 'Asking the metadata server...';
+                uiBusyAction(metadataProbeElm, () =>
+                    uiPostJson('/admin/config/oauth/metadata-probe', {})
+                        .then(data => {
+                            if (!data || !data.success) {
+                                resultElm.textContent = (data && data.error) || 'The metadata server could not be reached';
+                                return;
+                            }
+                            document.getElementById('googleProjectId').value = data.projectId || '';
+                            resultElm.textContent = `Service account ${data.serviceAccountEmail}, project ${data.projectId}`;
+                        })
+                        .catch(err => {
+                            resultElm.textContent = err.message;
+                        })
+                );
             });
         }
 

@@ -1,0 +1,157 @@
+{{!--
+    reference/schema-node - one property row in an API reference schema tree.
+
+    Recursive: the nested-properties block renders this same partial for each child,
+    which terminates because lib/api-reference/schema-tree.js builds a finite tree
+    (depth-capped, with $ref cycles marked instead of followed).
+
+    Also rendered directly for operation parameters (reference/params) - the parameter
+    view models from buildParameter() carry the same field names as a tree node and simply
+    have no children or variants, so the nested blocks below render nothing for them.
+
+    Context is a node from buildSchemaTree(): name, anchor, typeLabel, required, nullable,
+    deprecated, constraints[], enumValues[], alsoAccepts[], defaultValue, descriptionHtml,
+    usageHtml, example, children[], variants[], openByDefault, childLabel, childPreview,
+    truncated, circular, unresolved.
+
+    The row is a two-column grid (.ee-ref-prop-row in app.tailwind.css): the name, type and
+    constraint chips sit in a rail on the left, the prose in a column beside it capped at a
+    readable measure. Before that the name sat above its own description at the same left
+    edge and the description ran the full content width - about 120 characters - so a
+    128-property response read as one undifferentiated field. The grid collapses back to a
+    single stacked column when the row is too narrow to split.
+
+    A cut example carries the whole value twice, in two forms: `title` is the raw value for
+    the native tooltip, and `data-example` is the JSON form the try-it autocompleter inserts,
+    so the completion is never reconstructed from the rendered text - and never inserts an
+    unquoted string into a JSON body. Only the 54 cut rows in the document emit either.
+
+    `anchor` is the dotted id of this property within its operation, e.g.
+    "accountCreate.body.imap.tls.rejectUnauthorized", so a single field can be linked to
+    directly. The row highlight on arrival is plain :target CSS; static/js/reference.js only
+    has to open the collapsed groups and response tab the row may be buried in.
+
+    descriptionHtml is pre-escaped by lib/api-reference/format.js (escape first, then a
+    closed set of tags added back), which is why it renders unescaped.
+--}}
+<li class="ee-ref-prop min-w-0"{{#if anchor}} id="{{anchor}}"{{/if}}>
+
+    <div class="ee-ref-prop-row">
+
+        <div class="ee-ref-prop-rail">
+            <div class="ee-ref-prop-line">
+                {{#if name}}<code class="text-sm font-semibold break-all">{{name}}</code>{{/if}}
+                {{#if anchor}}
+                {{> reference/anchor-link target=anchor label=(concat "Link to the " name " property") small=true class="ee-ref-prop-anchor"}}
+                {{/if}}
+            </div>
+            <div class="ee-ref-prop-line">
+                <span class="text-primary text-xs font-medium">{{typeLabel}}</span>
+                {{#if required}}<span class="text-error text-2xs font-semibold tracking-wide uppercase">required</span>{{/if}}
+                {{#if nullable}}<span class="ee-chip">nullable</span>{{/if}}
+                {{#if deprecated}}{{> ui/badge label="deprecated" variant="warning" soft=true icon="" class=""}}{{/if}}
+                {{#each constraints}}<span class="ee-chip">{{this}}</span>{{/each}}
+            </div>
+        </div>
+
+        <div class="ee-ref-prop-body">
+
+            {{!-- The example rides the end of the description rather than taking a line of
+                  its own. The prose column is 34rem, the median description is 41 characters
+                  and the median example 15, so 86% of these land on a line that already
+                  exists; a line each would have added about 12,500px across five tag pages
+                  that already run to 90,000. Which rows get one is decided by rowExample()
+                  in lib/api-reference/schema-tree.js, not here. --}}
+            {{#if descriptionHtml}}
+            <div class="text-base-content/70 text-sm"><p>{{{descriptionHtml}}}{{#if example}} <code
+                    class="ee-ref-example-value" {{#if example.title}}title="{{example.title}}" data-example="{{example.full}}"
+                    {{/if}}>{{example.text}}</code>{{/if}}</p>
+            </div>
+            {{else if example}}
+            <div class="text-sm"><code class="ee-ref-example-value" {{#if example.title}}title="{{example.title}}"
+                    data-example="{{example.full}}" {{/if}}>{{example.text}}</code></div>
+            {{/if}}
+
+            {{!-- Long-form guidance, closed. A field without one is unchanged; a field with
+                  one costs a single summary line until someone wants the answer. The
+                  seventeen fields that used to cram this into the description are why the
+                  slot exists - see lib/field-usage.js. --}}
+            {{#if usageHtml}}
+            {{#> reference/disclosure label="When to use this" class="mt-1"}}
+            <div class="ee-ref-usage text-base-content/70 mt-1 text-sm"><p>{{{usageHtml}}}</p></div>
+            {{/reference/disclosure}}
+            {{/if}}
+
+            {{#if enumValues}}
+            {{#if enumDocumented}}
+            {{!-- documented values get a row each; joi .meta({enumDescriptions}) is the source --}}
+            <div class="mt-1">
+                <span class="text-base-content/50 text-2xs tracking-wide uppercase">Allowed values</span>
+                <ul class="ee-ref-nest mt-1 space-y-1">
+                    {{#each enumValues}}
+                    <li class="flex flex-wrap items-baseline gap-x-2 text-sm">
+                        <code class="ee-chip">{{value}}</code>
+                        {{#if description}}<span class="text-base-content/70">{{description}}</span>{{/if}}
+                    </li>
+                    {{/each}}
+                </ul>
+            </div>
+            {{else}}
+            <div class="mt-1 flex flex-wrap items-baseline gap-1">
+                <span class="text-base-content/50 text-2xs tracking-wide uppercase">Allowed</span>
+                {{#each enumValues}}<code class="ee-chip">{{value}}</code>{{/each}}
+            </div>
+            {{/if}}
+            {{/if}}
+
+            {{!-- Sentinels the schema accepts beside its own type - joi .allow(false) on a
+                  string, an integer or an object. Deliberately not the "Allowed" row above:
+                  that reads as the whole value domain, which claimed an IMAP configuration
+                  object accepted nothing but `false`. --}}
+            {{#if alsoAccepts}}
+            <div class="text-base-content/50 mt-1 flex flex-wrap items-baseline gap-1 text-xs">
+                <span>Also accepts</span>
+                {{#each alsoAccepts}}<code class="ee-chip">{{this}}</code>{{/each}}
+            </div>
+            {{/if}}
+
+            {{#if defaultValue}}
+            <div class="text-base-content/50 mt-1 text-xs">Default <code class="ee-chip">{{defaultValue}}</code></div>
+            {{/if}}
+
+            {{#if circular}}
+            <div class="text-warning mt-1 text-xs">Recursive reference - see the parent definition</div>
+            {{/if}}
+
+            {{#if truncated}}
+            <div class="text-warning mt-1 text-xs">Nesting too deep to display</div>
+            {{/if}}
+
+            {{#if unresolved}}
+            <div class="text-warning mt-1 text-xs">Unresolved reference {{unresolved}}</div>
+            {{/if}}
+
+        </div>
+
+    </div>
+
+    {{#if variants.length}}
+    <div class="ee-ref-nest mt-2 space-y-2">
+        {{#each variants}}
+        <div>
+            <div class="text-base-content/50 text-2xs tracking-wide uppercase">Either</div>
+            <ul class="ee-ref-props">{{> reference/schema-node}}</ul>
+        </div>
+        {{/each}}
+    </div>
+    {{/if}}
+
+    {{#if children.length}}
+    {{#> reference/disclosure label=childLabel preview=childPreview open=openByDefault class="mt-1"}}
+    <ul class="ee-ref-props ee-ref-nest mt-2">
+        {{#each children}}{{> reference/schema-node}}{{/each}}
+    </ul>
+    {{/reference/disclosure}}
+    {{/if}}
+
+</li>

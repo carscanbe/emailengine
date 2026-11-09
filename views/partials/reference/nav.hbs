@@ -1,0 +1,120 @@
+{{!--
+    reference/nav - the API reference's section navigation: an operation filter over the
+    whole API, and the tag list with the current tag's operations expanded.
+
+    Rendered by views/layout/app.hbs into the secondary-nav column (the route sets
+    `secondaryNav: 'reference/nav'`), so this partial owns only its inner content - the
+    column's surface, border, width and sticky behavior belong to the layout. It emits
+    no card or shadow on purpose: the column sits flush against the main sidebar and has
+    to read as a continuation of it.
+
+    The filter list is rendered server-side (all operations, hidden until the box has
+    input) and narrowed by static/js/reference.js. There is no client-side index to
+    fetch or build - filtering is plain DOM work over markup that is already there.
+
+    A hit matches on more than it shows: `data-search` carries the operation id and every
+    parameter and request-body property name as well. What is searchable is decided in one
+    place, searchCorpus() in lib/api-reference/model.js - so "mailbox" or "mailMerge" finds
+    the endpoints that accept them, not only the ones with the word in their path.
+
+    Params (from the reference view context):
+      nav         - tags with { name, slug, url, operationCount, active, operations[] }
+      searchIndex - flat operation list backing the filter
+--}}
+<div class="flex flex-col gap-3 p-3">
+
+    {{!-- Back to the reference home. Without it the only way out of a group page is the
+          main side menu, which is easy to miss. --}}
+    <a href="/admin/reference"
+        class="flex items-center gap-2 rounded-field px-2 py-1.5 text-sm{{#if overviewActive}} bg-primary/10 text-primary font-semibold{{else}} hover:bg-base-200{{/if}}">
+        <span class="icon-[tabler--home] size-4 shrink-0"></span>
+        Overview
+    </a>
+
+    {{!-- Access-token status. Always a link to the control on the overview page, whatever
+          the current state - the try-it panels on every group page depend on it, so it has
+          to be reachable from all of them. The state text is repainted by
+          static/js/reference.js from the token held for this tab. --}}
+    <a href="/admin/reference/token"
+        class="flex items-center justify-between gap-2 rounded-field px-2 py-1.5 text-sm{{#if tokenActive}} bg-primary/10 text-primary font-semibold{{else}} hover:bg-base-200{{/if}}">
+        <span class="flex items-center gap-2">
+            <span class="icon-[tabler--key] size-4 shrink-0"></span>
+            Access token
+        </span>
+        <span id="ref-token-state" class="text-base-content/50 text-2xs">Not set</span>
+    </a>
+
+    {{> ui/search-input id="ref-filter" placeholder="Filter endpoints" shortcut="Ctrl K" shortcutMac="Cmd K" name="" value="" type="" class=""}}
+
+    {{!-- Result count and key hints, shown only while the filter has input. The count is a
+          live region so it is announced; the key hints are static decoration beside it. --}}
+    <div id="ref-filter-hint" class="text-base-content/50 hidden items-center justify-between gap-2 px-2 text-2xs">
+        <span role="status"></span>
+        <span aria-hidden="true">Up/Down move, Enter open</span>
+    </div>
+
+    <ul id="ref-filter-results" class="flex flex-col gap-0.5 hidden">
+        {{#each searchIndex}}
+        <li class="ee-ref-hit" data-search="{{search}}">
+            <a href="{{url}}" class="hover:bg-base-200 block rounded-field px-2 py-1.5">
+                <span class="flex items-center gap-2">
+                    <span class="text-{{methodVariant}} shrink-0 font-mono text-2xs font-semibold">{{method}}</span>
+                    <span class="text-base-content/80 truncate text-xs">{{path}}</span>
+                </span>
+                {{#if summary}}<span class="text-base-content/50 block truncate ps-1 text-2xs">{{summary}}</span>{{/if}}
+            </a>
+        </li>
+        {{/each}}
+        <li id="ref-filter-empty" class="text-base-content/50 hidden px-2 py-2 text-xs">No matching endpoints</li>
+    </ul>
+
+    {{!-- Every group carries its operations, so the list of a group you are not on can be
+          opened without loading its page. Below the layout's lg breakpoint the nav is a
+          disclosure, and there static/js/reference.js turns a tap on a group row into opening
+          that list instead of a page load - the chevron is the affordance for it. Which list
+          is open is aria-expanded on the group row and nothing else: the attribute is the
+          state, `max-lg:peer-aria-expanded:block` is the rendering.
+
+          As a column it is not a disclosure at all - the active group's list is shown by
+          lg:block and every other stays hidden, no matter what the reader last expanded on a
+          narrow window. Without that, widening after collapsing the active group would leave
+          the column with no list and no control to bring one back.
+
+          Not FlyonUI's collapse or accordion, though both are in the bundle: HSCollapse
+          animates an inline height that would fight lg:block (and strand a stale one when the
+          viewport crosses lg), HSAccordion needs a <button> where these rows have to stay
+          links above lg, and neither has any notion of a breakpoint - which is the whole
+          problem here. --}}
+    <ul id="ref-tag-list" class="flex flex-col gap-0.5">
+        {{#each nav}}
+        <li>
+            <a href="{{url}}" aria-controls="ref-ops-{{slug}}" aria-expanded="{{#if active}}true{{else}}false{{/if}}"
+                class="peer group flex items-center justify-between gap-2 rounded-field px-2 py-1.5 text-sm{{#if active}} bg-primary/10 text-primary font-semibold{{else}} hover:bg-base-200{{/if}}">
+                <span class="truncate">{{name}}</span>
+                <span class="flex shrink-0 items-center gap-1">
+                    <span class="text-base-content/40 text-2xs">{{operationCount}}</span>
+                    <span
+                        class="icon-[tabler--chevron-down] text-base-content/40 size-3.5 transition-transform duration-200 group-aria-expanded:rotate-180 lg:hidden"></span>
+                </span>
+            </a>
+            {{!-- ee-ref-op-nav marks the ACTIVE group's list only: it is the hook static/js/
+                  reference.js scroll-spies on, and only that list holds in-page anchors to mark.
+                  The current-state styling is written as aria-[current] variants here rather than
+                  a rule in app.tailwind.css because a components-layer rule loses to the
+                  text-base-content/70 utility on this same element - utilities are emitted later,
+                  so the colour would silently not apply. Same utilities as the active tag entry
+                  above, so the two levels read as one marker. --}}
+            <ul id="ref-ops-{{slug}}"
+                class="{{#if active}}ee-ref-op-nav lg:block {{/if}}border-base-content/10 my-1 ms-3 hidden border-s ps-2 max-lg:peer-aria-expanded:block">
+                {{#each operations}}
+                <li>
+                    <a href="{{url}}"
+                        class="text-base-content/70 hover:bg-base-200 hover:text-base-content aria-[current=location]:bg-primary/10 aria-[current=location]:text-primary aria-[current=location]:font-semibold block truncate rounded-field px-2 py-1 text-xs">{{summary}}</a>
+                </li>
+                {{/each}}
+            </ul>
+        </li>
+        {{/each}}
+    </ul>
+
+</div>

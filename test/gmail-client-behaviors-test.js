@@ -1,0 +1,383 @@
+'use strict';
+
+// Hermetic unit tests for GmailClient behaviors that were fixed in the client review: the
+// background timers re-arming after an authentication error clears, moveMessage() leaving the
+// source folder when no source is given, bulk updates paging through the whole result set in
+// batchModify-sized chunks, a message deleted before its history entry is processed being
+// reported as missing, and the content-based bounce check running only when the message
+// details route asks for it. The client is built with empty options and only the collaborators
+// each method touches are stubbed.
+
+const test = require('node:test');
+const assert = require('node:assert').strict;
+
+const { GmailClient } = require('../lib/email-client/gmail-client');
+const { MESSAGE_MISSING_NOTIFY } = require('../lib/consts');
+const { redis } = require('../lib/db');
+const registerRedisTeardown = require('./helpers/redis-teardown');
+const { noopLogger } = require('./helpers/auth-failure');
+const { testTokenRefreshClassification } = require('./helpers/token-refresh');
+
+registerRedisTeardown(redis);
+
+function makeClient() {
+    // The real test Redis: the account hash does not exist, which is what the client sees for
+    // a fixture account - enough for the shared bookkeeping in BaseClient to run for real
+    const gmail = new GmailClient('test-account', { redis });
+    gmail.logger = noopLogger;
+    gmail.prepare = async () => {};
+    gmail.setStateVal = async () => {};
+    return gmail;
+}
+
+test('GmailClient.getToken() after an authentication error', async t => {
+    function makeRecoveringClient(state) {
+        const gmail = makeClient();
+        gmail.state = state;
+        gmail.accountObject = { getActiveAccessTokenData: async () => ({ accessToken: 'tok', cached: true }) };
+        return gmail;
+    }
+
+    await t.test('re-arms the watch renewal and fallback polling timers', async () => {
+        const gmail = makeRecoveringClient('authenticationError');
+        gmail.backgroundTimersArmed = true;
+
+        assert.equal(await gmail.getToken(), 'tok');
+
+        assert.equal(gmail.state, 'connected');
+        assert.ok(gmail.renewWatchTimer, 'the watch renewal timer must be running again');
+        assert.ok(gmail.fallbackPollingTimer, 'the fallback polling timer must be running again');
+        clearTimeout(gmail.renewWatchTimer);
+        clearTimeout(gmail.fallbackPollingTimer);
+    });
+
+    await t.test('leaves a send-only account (timers never armed) without timers', async () => {
+        const gmail = makeRecoveringClient('authenticationError');
+
+        await gmail.getToken();
+
+        assert.equal(gmail.state, 'connected');
+        assert.ok(!gmail.renewWatchTimer);
+        assert.ok(!gmail.fallbackPollingTimer);
+    });
+
+    await t.test('does not touch the timers while connected', async () => {
+        const gmail = makeRecoveringClient('connected');
+        gmail.backgroundTimersArmed = true;
+
+        await gmail.getToken();
+
+        assert.ok(!gmail.renewWatchTimer);
+        assert.ok(!gmail.fallbackPollingTimer);
+    });
+});
+
+// A token endpoint that throttles or 5xxs has not refused the refresh token. Reporting that as
+// an authentication failure webhooked authenticationError, parked the account and stopped the
+// worker retrying init() - and the next attempt then contradicted it with authenticationSuccess.
+testTokenRefreshClassification('GmailClient.getTokenData() classifies a failed token refresh', makeClient);
+
+test('GmailClient.getTokenData() recovery', async t => {
+    // The Graph client had the same broad condition and it is what hid a nine-month outage there:
+    // a valid token was read as recovery from ANY non-connected state. It is not. A token says
+    // nothing about `unset` (an account the auth-failure safety net parked) or `disconnected` (one
+    // that was closed), and flipping either to `connected` for having fetched one un-parks an
+    // account nobody re-authorized.
+    function makeTokenClient(state) {
+        const gmail = makeClient();
+        gmail.state = state;
+        gmail.accountObject = { getActiveAccessTokenData: async () => ({ accessToken: 'tok', user: 'user@example.com', cached: true }) };
+        gmail.notifyAuthenticationSuccess = async () => {};
+        return gmail;
+    }
+
+    await t.test('a valid token clears an authentication error', async () => {
+        const gmail = makeTokenClient('authenticationError');
+
+        assert.equal(await gmail.getToken(), 'tok');
+        assert.equal(gmail.state, 'connected');
+    });
+
+    await t.test('a valid token does not un-park an account the safety net switched off', async () => {
+        const gmail = makeTokenClient('unset');
+
+        await gmail.getToken();
+
+        assert.equal(gmail.state, 'unset', 'only a re-authorization lifts a park');
+    });
+
+    await t.test('a valid token does not revive a closed connection', async () => {
+        const gmail = makeTokenClient('disconnected');
+
+        await gmail.getToken();
+
+        assert.equal(gmail.state, 'disconnected');
+    });
+});
+
+test('GmailClient.moveMessage()', async t => {
+    function makeMoveClient(labelIds) {
+        const gmail = makeClient();
+        const calls = [];
+        gmail.getLabel = async path => ({ Projects: { id: 'Label_1' }, INBOX: { id: 'INBOX' } })[path] || null;
+        gmail.request = async (url, method, payload) => {
+            calls.push({ url, method, payload });
+            if (method === 'get') {
+                return { id: 'm1', labelIds };
+            }
+            return { id: 'm1', labelIds: ['Label_1'] };
+        };
+        return { gmail, calls };
+    }
+
+    await t.test('without a source it drops the system folder labels the message carries', async () => {
+        const { gmail, calls } = makeMoveClient(['INBOX', 'UNREAD', 'IMPORTANT', 'Label_9']);
+
+        const result = await gmail.moveMessage('m1', { path: 'Projects' });
+
+        assert.deepEqual(result, { path: 'Projects', id: 'm1' });
+        const modify = calls.find(call => /\/messages\/m1\/modify$/.test(call.url));
+        assert.ok(modify, 'expected a modify call');
+        assert.deepEqual(modify.payload, { addLabelIds: ['Label_1'], removeLabelIds: ['INBOX'] });
+    });
+
+    await t.test('with a source it removes exactly that label and does not read the message', async () => {
+        const { gmail, calls } = makeMoveClient(['INBOX']);
+
+        await gmail.moveMessage('m1', { path: 'Projects' }, { source: { path: 'INBOX' } });
+
+        assert.ok(!calls.some(call => call.method === 'get'), 'no lookup is needed when the source is known');
+        const modify = calls.find(call => /\/modify$/.test(call.url));
+        assert.deepEqual(modify.payload, { addLabelIds: ['Label_1'], removeLabelIds: ['INBOX'] });
+    });
+
+    await t.test('moving to the Inbox from Trash removes TRASH and keeps the target', async () => {
+        const { gmail, calls } = makeMoveClient(['TRASH', 'Label_9']);
+
+        await gmail.moveMessage('m1', { path: 'INBOX' });
+
+        const modify = calls.find(call => /\/modify$/.test(call.url));
+        assert.deepEqual(modify.payload, { addLabelIds: ['INBOX'], removeLabelIds: ['TRASH'] });
+    });
+});
+
+test('GmailClient.updateMessages()', async t => {
+    await t.test('pages through every match and applies them in batchModify-sized chunks', async () => {
+        const gmail = makeClient();
+        gmail.getLabel = async () => ({ id: 'INBOX' });
+
+        const pages = [
+            { messages: Array.from({ length: 600 }, (v, i) => ({ id: `a${i}` })), nextPageCursor: 'page-2' },
+            { messages: Array.from({ length: 600 }, (v, i) => ({ id: `b${i}` })), nextPageCursor: null }
+        ];
+        const listCalls = [];
+        gmail.listMessages = async query => {
+            listCalls.push(query.cursor);
+            return pages[listCalls.length - 1];
+        };
+
+        const modifyCalls = [];
+        gmail.request = async (url, method, payload) => {
+            modifyCalls.push(payload);
+            return '';
+        };
+
+        const result = await gmail.updateMessages('INBOX', {}, { flags: { add: ['\\Seen'] } });
+
+        assert.deepEqual(listCalls, [undefined, 'page-2']);
+        assert.equal(result.emailIds.length, 1200, 'used to be truncated to 1000');
+        assert.deepEqual(
+            modifyCalls.map(call => call.ids.length),
+            [1000, 200]
+        );
+        assert.ok(modifyCalls.every(call => call.removeLabelIds.includes('UNREAD')));
+    });
+});
+
+test('GmailClient.prepareNewMessage()', async t => {
+    await t.test('reports a message deleted before its history entry was processed as missing', async () => {
+        const gmail = makeClient();
+        const notifications = [];
+        gmail.getMessage = async () => {
+            throw Object.assign(new Error('Requested entity was not found'), { statusCode: 404 });
+        };
+        gmail.notify = async (mailbox, event, data) => notifications.push({ event, data });
+
+        const messageData = await gmail.prepareNewMessage({ id: 'gone' }, {});
+
+        assert.equal(messageData, undefined);
+        assert.deepEqual(notifications, [{ event: MESSAGE_MISSING_NOTIFY, data: { id: 'gone' } }]);
+    });
+
+    await t.test('any other fetch failure still propagates', async () => {
+        const gmail = makeClient();
+        gmail.getMessage = async () => {
+            throw Object.assign(new Error('Backend Error'), { statusCode: 500 });
+        };
+        gmail.notify = async () => assert.fail('nothing to notify about');
+
+        await assert.rejects(gmail.prepareNewMessage({ id: 'm1' }, {}), /Backend Error/);
+    });
+
+    // The IMAP path reports a message carrying the \Sent label as not new, wherever it is listed;
+    // over the Gmail API every new message used to be reported as new, the account's own sends too
+    for (const [labels, expected] of [
+        [['\\Inbox'], true],
+        [['\\Sent'], false],
+        [['\\Sent', '\\Inbox'], false],
+        [['Label_1'], true]
+    ]) {
+        await t.test(`seemsLikeNew is ${expected} for labels ${labels.join(', ')}`, async () => {
+            const gmail = makeClient();
+            gmail.listingEntry = { specialUse: '\\All' };
+            gmail.getMessage = async () => ({ id: 'm1', labels });
+
+            const messageData = await gmail.prepareNewMessage({ id: 'm1' }, {});
+            assert.equal(messageData.seemsLikeNew, expected);
+        });
+    }
+});
+
+test('GmailClient.getMessage() bounce detection option', async t => {
+    await t.test('runs the content check only when asked', async () => {
+        const gmail = makeClient();
+        let detections = 0;
+        gmail.request = async () => ({ id: 'm1' });
+        gmail.formatMessage = () => ({ id: 'm1', messageId: '<m1@example.com>' });
+        gmail.resolveLabels = async () => {};
+        gmail.detectBounce = async () => detections++;
+
+        await gmail.getMessage('m1', {});
+        assert.equal(detections, 0);
+
+        await gmail.getMessage('m1', { detectBounce: true });
+        assert.equal(detections, 1);
+    });
+});
+
+test('GmailClient.getAttachmentList()', async t => {
+    // Gmail omits body.data for a zero-size part. Decoding it threw ERR_INVALID_ARG_TYPE whenever a
+    // text type was requested, which failed every messageNew of such a message with notifyText on
+    await t.test('skips an empty text part instead of throwing', () => {
+        const gmail = makeClient();
+        const messageData = {
+            id: 'm1',
+            payload: {
+                mimeType: 'multipart/alternative',
+                partId: '',
+                body: { size: 0 },
+                parts: [
+                    { partId: '0', mimeType: 'text/plain', headers: [], body: { size: 0 } },
+                    { partId: '1', mimeType: 'text/html', headers: [], body: { size: 5, data: Buffer.from('<b/>!').toString('base64url') } }
+                ]
+            }
+        };
+
+        const { textContents, encodedTextSize } = gmail.getAttachmentList(messageData, { textType: '*' });
+
+        assert.equal(textContents[0], null);
+        assert.equal(textContents[1].toString(), '<b/>!');
+        assert.deepEqual(encodedTextSize, { plain: 0, html: 5 });
+    });
+});
+
+test('GmailClient.processHistoryEntry() label names', async t => {
+    function labelEntry(labelIds) {
+        return { labelsAdded: [{ message: { id: 'm1', threadId: 't1', labelIds: ['INBOX'] }, labelIds }] };
+    }
+
+    // The label list is cached for an hour, so a label created since was unknown and its change
+    // was dropped from the messageUpdated event
+    await t.test('an unknown label id refreshes the list once per run', async () => {
+        const gmail = makeClient();
+        const updates = [];
+        gmail.notify = async (mailbox, event, data) => updates.push(data);
+        let refreshes = 0;
+        gmail.getLabels = async force => {
+            assert.equal(force, true);
+            refreshes++;
+            return [
+                { id: 'Label_1', name: 'Old' },
+                { id: 'Label_2', name: 'Created a minute ago' }
+            ];
+        };
+        const context = { labels: [{ id: 'Label_1', name: 'Old' }], newMessageOptions: {} };
+
+        await gmail.processHistoryEntry(labelEntry(['Label_2']), context);
+        await gmail.processHistoryEntry(labelEntry(['Label_2']), context);
+
+        assert.equal(refreshes, 1);
+        assert.deepEqual(
+            updates.map(update => update.changes.labels.added),
+            [['Created a minute ago'], ['Created a minute ago']]
+        );
+    });
+
+    await t.test('a label still unknown after the refresh is reported by its id', async () => {
+        const gmail = makeClient();
+        const updates = [];
+        gmail.notify = async (mailbox, event, data) => updates.push(data);
+        gmail.getLabels = async () => [];
+
+        await gmail.processHistoryEntry(labelEntry(['Label_9']), { labels: [], newMessageOptions: {} });
+
+        assert.deepEqual(updates[0].changes.labels.added, ['Label_9']);
+    });
+});
+
+test('GmailClient.close()', async t => {
+    // The worker catches and logs a rejected close(); the client itself no longer swallows the
+    // state write failure, so a shutdown with Redis gone is visible in the worker log
+    await t.test('a failing state write rejects after the state was switched', async () => {
+        const gmail = makeClient();
+        gmail.state = 'connected';
+        gmail.setStateVal = async () => {
+            throw new Error('Connection is closed.');
+        };
+
+        await assert.rejects(gmail.close(), /Connection is closed/);
+        assert.equal(gmail.state, 'disconnected');
+        assert.equal(gmail.closed, true);
+    });
+});
+
+test('GmailClient.listMessages() with a message deleted mid-listing', async t => {
+    function listingClient(failure) {
+        const gmail = makeClient();
+        gmail.formatMessage = entry => ({ id: entry.id });
+        gmail.request = async url => {
+            const id = url.split('/messages')[1].replace(/^\//, '');
+            if (!id) {
+                return { messages: [{ id: 'kept-1' }, { id: 'gone' }, { id: 'kept-2' }], resultSizeEstimate: 3 };
+            }
+            if (id === 'gone') {
+                throw failure;
+            }
+            return { id };
+        };
+        return gmail;
+    }
+
+    await t.test('skips a message that 404s between the listing and its fetch', async () => {
+        const err = new Error('Not Found');
+        err.oauthRequest = { status: 404 };
+        const result = await listingClient(err).listMessages({});
+        assert.deepStrictEqual(
+            result.messages.map(message => message.id),
+            ['kept-1', 'kept-2']
+        );
+    });
+
+    await t.test('any other failure still fails the page', async () => {
+        const err = new Error('Backend Error');
+        err.oauthRequest = { status: 503 };
+        await assert.rejects(listingClient(err).listMessages({}), /Backend Error/);
+    });
+});
+
+test('GmailClient.deleteMessage() names the Trash folder it moved to', async () => {
+    const { SYSTEM_NAMES } = require('../lib/email-client/gmail-client');
+    const gmail = makeClient();
+    gmail.request = async () => ({ id: 'm1', labelIds: ['TRASH'] });
+    assert.deepStrictEqual(await gmail.deleteMessage('m1'), { deleted: true, moved: { destination: SYSTEM_NAMES.TRASH, message: 'm1' } });
+});

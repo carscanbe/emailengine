@@ -1,99 +1,64 @@
-<div class="float-right">
-    <a href="{{newLink}}" class="btn btn-primary btn-icon-split">
-        <span class="icon text-white-50">
-            <i class="fas fa-plus"></i>
-        </span>
-        <span class="text">Create webhook route</span>
-    </a>
-</div>
+{{#> ui/page-header title="Webhook Routes" icon="icon-[tabler--webhook]" subtitle="Filter email events, customize their payloads, and send them to your chosen URLs." badgeLabel=total badgeVariant="neutral" class="mb-6"}}
+{{> ui/btn href=newLink label="Create webhook route" icon="icon-[tabler--plus]"}}
+{{/ui/page-header}}
 
-{{> webhooks_header}}
-
+{{> ui/search-crumb parentHref="/admin/webhooks" parentLabel="Webhook Routes" query=query}}
 
 {{#unless webhooksEnabled}}
-<div class="alert alert-warning mt-3"><strong>Note:</strong> Webhook processing is currently disabled for EmailEngine.
-    <a href="/admin/config/webhooks">Enable webhooks in configuration settings</a>.</div>
+<div class="alert alert-soft alert-warning mb-6"><span><strong>Note:</strong> Webhooks are disabled
+        for EmailEngine.
+        <a href="/admin/config/webhooks" class="link link-animated">Enable webhooks in configuration
+            settings</a>.</span></div>
 {{/unless}}
 
-<p>Webhook routing allows you to define custom conditions that trigger webhooks to specific targets.</p>
-
-<div class="card border-left-info shadow mt-4 mb-4">
-    <div class="card-body">
-        <div class="row no-gutters align-items-center">
-            <div class="col mr-2">
-                <p>
-                    EmailEngine tests all events against <em>filter functions</em> of webhook routes. When
-                    a filter matches, EmailEngine sends a webhook to the target URL of that route. If
-                    the webhook target requires a specific payload format, you can define a <em>mapping
-                        function</em> to modify the payload before sending.
-                </p>
-                <p><a href="https://docs.emailengine.app/low-code-integrations/"
-                        target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Learn more about webhook routes</a>.</p>
-            </div>
-            <div class="col-auto">
-                <i class="fas fa-info-circle fa-2x text-gray-300"></i>
-            </div>
-        </div>
-    </div>
-</div>
-
 {{#if webhooks}}
-<div class="card mt-4 mb-4">
-    <div class="table-responsive">
-        <table class="table table-hover">
-            <thead class="">
+<div class="card bg-base-100 shadow-md mb-6">
+    <div class="overflow-x-auto">
+        <table class="table ee-table-stack">
+            <thead>
                 <tr>
-                    <th class="p-0">
-                        <div class="p-2">Name</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Description</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Triggered</div>
-                    </th>
-                    <th class="p-0">
-                        <div class="p-2">Status</div>
-                    </th>
+                    <th>Name</th>
+                    <th>Description</th>
+                    <th>Triggered</th>
+                    <th>Status</th>
+                    <th class="w-12"><span class="sr-only">Actions</span></th>
                 </tr>
             </thead>
 
             <tbody>
                 {{#each webhooks}}
-                <tr>
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/webhooks/webhook/{{id}}"
-                                class="stretched-link"></a><strong>{{name}}</strong>
-                        </div>
+                <tr class="hover:bg-base-200/60">
+                    <td class="relative">
+                        {{> ui/row-link href=(concat "/admin/webhooks/webhook/" id) label="Open webhook route"}}
+                        <div><strong>{{name}}</strong></div>
+                        {{> ui/entity-id id=id label="Webhook Route ID"}}
                     </td>
 
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/webhooks/webhook/{{id}}" class="stretched-link"></a>{{description}}
-                        </div>
+                    <td class="relative" data-label="Description">
+                        {{> ui/row-link href=(concat "/admin/webhooks/webhook/" id)}}{{description}}
                     </td>
 
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/webhooks/webhook/{{id}}" class="stretched-link"></a>{{tcount}}
-                        </div>
+                    <td class="relative" data-label="Triggered">
+                        {{> ui/row-link href=(concat "/admin/webhooks/webhook/" id)}}{{tcount}}
                     </td>
 
-                    <td class="p-0">
-                        <div class="position-relative p-2">
-                            <a href="/admin/webhooks/webhook/{{id}}" class="stretched-link"></a>
-                            {{#if enabled}}
+                    <td class="relative" data-label="Status">
+                        {{> ui/row-link href=(concat "/admin/webhooks/webhook/" id)}}
+                        {{#if enabled}}
 
-                            {{#if webhookErrorFlag.message}}
-                            <span class="badge badge-danger">Failing</span>
-                            {{else}}
-                            <span class="badge badge-success">Enabled</span>
-                            {{/if}}
-                            {{else}}
-                            <span class="badge badge-warning">Disabled</span>
-                            {{/if}}
-                        </div>
+                        {{#if webhookErrorFlag.message}}
+                        {{> ui/badge label="Failing" variant="error" class="" icon="" soft=""}}
+                        {{else}}
+                        {{> ui/badge label="Enabled" variant="success" class="" icon="" soft=""}}
+                        {{/if}}
+                        {{else}}
+                        {{> ui/badge label="Disabled" variant="warning" class="" icon="" soft=""}}
+                        {{/if}}
+                    </td>
+
+                    <td class="ee-stack-actions relative text-end">
+                        {{> ui/row-actions openHref=(concat "/admin/webhooks/webhook/" id) label="Webhook route actions"
+                        deleteModal="#deleteWebhook" deleteId=id deleteName=name}}
                     </td>
                 </tr>
                 {{/each}}
@@ -101,44 +66,23 @@
         </table>
     </div>
 
-    {{#if showPaging}}
-    <div class="card-footer">
-
-        <nav aria-label="Page navigation">
-            <ul class="pagination" style="flex-wrap: wrap;">
-
-                {{#if prevPage}}
-                <li class="page-item"><a class="page-link" href="{{prevPage}}">Previous</a></li>
-                {{else}}
-                <li class="page-item disabled"><a class="page-link" href="#">Previous</a></li>
-                {{/if}}
-
-                {{#each pageLinks}}
-                <li class="page-item {{#if active}}active{{/if}}"><a class="page-link" href="{{url}}">{{title}}</a>
-                </li>
-                {{/each}}
-
-                {{#if nextPage}}
-                <li class="page-item"><a class="page-link" href="{{nextPage}}">Next</a></li>
-                {{else}}
-                <li class="page-item disabled"><a class="page-link" href="#">Next</a></li>
-                {{/if}}
-
-            </ul>
-        </nav>
-    </div>
-    {{/if}}
+    {{> ui/pagination showPaging=showPaging prevPage=prevPage nextPage=nextPage pageLinks=pageLinks}}
 </div>
 {{else}}
-<div class="list-group mt-4 mb-4">
-    <div class="list-group-item">
-        <p>
-            {{#if firstPage}}
-            No webhook routes have been created yet.
-            {{else}}
-            No webhook routes found.
-            {{/if}}
-        </p>
-    </div>
-</div>
+{{> ui/list-empty noun="webhook routes" query=query firstPage=firstPage createHref=newLink createLabel="Create your first webhook route" clearHref="/admin/webhooks"}}
 {{/if}}
+
+{{#> ui/details summary="How webhook routes work" class="card bg-base-100 shadow-md mb-6"}}
+<div>
+    <p class="mb-2">
+        Each enabled route evaluates events with its filter function. When the filter returns <code>true</code>,
+            EmailEngine sends the event to the route's target URL. Add a map function to change the payload format.
+            Routes run independently of the default webhook target and its event selection.
+    </p>
+    <p class="mb-0"><a href="https://learn.emailengine.app/docs/integrations/low-code" target="_blank"
+            rel="noopener noreferrer" referrerpolicy="no-referrer" class="link link-animated">Learn more about webhook
+            routes</a>.</p>
+</div>
+{{/ui/details}}
+
+{{> ui/delete-modal id="deleteWebhook" noun="webhook route" action="/admin/webhooks/delete" fieldName="webhook"}}
