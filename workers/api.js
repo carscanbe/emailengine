@@ -1068,6 +1068,17 @@ function registerStaticPageRoutes(server) {
             tags: ['static']
         }
     });
+    server.route({
+        method: 'GET',
+        path: '/.well-known/microsoft-identity-association.json',
+        handler: {
+            file: { path: pathlib.join(__dirname, '..', 'static', 'microsoft-identity-association.json'), confine: false }
+        },
+        options: {
+            auth: false,
+            tags: ['static']
+        }
+    });
 
     server.route({
         method: 'GET',
